@@ -1,14 +1,20 @@
 import { asset as assetSchema, type Asset, assets } from "@webstudio-is/sdk";
 import { assetResourceLimits } from "@webstudio-is/sdk/asset-resource-limits";
-import type { Client, Database } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  asc,
+  asset as assetTable,
+  eq,
+  file as fileTable,
+  inArray,
+  isNull,
+  project as projectTable,
+  type Database,
+  type Db,
+} from "@webstudio-is/db";
 import { mapBounded } from "@webstudio-is/content-engine/compiler";
 import { formatAsset, formatAssetForRead } from "./utils/format-asset";
-import {
-  applyValidatedMapPatches,
-  assertPostgrestSuccess,
-  diffMaps,
-  type Patch,
-} from "./patch-utils";
+import { applyValidatedMapPatches, diffMaps, type Patch } from "./patch-utils";
 import {
   AssetRevisionConflictError,
   swapAssetFileWithClient,
@@ -27,7 +33,7 @@ const getCanonicalAssetsForValidation = async ({
 }: {
   current: ReadonlyMap<Asset["id"], Asset>;
   next: ReadonlyMap<Asset["id"], Asset>;
-  client: Client;
+  client: Db;
 }) => {
   const canonical = new Map<Asset["id"], Asset>();
   const filesByName = new Map<string, FileRow>();
@@ -85,12 +91,8 @@ const getCanonicalAssetsForValidation = async ({
   return { assets: canonical, filesByName };
 };
 
-// Supabase documents that REST requests most often hit Cloudflare 520 errors
-// at 16+ KiB across the URL and headers, especially with long `in` filters:
-// https://supabase.com/docs/guides/troubleshooting/fixing-520-errors-in-the-database-rest-api-Ur5-B2
-// Persisted Asset ids are PostgreSQL UUIDs (36 characters). A batch of 100 keeps
-// the encoded `in` filter below 4 KiB, reserving at least 12 KiB for the endpoint,
-// selected fields, other filters, and headers.
+// Batch long `IN (...)` lists so each query stays small. Persisted Asset ids are
+// PostgreSQL UUIDs (36 characters); a batch of 100 keeps the list around 4 KiB.
 const maxAssetIdsPerPostgrestMetadataRequest = 100;
 
 // Metadata loading supports content reads, so cap its fan-out at half of the
@@ -100,8 +102,8 @@ const maxConcurrentAssetMetadataPostgrestRequests = Math.ceil(
   assetResourceLimits.concurrentContentReads / 2
 );
 
-// Keep encoded `in` filters around 4 KiB. File storage names can be much
-// longer than Asset ids, so a fixed item count cannot provide the same bound.
+// Keep `IN (...)` lists around 4 KiB. File storage names can be much longer
+// than Asset ids, so a fixed item count cannot provide the same bound.
 const maxPostgrestInFilterCharacters = 4 * 1024;
 
 export const chunkPostgrestFileNames = (values: Iterable<string>) => {
@@ -137,7 +139,7 @@ const loadUploadedFilesByNames = async ({
   client,
 }: {
   names: Iterable<string>;
-  client: Client;
+  client: Db;
 }) => {
   const chunks = chunkPostgrestFileNames(names);
   return (
@@ -145,13 +147,15 @@ const loadUploadedFilesByNames = async ({
       chunks,
       maxConcurrentAssetMetadataPostgrestRequests,
       async (chunk) => {
-        const files = await client
-          .from("File")
+        return await client
           .select()
-          .in("name", chunk)
-          .eq("status", "UPLOADED");
-        assertPostgrestSuccess(files);
-        return (files.data ?? []).filter((file) => file.status === "UPLOADED");
+          .from(fileTable)
+          .where(
+            and(
+              inArray(fileTable.name, chunk),
+              eq(fileTable.status, "UPLOADED")
+            )
+          );
       }
     )
   ).flat();
@@ -162,18 +166,18 @@ const restoreUploadedFilesByNames = async ({
   client,
 }: {
   names: Iterable<string>;
-  client: Client;
+  client: Db;
 }) => {
   await mapBounded(
     chunkPostgrestFileNames(names),
     maxConcurrentAssetMetadataPostgrestRequests,
     async (chunk) => {
-      const restoredFiles = await client
-        .from("File")
-        .update({ isDeleted: false })
-        .in("name", chunk)
-        .eq("status", "UPLOADED");
-      assertPostgrestSuccess(restoredFiles);
+      await client
+        .update(fileTable)
+        .set({ isDeleted: false })
+        .where(
+          and(inArray(fileTable.name, chunk), eq(fileTable.status, "UPLOADED"))
+        );
     }
   );
 };
@@ -190,40 +194,41 @@ const restoreSharedAssetFileWithClient = async (
     expectedName: string;
     replacementName: string;
   },
-  client: Client
+  client: Db
 ) => {
   // clone_project shares existing File revision rows with the source project.
   // Restore the shared target before the compare-and-set so an Asset never
   // points at a deleted file if either request fails.
-  const restoredFile = await client
-    .from("File")
-    .update({ isDeleted: false })
-    .eq("name", replacementName)
-    .eq("status", "UPLOADED")
-    .select("name")
-    .maybeSingle();
-  assertPostgrestSuccess(restoredFile);
-  if (restoredFile.data?.name !== replacementName) {
+  const [restoredFile] = await client
+    .update(fileTable)
+    .set({ isDeleted: false })
+    .where(
+      and(eq(fileTable.name, replacementName), eq(fileTable.status, "UPLOADED"))
+    )
+    .returning({ name: fileTable.name });
+  if (restoredFile?.name !== replacementName) {
     throw new AssetRepositoryNotFoundError("Asset revision is not available");
   }
 
-  const updatedAsset = await client
-    .from("Asset")
-    .update({ name: replacementName })
-    .eq("id", assetId)
-    .eq("projectId", projectId)
-    .eq("name", expectedName)
-    .select("id")
-    .maybeSingle();
-  assertPostgrestSuccess(updatedAsset);
-  if (updatedAsset.data?.id !== assetId) {
+  const [updatedAsset] = await client
+    .update(assetTable)
+    .set({ name: replacementName })
+    .where(
+      and(
+        eq(assetTable.id, assetId),
+        eq(assetTable.projectId, projectId),
+        eq(assetTable.name, expectedName)
+      )
+    )
+    .returning({ id: assetTable.id });
+  if (updatedAsset?.id !== assetId) {
     throw new AssetRevisionConflictError(
       "This file changed since it was opened. Reload it before saving again."
     );
   }
   // Retain the prior File revision here. A separate read-then-delete cleanup
   // could mark it deleted after another project or Undo restores a reference.
-  // Owned revisions use swap_asset_file's transactional cleanup instead.
+  // Owned revisions use swapAssetFileWithClient's transactional cleanup instead.
 };
 
 export const createAssetRows = (assets: Iterable<Asset>, projectId: string) =>
@@ -247,19 +252,28 @@ const uploadReservationFreshnessMs = 30 * 60 * 1000;
 
 export const loadAssetUploadReservationsByProjectWithClient = async (
   projectId: string,
-  client: Client,
+  client: Db,
   now = new Date()
 ): Promise<AssetUploadReservation[]> => {
-  const response = await client
-    .from("Asset")
-    .select(
-      "id, filename, folderId, file:File!inner(name, status, isDeleted, createdAt, updatedAt)"
-    )
-    .eq("projectId", projectId)
-    .order("id");
-  assertPostgrestSuccess(response);
+  const rows = await client
+    .select({
+      id: assetTable.id,
+      filename: assetTable.filename,
+      folderId: assetTable.folderId,
+      file: {
+        name: fileTable.name,
+        status: fileTable.status,
+        isDeleted: fileTable.isDeleted,
+        createdAt: fileTable.createdAt,
+        updatedAt: fileTable.updatedAt,
+      },
+    })
+    .from(assetTable)
+    .innerJoin(fileTable, eq(fileTable.name, assetTable.name))
+    .where(eq(assetTable.projectId, projectId))
+    .orderBy(asc(assetTable.id));
   const activeAfter = now.getTime() - uploadReservationFreshnessMs;
-  return (response.data ?? []).flatMap(({ id, filename, folderId, file }) => {
+  return rows.flatMap(({ id, filename, folderId, file }) => {
     if (
       file.status !== "UPLOADED" &&
       (file.status !== "UPLOADING" ||
@@ -287,32 +301,35 @@ export const deleteAssetUploadReservationWithClient = async (
     assetId,
     name,
   }: { projectId: string; assetId: string; name: string },
-  client: Client
+  client: Db
 ) => {
-  const deletedAsset = await client
-    .from("Asset")
-    .delete()
-    .eq("id", assetId)
-    .eq("projectId", projectId)
-    .eq("name", name)
-    .select("id")
-    .maybeSingle();
-  assertPostgrestSuccess(deletedAsset);
-  if (deletedAsset.data?.id !== assetId) {
+  const [deletedAsset] = await client
+    .delete(assetTable)
+    .where(
+      and(
+        eq(assetTable.id, assetId),
+        eq(assetTable.projectId, projectId),
+        eq(assetTable.name, name)
+      )
+    )
+    .returning({ id: assetTable.id });
+  if (deletedAsset?.id !== assetId) {
     return;
   }
-  const deletedFile = await client
-    .from("File")
-    .delete()
-    .eq("name", name)
-    .eq("uploaderProjectId", projectId)
-    .eq("status", "UPLOADING");
-  assertPostgrestSuccess(deletedFile);
+  await client
+    .delete(fileTable)
+    .where(
+      and(
+        eq(fileTable.name, name),
+        eq(fileTable.uploaderProjectId, projectId),
+        eq(fileTable.status, "UPLOADING")
+      )
+    );
 };
 
 export const loadAssetsByProjectWithClient = async (
   projectId: string,
-  client: Client,
+  client: Db,
   assetIds?: string[]
 ): Promise<Asset[]> => {
   if (assetIds?.length === 0) {
@@ -320,30 +337,30 @@ export const loadAssetsByProjectWithClient = async (
   }
 
   const load = async (requestedAssetIds: string[] | undefined) => {
-    let query = client
-      .from("Asset")
-      // use inner to filter out assets without file
-      // when file is not uploaded
-      .select(
-        `
-          assetId:id,
-          projectId,
-          filename,
-          description,
-          folderId,
-          file:File!inner (*)
-        `
+    const rows = await client
+      .select({
+        assetId: assetTable.id,
+        projectId: assetTable.projectId,
+        filename: assetTable.filename,
+        description: assetTable.description,
+        folderId: assetTable.folderId,
+        file: fileTable,
+      })
+      .from(assetTable)
+      // inner join filters out assets whose file isn't uploaded
+      .innerJoin(fileTable, eq(fileTable.name, assetTable.name))
+      .where(
+        and(
+          eq(assetTable.projectId, projectId),
+          eq(fileTable.status, "UPLOADED"),
+          requestedAssetIds === undefined
+            ? undefined
+            : inArray(assetTable.id, requestedAssetIds)
+        )
       )
-      .eq("projectId", projectId)
-      .eq("file.status", "UPLOADED");
-    if (requestedAssetIds !== undefined) {
-      query = query.in("id", requestedAssetIds);
-    }
-    const response = await query
       // always sort by primary key to get stable list
       // required to not break fixtures
-      .order("id");
-    assertPostgrestSuccess(response);
+      .orderBy(asc(assetTable.id));
 
     const result: Asset[] = [];
     const invalidFontMetadata: Array<{
@@ -358,7 +375,7 @@ export const loadAssetsByProjectWithClient = async (
       description,
       folderId,
       file,
-    } of response.data ?? []) {
+    } of rows) {
       if (file) {
         const formatted = formatAssetForRead({
           assetId,
@@ -419,56 +436,48 @@ export const deleteAssetsWithClient = async (
     ids: Array<Asset["id"]>;
     projectId: string;
   },
-  client: Client
+  client: Db
 ): Promise<void> => {
+  const projectAssets = and(
+    inArray(assetTable.id, props.ids),
+    eq(assetTable.projectId, props.projectId)
+  );
   const assets = await client
-    .from("Asset")
-    .select(
-      `
-        id,
-        projectId,
-        name,
-        file:File!inner (*)
-      `
-    )
-    .in("id", props.ids)
-    .eq("projectId", props.projectId);
-  assertPostgrestSuccess(assets);
+    .select({ id: assetTable.id, name: assetTable.name })
+    .from(assetTable)
+    .innerJoin(fileTable, eq(fileTable.name, assetTable.name))
+    .where(projectAssets);
 
-  if ((assets.data ?? []).length === 0) {
+  if (assets.length === 0) {
     throw new AssetRepositoryNotFoundError("Assets not found");
   }
 
-  const previewUpdate = await client
-    .from("Project")
-    .update({ previewImageAssetId: null })
-    .eq("id", props.projectId)
-    .in("previewImageAssetId", props.ids);
-  assertPostgrestSuccess(previewUpdate);
+  await client
+    .update(projectTable)
+    .set({ previewImageAssetId: null })
+    .where(
+      and(
+        eq(projectTable.id, props.projectId),
+        inArray(projectTable.previewImageAssetId, props.ids)
+      )
+    );
 
-  const deletedAssets = await client
-    .from("Asset")
-    .delete()
-    .in("id", props.ids)
-    .eq("projectId", props.projectId);
-  assertPostgrestSuccess(deletedAssets);
+  await client.delete(assetTable).where(projectAssets);
 
-  const unusedFileNames = new Set(assets.data?.map((asset) => asset.name));
+  const unusedFileNames = new Set(assets.map((asset) => asset.name));
   const assetsByStillUsedFileName = await client
-    .from("Asset")
-    .select("name")
-    .in("name", Array.from(unusedFileNames));
-  assertPostgrestSuccess(assetsByStillUsedFileName);
-  for (const asset of assetsByStillUsedFileName.data ?? []) {
+    .select({ name: assetTable.name })
+    .from(assetTable)
+    .where(inArray(assetTable.name, Array.from(unusedFileNames)));
+  for (const asset of assetsByStillUsedFileName) {
     unusedFileNames.delete(asset.name);
   }
 
   if (unusedFileNames.size > 0) {
-    const deletedFiles = await client
-      .from("File")
-      .update({ isDeleted: true })
-      .in("name", Array.from(unusedFileNames));
-    assertPostgrestSuccess(deletedFiles);
+    await client
+      .update(fileTable)
+      .set({ isDeleted: true })
+      .where(inArray(fileTable.name, Array.from(unusedFileNames)));
   }
 };
 
@@ -482,7 +491,7 @@ export const updateAssetMetadataWithClient = async (
     assetId: Asset["id"];
     values: AssetMetadataUpdate;
   },
-  client: Client
+  client: Db
 ): Promise<Asset> => {
   await persistAssetMetadataWithClient({ projectId, assetId, values }, client);
 
@@ -507,22 +516,22 @@ export const updateAssetFilenameIfCurrentWithClient = async (
     expectedFilename: string | undefined;
     filename: string | undefined;
   },
-  client: Client
+  client: Db
 ): Promise<Asset | undefined> => {
-  const query = client
-    .from("Asset")
-    .update({ filename: filename ?? null })
-    .eq("id", assetId)
-    .eq("projectId", projectId);
-  const result = await (
-    expectedFilename === undefined
-      ? query.is("filename", null)
-      : query.eq("filename", expectedFilename)
-  )
-    .select("id")
-    .maybeSingle();
-  assertPostgrestSuccess(result);
-  if (result.data?.id !== assetId) {
+  const [result] = await client
+    .update(assetTable)
+    .set({ filename: filename ?? null })
+    .where(
+      and(
+        eq(assetTable.id, assetId),
+        eq(assetTable.projectId, projectId),
+        expectedFilename === undefined
+          ? isNull(assetTable.filename)
+          : eq(assetTable.filename, expectedFilename)
+      )
+    )
+    .returning({ id: assetTable.id });
+  if (result?.id !== assetId) {
     return;
   }
   const [asset] = await loadAssetsByProjectWithClient(projectId, client, [
@@ -544,7 +553,7 @@ const persistAssetMetadataWithClient = async (
     assetId: Asset["id"];
     values: AssetMetadataUpdate;
   },
-  client: Client
+  client: Db
 ) => {
   const update: {
     filename?: string | null;
@@ -560,15 +569,23 @@ const persistAssetMetadataWithClient = async (
   if (Object.hasOwn(values, "folderId")) {
     update.folderId = values.folderId ?? null;
   }
-  const result = await client
-    .from("Asset")
-    .update(update)
-    .eq("id", assetId)
-    .eq("projectId", projectId)
-    .select("id")
-    .maybeSingle();
-  assertPostgrestSuccess(result);
-  if (result.data?.id !== assetId) {
+  const filter = and(
+    eq(assetTable.id, assetId),
+    eq(assetTable.projectId, projectId)
+  );
+  // An empty update still has to confirm the asset exists.
+  const [result] =
+    Object.keys(update).length === 0
+      ? await client
+          .select({ id: assetTable.id })
+          .from(assetTable)
+          .where(filter)
+      : await client
+          .update(assetTable)
+          .set(update)
+          .where(filter)
+          .returning({ id: assetTable.id });
+  if (result?.id !== assetId) {
     throw new AssetRepositoryNotFoundError("Asset not found");
   }
 };
@@ -582,7 +599,7 @@ export const patchAssetsWithClient = async (
     client,
   }: {
     projectId: string;
-    client: Client;
+    client: Db;
   },
   patches: Array<Patch>,
   {
@@ -754,14 +771,12 @@ export const patchAssetsWithClient = async (
       serializeAssetMeta(previous.meta) !== serializeAssetMeta(asset.meta)
     ) {
       const meta = serializeAssetMeta(asset.meta);
-      const updatedFile = await client
-        .from("File")
-        .update({ meta })
-        .eq("name", asset.name)
-        .select("meta")
-        .single();
-      assertPostgrestSuccess(updatedFile);
-      if (updatedFile.data?.meta !== meta) {
+      const [updatedFile] = await client
+        .update(fileTable)
+        .set({ meta })
+        .where(eq(fileTable.name, asset.name))
+        .returning({ meta: fileTable.meta });
+      if (updatedFile?.meta !== meta) {
         throw new Error(
           `Asset metadata update was not persisted for ${asset.id}`
         );
@@ -787,9 +802,8 @@ export const patchAssetsWithClient = async (
     // restore file when undo is triggered
     await restoreUploadedFilesByNames({ names: fileNames, client });
 
-    const insertedAssets = await client
-      .from("Asset")
-      .insert(createAssetRows(addedAssets, projectId));
-    assertPostgrestSuccess(insertedAssets);
+    await client
+      .insert(assetTable)
+      .values(createAssetRows(addedAssets, projectId));
   }
 };

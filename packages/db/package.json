@@ -1,0 +1,41 @@
+{
+  "name": "@webstudio-is/db",
+  "version": "0.0.0",
+  "description": "Webstudio database: Drizzle schema, migrations and client",
+  "author": "Webstudio <github@webstudio.is>",
+  "homepage": "https://webstudio.is",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "generate": "drizzle-kit generate",
+    "migrate": "drizzle-kit migrate",
+    "studio": "drizzle-kit studio",
+    "check-schema": "tsx ./scripts/check-schema.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.0",
+    "@types/pg": "^8.20.0",
+    "@webstudio-is/tsconfig": "workspace:*",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.19.2",
+    "vitest": "^3.1.2"
+  },
+  "exports": {
+    ".": {
+      "webstudio": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./testing": {
+      "webstudio": "./src/testing.ts",
+      "import": "./src/testing.ts"
+    }
+  },
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "sideEffects": false
+}

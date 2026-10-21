@@ -1,10 +1,5 @@
 import { describe, expect, test } from "vitest";
-import {
-  createTestServer,
-  db,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import {
   createCallerFactory,
   type AppContext,
@@ -12,14 +7,14 @@ import {
 import { defaultPlanFeatures } from "@webstudio-is/plans";
 import { projectRouter } from "./project-router";
 
-const server = createTestServer();
+const db = setupTestDb();
 const createCaller = createCallerFactory(projectRouter);
 
 const createContext = (
   overrides: Partial<Pick<AppContext, "authorization" | "planFeatures">> = {}
 ): AppContext =>
   ({
-    ...testContext,
+    db,
     authorization: { type: "user", userId: "member-1" },
     planFeatures: defaultPlanFeatures,
     getOwnerPlanFeatures: () =>
@@ -32,56 +27,61 @@ const createContext = (
     ...overrides,
   }) as unknown as AppContext;
 
+/** `count` publishes made today to projects owned by `userId`. */
+const seedPublishes = async (userId: string, count: number) => {
+  const projectId = `published-by-${userId}`;
+  await seed.project(db, { id: projectId, userId });
+  for (let index = 0; index < count; index += 1) {
+    await seed.build(db, {
+      id: `${projectId}-${index}`,
+      projectId,
+      deployment: JSON.stringify({ domains: ["example.com"] }),
+    });
+  }
+};
+
+/** proj-1, owned by owner-1, in a workspace where member-1 is an editor. */
+const seedSharedProject = async () => {
+  const workspaceId = crypto.randomUUID();
+  await seed.workspace(db, { id: workspaceId, userId: "owner-1" });
+  await seed.project(db, { id: "proj-1", userId: "owner-1", workspaceId });
+  await seed.workspaceMember(db, {
+    workspaceId,
+    userId: "member-1",
+    relation: "editors",
+  });
+};
+
 describe("userPublishCount", () => {
   test("counts publishes for the project owner when called by a workspace member", async () => {
-    server.use(
-      db.get("Project", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("userId")) {
-          return json(null);
-        }
-        return json({ userId: "owner-1" });
-      }),
-      db.get("WorkspaceProjectAuthorization", () =>
-        json([{ relation: "editors" }])
-      ),
-      db.get("Product", () => json([])),
-      db.get("user_publish_count", ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.get("user_id")).toBe("eq.owner-1");
-        return json({ count: 42 });
-      })
-    );
+    await seedSharedProject();
+    await seedPublishes("owner-1", 3);
+    await seedPublishes("member-1", 1);
 
     const caller = createCaller(createContext());
     const result = await caller.userPublishCount({ projectId: "proj-1" });
 
-    expect(result).toEqual({ success: true, data: 42, limit: 500 });
+    expect(result).toEqual({ success: true, data: 3, limit: 500 });
   });
 
   test("counts publishes for the caller when projectId is omitted", async () => {
-    server.use(
-      db.get("user_publish_count", ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.get("user_id")).toBe("eq.member-1");
-        return json({ count: 7 });
-      })
-    );
+    await seedPublishes("member-1", 2);
 
     const caller = createCaller(createContext());
     const result = await caller.userPublishCount();
 
-    expect(result).toEqual({ success: true, data: 7 });
+    expect(result).toEqual({ success: true, data: 2 });
+  });
+
+  test("counts zero for a caller who hasn't published today", async () => {
+    const caller = createCaller(createContext());
+    const result = await caller.userPublishCount();
+
+    expect(result).toEqual({ success: true, data: 0 });
   });
 
   test("uses token owner when projectId is omitted for token auth", async () => {
-    server.use(
-      db.get("user_publish_count", ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.get("user_id")).toBe("eq.token-owner");
-        return json({ count: 9 });
-      })
-    );
+    await seedPublishes("token-owner", 4);
 
     const caller = createCaller(
       createContext({
@@ -94,20 +94,11 @@ describe("userPublishCount", () => {
     );
     const result = await caller.userPublishCount();
 
-    expect(result).toEqual({ success: true, data: 9 });
+    expect(result).toEqual({ success: true, data: 4 });
   });
 
   test("does not count publishes when caller cannot view the project", async () => {
-    let publishCountQueried = false;
-
-    server.use(
-      db.get("Project", () => json(null)),
-      db.get("WorkspaceProjectAuthorization", () => json([])),
-      db.get("user_publish_count", () => {
-        publishCountQueried = true;
-        return json({ count: 0 });
-      })
-    );
+    await seed.project(db, { id: "private", userId: "owner-1" });
 
     const caller = createCaller(createContext());
     const result = await caller.userPublishCount({ projectId: "private" });
@@ -116,6 +107,5 @@ describe("userPublishCount", () => {
     if ("error" in result) {
       expect(result.error).toContain("Not authorized");
     }
-    expect(publishCountQueried).toBe(false);
   });
 });

@@ -7,6 +7,7 @@ import {
   getPlanFeaturesByOwnerId,
 } from "@webstudio-is/trpc-interface/index.server";
 import { roles } from "@webstudio-is/trpc-interface/authorize";
+import { and, eq, maybeOne, workspace } from "@webstudio-is/db";
 
 const name = z.string().min(2).max(100);
 const relation = z.enum(roles);
@@ -154,23 +155,24 @@ export const workspaceRouter = router({
       try {
         // Check the target workspace owner's plan, not the caller's —
         // workspace admins shouldn't be blocked by their own plan.
-        const targetWorkspace = await ctx.postgrest.client
-          .from("Workspace")
-          .select("userId")
-          .eq("id", input.targetWorkspaceId)
-          .eq("isDeleted", false)
-          .maybeSingle();
+        const targetWorkspace = maybeOne(
+          await ctx.db
+            .select({ userId: workspace.userId })
+            .from(workspace)
+            .where(
+              and(
+                eq(workspace.id, input.targetWorkspaceId),
+                eq(workspace.isDeleted, false)
+              )
+            )
+        );
 
-        if (targetWorkspace.error) {
-          throw targetWorkspace.error;
-        }
-
-        if (targetWorkspace.data === null) {
+        if (targetWorkspace === null) {
           throw new Error("Target workspace not found");
         }
 
         const ownerPlan = await getPlanFeaturesByOwnerId(
-          targetWorkspace.data.userId,
+          targetWorkspace.userId,
           ctx
         );
 

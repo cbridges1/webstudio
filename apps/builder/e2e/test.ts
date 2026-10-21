@@ -4,38 +4,24 @@ import {
   type Browser,
   type BrowserContextOptions,
 } from "@playwright/test";
-import env from "../app/env/env.server";
-
 const builderPort = process.env.PORT ?? "3000";
 
 export const builderUrl =
-  process.env.E2E_BUILDER_URL ?? `https://127.0.0.1:${builderPort}`;
+  process.env.E2E_BUILDER_URL ?? `http://localhost:${builderPort}`;
 
 const builderUrlObject = new URL(builderUrl);
 
-export const dashboardUrl = `${builderUrlObject.protocol}//wstd.dev:${builderUrlObject.port}`;
-
-export const postgrestUrl = env.POSTGREST_URL;
+export const dashboardUrl = `${builderUrlObject.protocol}//localhost:${builderUrlObject.port}`;
 
 export const browserContextOptions: BrowserContextOptions = {
-  ignoreHTTPSErrors: true,
   permissions: ["clipboard-read", "clipboard-write"],
 };
 
-const isLoopbackHost = (hostname: string) =>
-  hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
-
-export const getBrowserLaunchOptions = (url = builderUrl) => {
-  const hostname = new URL(url).hostname;
-  if (isLoopbackHost(hostname) === false) {
-    return {};
-  }
-  return {
-    args: [
-      "--host-resolver-rules=MAP wstd.dev 127.0.0.1,MAP *.wstd.dev 127.0.0.1",
-    ],
-  };
-};
+/**
+ * Chromium resolves `localhost` and `*.localhost` (the project builder hosts) to
+ * loopback by itself, so no runs need host mapping.
+ */
+export const getBrowserLaunchOptions = (_url = builderUrl) => ({});
 
 export const newBrowserContext = (browser: Browser) =>
   browser.newContext(browserContextOptions);
@@ -76,7 +62,7 @@ export const getProjectBuilderUrl = ({
   features?: string[];
 }) => {
   const url = new URL(dashboardUrl);
-  url.hostname = `p-${projectId}.wstd.dev`;
+  url.hostname = `p-${projectId}.localhost`;
   if (authToken !== undefined) {
     url.searchParams.set("authToken", authToken);
   }

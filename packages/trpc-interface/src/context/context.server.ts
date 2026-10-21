@@ -1,5 +1,5 @@
 import type { TrpcInterfaceClient } from "../shared/shared-router";
-import type { Client } from "@webstudio-is/postgrest/index.server";
+import type { Db } from "@webstudio-is/db";
 import type { PlanFeatures, Purchase } from "@webstudio-is/plans";
 import type { ApiClient } from "../api-compatibility";
 
@@ -71,10 +71,6 @@ type TrpcCache = {
   getMaxAge: (path: string) => number | undefined;
 };
 
-type PostgrestContext = {
-  client: Client;
-};
-
 type ApiClientContext =
   | {
       type: ApiClient;
@@ -101,7 +97,7 @@ export type AppContext = {
   purchases: Array<Purchase>;
   apiClient: ApiClientContext;
   trpcCache: TrpcCache;
-  postgrest: PostgrestContext;
+  db: Db;
   createTokenContext: (token: string) => Promise<AppContext>;
   /**
    * Resolves plan features for a given user ID.

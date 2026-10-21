@@ -9,7 +9,28 @@ import { createBuild } from "@webstudio-is/project-build/server";
 import { projectTitle } from "../shared/project-schema";
 import type { MarketplaceApprovalStatus } from "../shared/marketplace-schema";
 import { generateDomain, validateProjectDomain } from "./project-domain";
-import type { SetNonNullable } from "type-fest";
+import {
+  and,
+  asc,
+  assetFolder,
+  asset,
+  build,
+  eq,
+  file,
+  isNotNull,
+  isNull,
+  latestStaticBuildPerProject,
+  loadDomainsVirtual,
+  loadLatestBuildVirtual,
+  loadPreviewImageAssets,
+  maybeOne,
+  one,
+  project as projectTable,
+  sql,
+  workspace,
+  workspaceMember,
+  isUniqueViolation,
+} from "@webstudio-is/db";
 
 export const findProjectIdsByUserId = async (
   userId: string,
@@ -27,18 +48,13 @@ export const findProjectIdsByUserId = async (
     );
   }
 
-  const result = await context.postgrest.client
-    .from("Project")
-    .select("id")
-    .eq("userId", userId)
-    .eq("isDeleted", false)
-    .order("id");
-
-  if (result.error) {
-    throw result.error;
-  }
-
-  return result.data;
+  return await context.db
+    .select({ id: projectTable.id })
+    .from(projectTable)
+    .where(
+      and(eq(projectTable.userId, userId), eq(projectTable.isDeleted, false))
+    )
+    .orderBy(asc(projectTable.id));
 };
 
 export type Project = Awaited<ReturnType<typeof loadById>>;
@@ -53,33 +69,37 @@ export const loadById = async (projectId: string, context: AppContext) => {
     throw new AuthorizationError("You don't have access to this project");
   }
 
-  const data = await context.postgrest.client
-    .from("Project")
-    .select(
-      `
-        *,
-        previewImageAsset:Asset (*),
-        latestBuildVirtual(*),
-        latestStaticBuild:LatestStaticBuildPerProject (*),
-        domainsVirtual(*, latestBuildVirtual(*))
-      `
-    )
-    .eq("id", projectId)
-    .eq("isDeleted", false)
-    .single();
-
-  if (data.error) {
-    throw data.error;
-  }
-  const { latestStaticBuild, ...project } = data.data;
+  const row = one(
+    await context.db
+      .select()
+      .from(projectTable)
+      .where(
+        and(eq(projectTable.id, projectId), eq(projectTable.isDeleted, false))
+      ),
+    "Project"
+  );
+  const [previewImageAssets, latestBuilds, latestStaticBuilds, domains] =
+    await Promise.all([
+      loadPreviewImageAssets(context.db, [row]),
+      loadLatestBuildVirtual(context.db, [row.id]),
+      context.db
+        .select()
+        .from(latestStaticBuildPerProject)
+        .where(eq(latestStaticBuildPerProject.projectId, row.id)),
+      loadDomainsVirtual(context.db, [row.id]),
+    ]);
+  const { publishedUrl, ...project } = row;
 
   return {
     ...project,
-    // postgres marks all view fields as nullable
-    // workaround this by casting to non nullable
-    latestStaticBuild: (latestStaticBuild[0] ?? null) as null | SetNonNullable<
-      NonNullable<(typeof latestStaticBuild)[0]>
-    >,
+    // selfhost: optional so fixtures without it still typecheck
+    ...(publishedUrl === null ? {} : { publishedUrl }),
+    previewImageAsset: previewImageAssets.get(row.id) ?? null,
+    latestBuildVirtual: latestBuilds.get(row.id) ?? null,
+    latestStaticBuild: (latestStaticBuilds[0] ?? null) as
+      | (typeof latestStaticBuilds)[number]
+      | null,
+    domainsVirtual: domains.get(row.id) ?? [],
   };
 };
 
@@ -107,39 +127,32 @@ export const create = async (
   let projectOwnerUserId = userId;
 
   if (workspaceId !== undefined) {
-    const workspace = await context.postgrest.client
-      .from("Workspace")
-      .select("userId")
-      .eq("id", workspaceId)
-      .eq("isDeleted", false)
-      .single();
-
-    if (workspace.error) {
-      throw workspace.error;
-    }
+    const workspaceRow = one(
+      await context.db
+        .select({ userId: workspace.userId })
+        .from(workspace)
+        .where(
+          and(eq(workspace.id, workspaceId), eq(workspace.isDeleted, false))
+        ),
+      "Workspace"
+    );
 
     // Verify the caller is the workspace owner or a member
-    if (workspace.data.userId !== userId) {
-      const membership = await context.postgrest.client
-        .from("WorkspaceMember")
-        .select("userId, relation")
-        .eq("workspaceId", workspaceId)
-        .eq("userId", userId)
-        .is("removedAt", null)
-        .maybeSingle();
+    if (workspaceRow.userId !== userId) {
+      const membership = await findActiveMembership(
+        workspaceId,
+        userId,
+        context
+      );
 
-      if (membership.error) {
-        throw membership.error;
-      }
-
-      if (membership.data === null) {
+      if (membership === null) {
         throw new AuthorizationError("You don't have access to this workspace");
       }
 
       // Only builders and administrators can create projects
       const canCreate =
-        membership.data.relation === "builders" ||
-        membership.data.relation === "administrators";
+        membership.relation === "builders" ||
+        membership.relation === "administrators";
       if (canCreate === false) {
         throw new AuthorizationError(
           "You don't have permission to create projects in this workspace"
@@ -147,22 +160,20 @@ export const create = async (
       }
     }
 
-    projectOwnerUserId = workspace.data.userId;
+    projectOwnerUserId = workspaceRow.userId;
   }
 
   // Enforce the per-user project limit before creating anything
   const ownerPlan = await getPlanFeaturesByOwnerId(projectOwnerUserId, context);
-  const projectCountResult = await context.postgrest.client
-    .from("Project")
-    .select("id", { count: "exact", head: true })
-    .eq("userId", projectOwnerUserId)
-    .eq("isDeleted", false);
+  const projectCount = await context.db.$count(
+    projectTable,
+    and(
+      eq(projectTable.userId, projectOwnerUserId),
+      eq(projectTable.isDeleted, false)
+    )
+  );
 
-  if (projectCountResult.error) {
-    throw projectCountResult.error;
-  }
-
-  if ((projectCountResult.count ?? 0) >= ownerPlan.maxProjectsAllowedPerUser) {
+  if (projectCount >= ownerPlan.maxProjectsAllowedPerUser) {
     throw new Error(
       "You've reached the project limit for your plan. Upgrade or delete a project to create a new one."
     );
@@ -172,27 +183,22 @@ export const create = async (
   // and set user only after build is successfully created
   // this way to make project creation transactional
   // for user
-  const newProject = await context.postgrest.client.from("Project").insert({
+  await context.db.insert(projectTable).values({
     id: projectId,
     title,
     domain: generateDomain(title),
   });
-  if (newProject.error) {
-    throw newProject.error;
-  }
 
   await createBuild({ projectId }, context);
 
-  const updatedProject = await context.postgrest.client
-    .from("Project")
-    .update({ userId: projectOwnerUserId, workspaceId: workspaceId ?? null })
-    .eq("id", projectId)
-    .select("*")
-    .single();
-  if (updatedProject.error) {
-    throw updatedProject.error;
-  }
-  return updatedProject.data;
+  return one(
+    await context.db
+      .update(projectTable)
+      .set({ userId: projectOwnerUserId, workspaceId: workspaceId ?? null })
+      .where(eq(projectTable.id, projectId))
+      .returning(),
+    "Project"
+  );
 };
 
 export const markAsDeleted = async (
@@ -220,18 +226,14 @@ export const softDeleteProject = async (
   projectId: string,
   context: AppContext
 ) => {
-  const result = await context.postgrest.client
-    .from("Project")
-    .update({
+  await context.db
+    .update(projectTable)
+    .set({
       isDeleted: true,
       // Free the subdomain — each project needs a unique value
       domain: createId("nano"),
     })
-    .eq("id", projectId);
-
-  if (result.error) {
-    throw result.error;
-  }
+    .where(eq(projectTable.id, projectId));
 };
 
 const assertEditPermission = async (projectId: string, context: AppContext) => {
@@ -261,13 +263,10 @@ export const rename = async (
 
   await assertEditPermission(projectId, context);
 
-  const renamedProject = await context.postgrest.client
-    .from("Project")
-    .update({ title })
-    .eq("id", projectId);
-  if (renamedProject.error) {
-    throw renamedProject.error;
-  }
+  await context.db
+    .update(projectTable)
+    .set({ title })
+    .where(eq(projectTable.id, projectId));
 };
 
 export const updatePreviewImage = async (
@@ -282,13 +281,10 @@ export const updatePreviewImage = async (
 ) => {
   await assertEditPermission(projectId, context);
 
-  const updatedProject = await context.postgrest.client
-    .from("Project")
-    .update({ previewImageAssetId: assetId })
-    .eq("id", projectId);
-  if (updatedProject.error) {
-    throw updatedProject.error;
-  }
+  await context.db
+    .update(projectTable)
+    .set({ previewImageAssetId: assetId })
+    .where(eq(projectTable.id, projectId));
 };
 
 export const clone = async (
@@ -324,42 +320,37 @@ export const clone = async (
     | { workspaceId: string; projectOwnerUserId: string };
 
   if (project.workspaceId !== null) {
-    const workspace = await destinationContext.postgrest.client
-      .from("Workspace")
-      .select("userId")
-      .eq("id", project.workspaceId)
-      .eq("isDeleted", false)
-      .maybeSingle();
+    const workspaceRow = maybeOne(
+      await destinationContext.db
+        .select({ userId: workspace.userId })
+        .from(workspace)
+        .where(
+          and(
+            eq(workspace.id, project.workspaceId),
+            eq(workspace.isDeleted, false)
+          )
+        )
+    );
 
-    if (workspace.error) {
-      throw workspace.error;
-    }
-
-    if (workspace.data !== null) {
-      const isOwner = workspace.data.userId === userId;
+    if (workspaceRow !== null) {
+      const isOwner = workspaceRow.userId === userId;
 
       if (isOwner) {
         workspaceCloneTarget = {
           workspaceId: project.workspaceId,
-          projectOwnerUserId: workspace.data.userId,
+          projectOwnerUserId: workspaceRow.userId,
         };
       } else {
-        const membership = await destinationContext.postgrest.client
-          .from("WorkspaceMember")
-          .select("userId, relation")
-          .eq("workspaceId", project.workspaceId)
-          .eq("userId", userId)
-          .is("removedAt", null)
-          .maybeSingle();
+        const membership = await findActiveMembership(
+          project.workspaceId,
+          userId,
+          destinationContext
+        );
 
-        if (membership.error) {
-          throw membership.error;
-        }
-
-        if (membership.data !== null) {
+        if (membership !== null) {
           const canClone =
-            membership.data.relation === "builders" ||
-            membership.data.relation === "administrators";
+            membership.relation === "builders" ||
+            membership.relation === "administrators";
 
           if (canClone === false) {
             throw new AuthorizationError(
@@ -371,7 +362,7 @@ export const clone = async (
           // (consistent with project creation)
           workspaceCloneTarget = {
             workspaceId: project.workspaceId,
-            projectOwnerUserId: workspace.data.userId,
+            projectOwnerUserId: workspaceRow.userId,
           };
         }
         // Non-members (e.g. token-based clone): clone stays in personal space
@@ -379,35 +370,24 @@ export const clone = async (
     }
   }
 
-  const clonedProject = await destinationContext.postgrest.client.rpc(
-    "clone_project",
-    {
-      project_id: projectId,
-      user_id: userId,
-      title: title ?? `${project.title} (copy)`,
-      domain: generateDomain(project.title),
-    }
-  );
-
-  if (clonedProject.error) {
-    throw clonedProject.error;
-  }
+  const clonedProject = await cloneProjectRows(destinationContext, {
+    projectId,
+    userId,
+    title: title ?? `${project.title} (copy)`,
+    domain: generateDomain(project.title),
+  });
 
   if (workspaceCloneTarget !== undefined) {
-    const assignResult = await destinationContext.postgrest.client
-      .from("Project")
-      .update({
+    await destinationContext.db
+      .update(projectTable)
+      .set({
         workspaceId: workspaceCloneTarget.workspaceId,
         userId: workspaceCloneTarget.projectOwnerUserId,
       })
-      .eq("id", clonedProject.data.id);
-
-    if (assignResult.error) {
-      throw assignResult.error;
-    }
+      .where(eq(projectTable.id, clonedProject.id));
   }
 
-  return { id: clonedProject.data.id };
+  return { id: clonedProject.id };
 };
 
 export const updateDomain = async (
@@ -429,28 +409,21 @@ export const updateDomain = async (
 
   // Check if the current wstd domain is published - forbid renaming while published
   // Get current domain first
-  const currentProject = await context.postgrest.client
-    .from("Project")
-    .select("domain")
-    .eq("id", input.id)
-    .single();
-
-  if (currentProject.error) {
-    throw currentProject.error;
-  }
+  const currentProject = one(
+    await context.db
+      .select({ domain: projectTable.domain })
+      .from(projectTable)
+      .where(eq(projectTable.id, input.id)),
+    "Project"
+  );
 
   // Check if any build has this domain in deployment.domains
-  const buildsWithDomain = await context.postgrest.client
-    .from("Build")
-    .select("id, deployment")
-    .eq("projectId", input.id)
-    .not("deployment", "is", null);
+  const buildsWithDomain = await context.db
+    .select({ id: build.id, deployment: build.deployment })
+    .from(build)
+    .where(and(eq(build.projectId, input.id), isNotNull(build.deployment)));
 
-  if (buildsWithDomain.error) {
-    throw buildsWithDomain.error;
-  }
-
-  const isDomainPublished = buildsWithDomain.data.some((build) => {
+  const isDomainPublished = buildsWithDomain.some((build) => {
     const deployment = build.deployment as {
       destination?: string;
       domains?: string[];
@@ -461,7 +434,7 @@ export const updateDomain = async (
     if (deployment.destination === "static") {
       return false;
     }
-    return deployment.domains?.includes(currentProject.data.domain) ?? false;
+    return deployment.domains?.includes(currentProject.domain) ?? false;
   });
 
   if (isDomainPublished) {
@@ -470,15 +443,16 @@ export const updateDomain = async (
     );
   }
 
-  const updatedProject = await context.postgrest.client
-    .from("Project")
-    .update({ domain })
-    .eq("id", input.id);
-  if (updatedProject.error) {
-    if (updatedProject.error.code === "23505") {
+  try {
+    await context.db
+      .update(projectTable)
+      .set({ domain })
+      .where(eq(projectTable.id, input.id));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
       throw new Error(`Domain "${domain}" is already used`);
     }
-    throw updatedProject.error;
+    throw error;
   }
 };
 
@@ -500,16 +474,14 @@ export const setMarketplaceApprovalStatus = async (
   }
   await assertEditPermission(projectId, context);
 
-  const updatedProject = await context.postgrest.client
-    .from("Project")
-    .update({ marketplaceApprovalStatus })
-    .eq("id", projectId)
-    .select()
-    .single();
-  if (updatedProject.error) {
-    throw updatedProject.error;
-  }
-  return updatedProject.data;
+  return one(
+    await context.db
+      .update(projectTable)
+      .set({ marketplaceApprovalStatus })
+      .where(eq(projectTable.id, projectId))
+      .returning(),
+    "Project"
+  );
 };
 
 export const updateProjectTags = async (
@@ -517,14 +489,134 @@ export const updateProjectTags = async (
   context: AppContext
 ) => {
   await assertEditPermission(projectId, context);
-  const updatedProject = await context.postgrest.client
-    .from("Project")
-    .update({ tags })
-    .eq("id", projectId)
-    .select()
-    .single();
-  if (updatedProject.error) {
-    throw updatedProject.error;
-  }
-  return updatedProject.data;
+  return one(
+    await context.db
+      .update(projectTable)
+      .set({ tags })
+      .where(eq(projectTable.id, projectId))
+      .returning(),
+    "Project"
+  );
 };
+
+const findActiveMembership = async (
+  workspaceId: string,
+  userId: string,
+  context: AppContext
+) =>
+  maybeOne(
+    await context.db
+      .select({
+        userId: workspaceMember.userId,
+        relation: workspaceMember.relation,
+      })
+      .from(workspaceMember)
+      .where(
+        and(
+          eq(workspaceMember.workspaceId, workspaceId),
+          eq(workspaceMember.userId, userId),
+          isNull(workspaceMember.removedAt)
+        )
+      )
+  );
+
+/**
+ * Copies a project into a new one owned by `userId`: its asset folders, the assets
+ * whose files finished uploading (sharing the same File rows), the preview image and
+ * the development build. All or nothing.
+ */
+const cloneProjectRows = async (
+  context: AppContext,
+  input: { projectId: string; userId: string; title: string; domain: string }
+) =>
+  await context.db.transaction(async (tx) => {
+    const source = one(
+      await tx
+        .select({ previewImageAssetId: projectTable.previewImageAssetId })
+        .from(projectTable)
+        .where(eq(projectTable.id, input.projectId)),
+      "Project"
+    );
+
+    const clone = one(
+      await tx
+        .insert(projectTable)
+        .values({
+          id: sql`gen_random_uuid()::text`,
+          userId: input.userId,
+          title: input.title,
+          domain: input.domain,
+        })
+        .returning()
+    );
+
+    await tx.insert(assetFolder).select(
+      tx
+        .select({
+          id: assetFolder.id,
+          projectId: sql<string>`${clone.id}`.as("projectId"),
+          name: assetFolder.name,
+          parentId: assetFolder.parentId,
+          createdAt: assetFolder.createdAt,
+        })
+        .from(assetFolder)
+        .where(eq(assetFolder.projectId, input.projectId))
+    );
+
+    await tx.insert(asset).select(
+      tx
+        .select({
+          id: asset.id,
+          projectId: sql<string>`${clone.id}`.as("projectId"),
+          name: asset.name,
+          description: asset.description,
+          filename: asset.filename,
+          folderId: asset.folderId,
+        })
+        .from(asset)
+        .innerJoin(file, eq(file.name, asset.name))
+        .where(
+          and(eq(asset.projectId, input.projectId), eq(file.status, "UPLOADED"))
+        )
+    );
+
+    const [cloned] = await tx
+      .update(projectTable)
+      .set({ previewImageAssetId: source.previewImageAssetId })
+      .where(eq(projectTable.id, clone.id))
+      .returning();
+
+    await tx.insert(build).select(
+      tx
+        .select({
+          id: sql<string>`gen_random_uuid()::text`.as("id"),
+          createdAt: sql<string>`CURRENT_TIMESTAMP`.as("createdAt"),
+          pages: build.pages,
+          projectId: sql<string>`${clone.id}`.as("projectId"),
+          styleSources: build.styleSources,
+          styles: build.styles,
+          breakpoints: build.breakpoints,
+          styleSourceSelections: build.styleSourceSelections,
+          props: build.props,
+          instances: build.instances,
+          updatedAt: sql<string>`CURRENT_TIMESTAMP`.as("updatedAt"),
+          version: sql<number>`0`.as("version"),
+          deployment: sql<null>`NULL`.as("deployment"),
+          publishStatus: sql<"PENDING">`'PENDING'::"PublishStatus"`.as(
+            "publishStatus"
+          ),
+          dataSources: build.dataSources,
+          lastTransactionId: sql<null>`NULL`.as("lastTransactionId"),
+          resources: build.resources,
+          marketplaceProduct: build.marketplaceProduct,
+          isCleaned: sql<boolean>`false`.as("isCleaned"),
+          projectSettings: build.projectSettings,
+        })
+        .from(build)
+        .where(
+          and(eq(build.projectId, input.projectId), isNull(build.deployment))
+        )
+    );
+
+    return cloned;
+  });

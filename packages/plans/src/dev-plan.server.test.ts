@@ -1,84 +1,53 @@
 import { describe, test, expect } from "vitest";
-import {
-  createTestServer,
-  db,
-  testContext,
-  json,
-  empty,
-} from "@webstudio-is/postgrest/testing";
+import { eq, product, transactionLog, userProduct } from "@webstudio-is/db";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import { applyDevPlan } from "./dev-plan.server";
 
-const server = createTestServer();
+const db = setupTestDb();
+const context = { db };
 
 // ─── applyDevPlan ─────────────────────────────────────────────
 
-describe("applyDevPlan (msw)", () => {
+describe("applyDevPlan", () => {
   test("does nothing when user is not found", async () => {
-    server.use(
-      db.get("User", () =>
-        json(
-          { code: "PGRST116", message: "Row not found", details: "", hint: "" },
-          { status: 406 }
-        )
-      )
-    );
-
     // Should resolve without throwing even when user is missing
     await expect(
-      applyDevPlan("ghost@example.com", "Pro", testContext)
+      applyDevPlan("ghost@example.com", "Pro", context)
     ).resolves.toBeUndefined();
+    expect(await db.select().from(product)).toEqual([]);
   });
 
   test("upserts Product and TransactionLog when plan is set", async () => {
-    let productUpserted = false;
-    let txUpserted = false;
+    await seed.user(db, { id: "user-1", email: "dev@example.com" });
 
-    server.use(
-      db.get("User", () => json({ id: "user-1" })),
-      db.post("Product", () => {
-        productUpserted = true;
-        return empty({ status: 201 });
+    await applyDevPlan("dev@example.com", "Pro", context);
+    // Applying again updates the same rows.
+    await applyDevPlan("dev@example.com", "Pro", context);
+
+    expect(await db.select().from(product)).toEqual([
+      expect.objectContaining({ id: "dev-product-Pro", name: "Pro" }),
+    ]);
+    expect(await db.select().from(transactionLog)).toEqual([
+      expect.objectContaining({
+        eventId: "dev-user-1",
+        userId: "user-1",
+        productId: "dev-product-Pro",
       }),
-      db.post("TransactionLog", () => {
-        txUpserted = true;
-        return empty({ status: 201 });
-      })
-    );
-
-    await applyDevPlan("dev@example.com", "Pro", testContext);
-    expect(productUpserted).toBe(true);
-    expect(txUpserted).toBe(true);
+    ]);
+    // The row is what the UserProduct view counts as an active purchase.
+    expect(
+      await db
+        .select({ productId: userProduct.productId })
+        .from(userProduct)
+        .where(eq(userProduct.userId, "user-1"))
+    ).toEqual([{ productId: "dev-product-Pro" }]);
   });
 
   test("deletes TransactionLog when plan is null (free tier)", async () => {
-    let txDeleted = false;
+    await seed.user(db, { id: "user-1", email: "dev@example.com" });
+    await applyDevPlan("dev@example.com", "Pro", context);
 
-    server.use(
-      db.get("User", () => json({ id: "user-1" })),
-      db.delete("TransactionLog", () => {
-        txDeleted = true;
-        return empty({ status: 204 });
-      })
-    );
-
-    await applyDevPlan("dev@example.com", null, testContext);
-    expect(txDeleted).toBe(true);
-  });
-
-  test("does nothing when Product upsert fails", async () => {
-    server.use(
-      db.get("User", () => json({ id: "user-1" })),
-      db.post("Product", () =>
-        json(
-          { code: "PGRST000", message: "DB error", details: "", hint: "" },
-          { status: 500 }
-        )
-      )
-    );
-
-    // Should resolve (logs error but doesn't throw)
-    await expect(
-      applyDevPlan("dev@example.com", "Pro", testContext)
-    ).resolves.toBeUndefined();
+    await applyDevPlan("dev@example.com", null, context);
+    expect(await db.select().from(transactionLog)).toEqual([]);
   });
 });

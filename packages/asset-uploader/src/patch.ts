@@ -185,20 +185,16 @@ export const patchAssets = async (
     context
   );
 
-  await patchAssetsWithClient(
-    { projectId, client: context.postgrest.client },
-    patches,
-    {
-      // Undo in cloned projects can target a File row retained from the source
-      // project. This path is enabled only after the edit permit check above.
-      allowSharedFileRestore: true,
-      validate: async ({ current, next }) =>
-        validateCollectionAssetPatch({
-          current,
-          next,
-          assetStore,
-          canBuild,
-        }),
-    }
-  );
+  await patchAssetsWithClient({ projectId, client: context.db }, patches, {
+    // Undo in cloned projects can target a File row retained from the source
+    // project. This path is enabled only after the edit permit check above.
+    allowSharedFileRestore: true,
+    validate: async ({ current, next }) =>
+      validateCollectionAssetPatch({
+        current,
+        next,
+        assetStore,
+        canBuild,
+      }),
+  });
 };

@@ -1,4 +1,14 @@
 import {
+  and,
+  asset as assetTable,
+  assetFolder,
+  build as buildTable,
+  eq,
+  file as fileTable,
+  inArray,
+  project as projectTable,
+} from "@webstudio-is/db";
+import {
   AuthorizationError,
   authorizeProject,
   type AppContext,
@@ -191,16 +201,25 @@ const loadImportedAssetFiles = async ({
   for (const names of chunkPostgrestFileNames(
     assets.map((asset) => asset.name)
   )) {
-    const files = await ctx.postgrest.client
-      .from("File")
-      .select("name, format, description, size, createdAt, updatedAt, meta")
-      .eq("status", "UPLOADED")
-      .eq("uploaderProjectId", projectId)
-      .in("name", names);
-    if (files.error) {
-      throw files.error;
-    }
-    for (const file of files.data ?? []) {
+    const files = await ctx.db
+      .select({
+        name: fileTable.name,
+        format: fileTable.format,
+        description: fileTable.description,
+        size: fileTable.size,
+        createdAt: fileTable.createdAt,
+        updatedAt: fileTable.updatedAt,
+        meta: fileTable.meta,
+      })
+      .from(fileTable)
+      .where(
+        and(
+          eq(fileTable.status, "UPLOADED"),
+          eq(fileTable.uploaderProjectId, projectId),
+          inArray(fileTable.name, names)
+        )
+      );
+    for (const file of files) {
       filesByName.set(file.name, file);
     }
   }
@@ -247,14 +266,15 @@ const restoreImportedAssetFiles = async ({
     return;
   }
   for (const names of chunkPostgrestFileNames(fileNames)) {
-    const visibleFiles = await ctx.postgrest.client
-      .from("File")
-      .update({ isDeleted: false })
-      .eq("uploaderProjectId", projectId)
-      .in("name", names);
-    if (visibleFiles.error) {
-      throw visibleFiles.error;
-    }
+    await ctx.db
+      .update(fileTable)
+      .set({ isDeleted: false })
+      .where(
+        and(
+          eq(fileTable.uploaderProjectId, projectId),
+          inArray(fileTable.name, names)
+        )
+      );
   }
 };
 
@@ -281,49 +301,26 @@ const replaceProjectAssetRows = async ({
   ctx: AppContext;
   projectId: string;
 }) => {
-  const resetPreviewImage = await ctx.postgrest.client
-    .from("Project")
-    .update({ previewImageAssetId: null })
-    .eq("id", projectId);
-  if (resetPreviewImage.error) {
-    throw resetPreviewImage.error;
-  }
+  await ctx.db
+    .update(projectTable)
+    .set({ previewImageAssetId: null })
+    .where(eq(projectTable.id, projectId));
 
-  const deletedAssets = await ctx.postgrest.client
-    .from("Asset")
-    .delete()
-    .eq("projectId", projectId);
-  if (deletedAssets.error) {
-    throw deletedAssets.error;
-  }
+  await ctx.db.delete(assetTable).where(eq(assetTable.projectId, projectId));
 
-  const deletedFolders = await ctx.postgrest.client
-    .from("AssetFolder")
-    .delete()
-    .eq("projectId", projectId);
-  if (deletedFolders.error) {
-    throw deletedFolders.error;
-  }
+  await ctx.db.delete(assetFolder).where(eq(assetFolder.projectId, projectId));
 
   if (assetFolders.length > 0) {
-    const insertedFolder = await ctx.postgrest.client
-      .from("AssetFolder")
-      .insert(createAssetFolderRows(assetFolders, projectId));
-    if (insertedFolder.error) {
-      throw insertedFolder.error;
-    }
+    await ctx.db
+      .insert(assetFolder)
+      .values(createAssetFolderRows(assetFolders, projectId));
   }
 
   if (assets.length === 0) {
     return;
   }
 
-  const insertedAssets = await ctx.postgrest.client
-    .from("Asset")
-    .insert(createAssetRows(assets, projectId));
-  if (insertedAssets.error) {
-    throw insertedAssets.error;
-  }
+  await ctx.db.insert(assetTable).values(createAssetRows(assets, projectId));
 };
 
 const updateProjectPreviewImage = async ({
@@ -335,13 +332,10 @@ const updateProjectPreviewImage = async ({
   ctx: AppContext;
   projectId: string;
 }) => {
-  const updatedProject = await ctx.postgrest.client
-    .from("Project")
-    .update({ previewImageAssetId: assetId })
-    .eq("id", projectId);
-  if (updatedProject.error) {
-    throw updatedProject.error;
-  }
+  await ctx.db
+    .update(projectTable)
+    .set({ previewImageAssetId: assetId })
+    .where(eq(projectTable.id, projectId));
 };
 
 export const importPublishedProjectBundle = async (
@@ -401,19 +395,19 @@ export const importPublishedProjectBundle = async (
     updatedAt: new Date().toISOString(),
     version: nextVersion,
   });
-  const update = await ctx.postgrest.client
-    .from("Build")
-    .update(buildUpdate, { count: "exact" })
-    .match({
-      id: build.id,
-      projectId,
-      version: build.version,
-    });
+  const updated = await ctx.db
+    .update(buildTable)
+    .set(buildUpdate)
+    .where(
+      and(
+        eq(buildTable.id, build.id),
+        eq(buildTable.projectId, projectId),
+        eq(buildTable.version, build.version)
+      )
+    )
+    .returning({ id: buildTable.id });
 
-  if (update.error) {
-    throw update.error;
-  }
-  if (update.count !== 1) {
+  if (updated.length !== 1) {
     throw new Error("Unable to import project bundle because build changed.");
   }
 

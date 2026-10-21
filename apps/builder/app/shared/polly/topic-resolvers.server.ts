@@ -3,6 +3,7 @@ import { db as dashboardDb } from "@webstudio-is/dashboard/index.server";
 import { getPlanInfo } from "@webstudio-is/plans/index.server";
 import { defaultPlanFeatures } from "@webstudio-is/plans";
 import { publicStaticEnv } from "~/env/env.static";
+import { and, eq, isNull, workspace, workspaceMember } from "@webstudio-is/db";
 import type { TopicResolvers, TopicName, SubscriptionResponse } from "./types";
 
 /**
@@ -35,41 +36,39 @@ const resolvers: TopicResolvers = {
     const userId = ctx.authorization.userId;
 
     // Find all workspaces where the user is a non-owner active member.
-    const memberships = await ctx.postgrest.client
-      .from("WorkspaceMember")
-      .select("workspaceId, workspace:Workspace!inner(userId, name)")
-      .eq("userId", userId)
-      .is("removedAt", null);
-
-    if (memberships.error || memberships.data.length === 0) {
-      return false;
-    }
+    const memberships = await ctx.db
+      .select({
+        workspaceId: workspaceMember.workspaceId,
+        ownerId: workspace.userId,
+        name: workspace.name,
+      })
+      .from(workspaceMember)
+      .innerJoin(workspace, eq(workspace.id, workspaceMember.workspaceId))
+      .where(
+        and(
+          eq(workspaceMember.userId, userId),
+          isNull(workspaceMember.removedAt)
+        )
+      )
+      .catch(() => []);
 
     // Filter out workspaces owned by the user (shouldn't be any, but be safe).
-    const sharedWorkspaces = memberships.data.filter(
-      (m) =>
-        (m.workspace as unknown as { userId: string; name: string }).userId !==
-        userId
-    );
+    const sharedWorkspaces = memberships.filter((m) => m.ownerId !== userId);
 
     if (sharedWorkspaces.length === 0) {
       return false;
     }
 
     // Check each workspace owner's plan — suspended if owner of any workspace can't cover seats.
-    const ownerIds = sharedWorkspaces.map(
-      (m) => (m.workspace as unknown as { userId: string }).userId
-    );
+    const ownerIds = sharedWorkspaces.map((m) => m.ownerId);
     const planResults = await getPlanInfo(ownerIds, ctx);
 
     for (const m of sharedWorkspaces) {
-      const ownerId = (m.workspace as unknown as { userId: string }).userId;
       const features =
-        planResults.get(ownerId)?.planFeatures ?? defaultPlanFeatures;
+        planResults.get(m.ownerId)?.planFeatures ?? defaultPlanFeatures;
 
       if (features.maxWorkspaces <= 1) {
-        return (m.workspace as unknown as { userId: string; name: string })
-          .name;
+        return m.name;
       }
     }
 

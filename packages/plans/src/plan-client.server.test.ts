@@ -1,10 +1,12 @@
 import { describe, test, expect, beforeEach, vi } from "vitest";
 import {
-  createTestServer,
-  db,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+  product,
+  transactionLog,
+  userProduct,
+  type Db,
+  type Json,
+} from "@webstudio-is/db";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import { type PlanFeatures, defaultPlanFeatures } from "./plan-features";
 import {
   getPlanInfo,
@@ -14,37 +16,70 @@ import {
 
 const { parseProductMeta, mergeProductMetas } = __testing__;
 
-// ---------------------------------------------------------------------------
-// Unit tests for private helpers
-// ---------------------------------------------------------------------------
-
-const server = createTestServer();
+const db = setupTestDb();
+const testContext = { db };
 
 beforeEach(() => {
   vi.unstubAllEnvs();
 });
 
-const proProduct = {
-  id: "prod-pro",
-  name: "Pro",
-  meta: { maxDomainsAllowedPerUser: 10 },
+const seedProduct = async (
+  id: string,
+  name: string,
+  meta: Record<string, unknown> = {}
+) => {
+  await db.insert(product).values({ id, name, meta: meta as Json });
 };
 
-const proUserProduct = {
-  userId: "user-1",
-  productId: "prod-pro",
-  subscriptionId: "sub-abc",
+/** A completed checkout, which the UserProduct view counts as a purchase. */
+const seedPurchase = async (
+  userId: string,
+  productId: string,
+  subscriptionId?: string
+) => {
+  await seed.user(db, { id: userId });
+  await db.insert(transactionLog).values({
+    eventId: `evt-${userId}-${productId}`,
+    userId,
+    productId,
+    eventData: {
+      type: "checkout.session.completed",
+      created: 100,
+      data: { object: { status: "complete", subscription: subscriptionId } },
+    },
+  });
 };
 
-describe("getPlanInfo (msw)", () => {
+/**
+ * A database whose queries fail for `failingSource` and otherwise answer with
+ * `rows`, for exercising error handling.
+ */
+const createFailingDb = (
+  failingSource: unknown,
+  rows: Record<string, unknown>[] = []
+) => {
+  const answer = (source: unknown) =>
+    source === failingSource
+      ? Promise.reject(new Error("db error"))
+      : Promise.resolve(rows);
+  return {
+    select: () => ({
+      from: (source: unknown) => {
+        const result = answer(source);
+        result.catch(() => {});
+        return Object.assign(result, { where: () => answer(source) });
+      },
+    }),
+  } as unknown as Db;
+};
+
+describe("getPlanInfo", () => {
   test("empty userIds returns empty map without hitting DB", async () => {
     const result = await getPlanInfo([], testContext);
     expect(result.size).toBe(0);
   });
 
   test("user with no products returns defaultPlanFeatures", async () => {
-    server.use(db.get("UserProduct", () => json([])));
-
     const result = await getPlanInfo(["user-1"], testContext);
     expect(result.get("user-1")).toEqual({
       planFeatures: defaultPlanFeatures,
@@ -57,10 +92,8 @@ describe("getPlanInfo (msw)", () => {
       "PLANS",
       JSON.stringify([{ name: "Pro", maxDomainsAllowedPerUser: 5 }])
     );
-    server.use(
-      db.get("UserProduct", () => json([proUserProduct])),
-      db.get("Product", () => json([proProduct]))
-    );
+    await seedProduct("prod-pro", "Pro", { maxDomainsAllowedPerUser: 10 });
+    await seedPurchase("user-1", "prod-pro", "sub-abc");
 
     const result = await getPlanInfo(["user-1"], testContext);
     const info = result.get("user-1");
@@ -73,10 +106,8 @@ describe("getPlanInfo (msw)", () => {
 
   test("product not in PLANS falls back to defaultPlanFeatures for that product", async () => {
     vi.stubEnv("PLANS", JSON.stringify([]));
-    server.use(
-      db.get("UserProduct", () => json([proUserProduct])),
-      db.get("Product", () => json([proProduct]))
-    );
+    await seedProduct("prod-pro", "Pro", { maxDomainsAllowedPerUser: 10 });
+    await seedPurchase("user-1", "prod-pro");
 
     const result = await getPlanInfo(["user-1"], testContext);
     const info = result.get("user-1");
@@ -87,21 +118,11 @@ describe("getPlanInfo (msw)", () => {
     );
   });
 
-  test("multiple users batched in one UserProduct query", async () => {
+  test("multiple users resolved together", async () => {
     vi.stubEnv("PLANS", JSON.stringify([]));
-    server.use(
-      db.get("UserProduct", ({ request }) => {
-        const url = new URL(request.url);
-        // PostgREST IN filter: userId=in.(user-1,user-2)
-        expect(url.searchParams.get("userId")).toMatch(/user-1/);
-        expect(url.searchParams.get("userId")).toMatch(/user-2/);
-        return json([
-          proUserProduct,
-          { userId: "user-2", productId: "prod-pro", subscriptionId: null },
-        ]);
-      }),
-      db.get("Product", () => json([proProduct]))
-    );
+    await seedProduct("prod-pro", "Pro");
+    await seedPurchase("user-1", "prod-pro", "sub-abc");
+    await seedPurchase("user-2", "prod-pro");
 
     const result = await getPlanInfo(["user-1", "user-2"], testContext);
     expect(result.size).toBe(2);
@@ -110,33 +131,24 @@ describe("getPlanInfo (msw)", () => {
   });
 
   test("UserProduct DB error throws", async () => {
-    server.use(
-      db.get("UserProduct", () =>
-        json({ message: "db error" }, { status: 500 })
-      )
-    );
-
-    await expect(getPlanInfo(["user-1"], testContext)).rejects.toThrow(
-      "Failed to fetch user products"
-    );
+    await expect(
+      getPlanInfo(["user-1"], { db: createFailingDb(userProduct) })
+    ).rejects.toThrow("Failed to fetch user products");
   });
 
   test("Product DB error throws and cache is cleared for retry", async () => {
-    server.use(
-      db.get("UserProduct", () => json([proUserProduct])),
-      db.get("Product", () => json({ message: "db error" }, { status: 500 }))
-    );
-
-    await expect(getPlanInfo(["user-1"], testContext)).rejects.toThrow(
-      "Failed to fetch products"
-    );
+    await expect(
+      getPlanInfo(["user-1"], {
+        db: createFailingDb(product, [
+          { userId: "user-1", productId: "prod-pro", subscriptionId: null },
+        ]),
+      })
+    ).rejects.toThrow("Failed to fetch products");
 
     // After error the cache is cleared — next call should hit DB again
-    server.use(
-      db.get("UserProduct", () => json([proUserProduct])),
-      db.get("Product", () => json([proProduct]))
-    );
     vi.stubEnv("PLANS", JSON.stringify([]));
+    await seedProduct("prod-pro", "Pro");
+    await seedPurchase("user-1", "prod-pro");
     const result = await getPlanInfo(["user-1"], testContext);
     expect(result.get("user-1")?.purchases[0].planName).toBe("Pro");
   });
@@ -262,84 +274,115 @@ describe("workspaces plan", () => {
 // getExtraPaidSeats
 // ---------------------------------------------------------------------------
 
-const seatProduct = { id: "prod-seats" };
-
-const subscriptionEvent = (quantity: number, subscriptionId = "sub-seats") => ({
-  subscriptionId,
-  eventCreated: 1000,
-  eventData: {
-    data: { object: { items: { data: [{ quantity }] } } },
-  },
-});
-
-const setupSeatMocks = ({
-  productRows = [seatProduct],
-  transactionRow = subscriptionEvent(2) as Record<string, unknown> | null,
-  deletedRow = null as Record<string, unknown> | null,
+const seedSubscriptionEvent = async ({
+  eventId,
+  type,
+  created,
+  quantity,
+  status = "active",
+  subscriptionId = "sub-seats",
+  productId = "prod-seats",
 }: {
-  productRows?: Array<{ id: string }>;
-  transactionRow?: Record<string, unknown> | null;
-  deletedRow?: Record<string, unknown> | null;
-} = {}) => {
-  server.use(
-    db.get("Product", () => json(productRows)),
-    db.get("TransactionLog", ({ request }) => {
-      const url = new URL(request.url);
-      const eventType = url.searchParams.get("eventType");
-      // Deletion check query uses eq filter
-      if (eventType === "eq.customer.subscription.deleted") {
-        return json(deletedRow ? [deletedRow] : []);
-      }
-      // Main query uses in filter
-      return json(transactionRow ? [transactionRow] : []);
-    })
-  );
+  eventId: string;
+  type: string;
+  created: number;
+  quantity?: number;
+  status?: string;
+  subscriptionId?: string;
+  productId?: string;
+}) => {
+  await seed.user(db, { id: "user-1" });
+  await db.insert(transactionLog).values({
+    eventId,
+    userId: "user-1",
+    productId,
+    eventData: {
+      type,
+      created,
+      data: {
+        object: {
+          object: "subscription",
+          id: subscriptionId,
+          status,
+          items: quantity === undefined ? undefined : { data: [{ quantity }] },
+        },
+      },
+    },
+  });
 };
 
 describe("getExtraPaidSeats", () => {
   test("returns quantity from latest subscription event", async () => {
-    setupSeatMocks({ transactionRow: subscriptionEvent(3) });
+    await seedProduct("prod-seats", "Seats");
+    await seedSubscriptionEvent({
+      eventId: "evt-1",
+      type: "customer.subscription.created",
+      created: 1000,
+      quantity: 2,
+    });
+    await seedSubscriptionEvent({
+      eventId: "evt-2",
+      type: "customer.subscription.updated",
+      created: 2000,
+      quantity: 3,
+    });
     const result = await getExtraPaidSeats("user-1", testContext);
     expect(result).toBe(3);
   });
 
   test("returns null when no Seats product exists", async () => {
-    setupSeatMocks({ productRows: [] });
     const result = await getExtraPaidSeats("user-1", testContext);
     expect(result).toBeNull();
   });
 
   test("returns null when no subscription event exists", async () => {
-    setupSeatMocks({ transactionRow: null });
+    await seedProduct("prod-seats", "Seats");
     const result = await getExtraPaidSeats("user-1", testContext);
     expect(result).toBeNull();
   });
 
   test("returns null when subscription was deleted after the latest event", async () => {
-    setupSeatMocks({
-      transactionRow: subscriptionEvent(2),
-      deletedRow: { eventId: "evt-del" },
+    await seedProduct("prod-seats", "Seats");
+    await seedSubscriptionEvent({
+      eventId: "evt-1",
+      type: "customer.subscription.updated",
+      created: 1000,
+      quantity: 2,
+    });
+    await seedSubscriptionEvent({
+      eventId: "evt-del",
+      type: "customer.subscription.deleted",
+      created: 2000,
+      status: "canceled",
     });
     const result = await getExtraPaidSeats("user-1", testContext);
     expect(result).toBeNull();
   });
 
-  test("returns quantity when no deletion event exists", async () => {
-    setupSeatMocks({
-      transactionRow: subscriptionEvent(5),
-      deletedRow: null,
+  test("returns quantity when the deletion happened before the latest event", async () => {
+    await seedProduct("prod-seats", "Seats");
+    await seedSubscriptionEvent({
+      eventId: "evt-del",
+      type: "customer.subscription.deleted",
+      created: 500,
+      status: "canceled",
+    });
+    await seedSubscriptionEvent({
+      eventId: "evt-1",
+      type: "customer.subscription.updated",
+      created: 1000,
+      quantity: 5,
     });
     const result = await getExtraPaidSeats("user-1", testContext);
     expect(result).toBe(5);
   });
 
   test("returns null when eventData has no quantity", async () => {
-    setupSeatMocks({
-      transactionRow: {
-        subscriptionId: "sub-seats",
-        eventCreated: 1000,
-        eventData: { data: { object: {} } },
-      },
+    await seedProduct("prod-seats", "Seats");
+    await seedSubscriptionEvent({
+      eventId: "evt-1",
+      type: "customer.subscription.updated",
+      created: 1000,
     });
     const result = await getExtraPaidSeats("user-1", testContext);
     expect(result).toBeNull();

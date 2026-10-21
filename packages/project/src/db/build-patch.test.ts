@@ -1,11 +1,6 @@
 import { describe, expect, test } from "vitest";
-import {
-  createTestServer,
-  db,
-  empty,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+import { asset, assetFolder, build, eq, file, type Db } from "@webstudio-is/db";
+import { seed, setupTestDb, withQueryHook } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import {
   patchBuild,
@@ -17,22 +12,14 @@ import {
   singlePlayerVersionMismatchResult,
 } from "./build-patch-core";
 
-const server = createTestServer();
+const db = setupTestDb();
 
-const createContext = (): AppContext =>
+const createContext = (contextDb: Db = db): AppContext =>
   ({
-    ...testContext,
+    db: contextDb,
     authorization: { type: "user", userId: "user-1" },
     getOwnerPlanFeatures: async () => ({}),
   }) as unknown as AppContext;
-
-const ownershipHandler = db.get("Project", ({ request }) => {
-  const url = new URL(request.url);
-  if (url.searchParams.has("userId")) {
-    return json({ id: url.searchParams.get("id")?.replace("eq.", "") });
-  }
-  return json(null);
-});
 
 const buildRow = {
   id: "build-1",
@@ -79,6 +66,15 @@ const buildRow = {
   projectSettings: JSON.stringify({ meta: {}, compiler: {} }),
 };
 
+/** project-1, owned by user-1, with `buildRow` (plus overrides) as its build. */
+const seedBuild = async (overrides: Partial<typeof buildRow> = {}) => {
+  await seed.project(db, { id: "project-1", userId: "user-1" });
+  await seed.build(db, { ...buildRow, ...overrides });
+};
+
+const readBuild = async () =>
+  (await db.select().from(build).where(eq(build.id, "build-1")))[0];
+
 const transaction = (
   overrides: Partial<BuildPatchTransaction> = {}
 ): BuildPatchTransaction => ({
@@ -96,14 +92,13 @@ const transaction = (
 
 describe("patchBuild", () => {
   test("patches an already loaded build and returns the updated build row", async () => {
+    await seedBuild();
     let didLoadBuild = false;
-    server.use(
-      db.get("Build", () => {
+    const watchedDb = withQueryHook(db, ({ kind, table }) => {
+      if (kind === "select" && table === build) {
         didLoadBuild = true;
-        return json([buildRow]);
-      }),
-      db.patch("Build", () => empty({ headers: { "Content-Range": "*/1" } }))
-    );
+      }
+    });
 
     const result = await patchLoadedBuild(
       {
@@ -113,10 +108,11 @@ describe("patchBuild", () => {
         clientVersion: 3,
         transactions: [transaction()],
       },
-      createContext()
+      createContext(watchedDb)
     );
 
     expect(result.status).toBe("ok");
+    expect((await readBuild()).version).toBe(4);
     if (result.status === "ok") {
       expect(result.version).toBe(4);
       expect(result.build.version).toBe(4);
@@ -134,15 +130,7 @@ describe("patchBuild", () => {
   });
 
   test("persists asset-folder namespace changes before accepting the build transaction", async () => {
-    let insertedFolders: unknown;
-    server.use(
-      db.get("AssetFolder", () => json([])),
-      db.post("AssetFolder", async ({ request }) => {
-        insertedFolders = await request.json();
-        return json(insertedFolders as never);
-      }),
-      db.patch("Build", () => empty({ headers: { "Content-Range": "*/1" } }))
-    );
+    await seedBuild();
 
     const result = await patchLoadedBuild(
       {
@@ -176,7 +164,7 @@ describe("patchBuild", () => {
     );
 
     expect(result.status).toBe("ok");
-    expect(insertedFolders).toEqual([
+    expect(await db.select().from(assetFolder)).toEqual([
       {
         id: "folder-1",
         projectId: "project-1",
@@ -188,68 +176,40 @@ describe("patchBuild", () => {
   });
 
   test("deletes folder assets before deleting the folder", async () => {
-    const calls: string[] = [];
-    const assetRow = {
-      assetId: "asset-1",
+    await seedBuild();
+    await db.insert(assetFolder).values({
+      id: "folder-1",
       projectId: "project-1",
-      filename: null,
-      description: null,
+      name: "Folder",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await db.insert(file).values({
+      name: "asset.pdf",
+      format: "pdf",
+      size: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      meta: "{}",
+      status: "UPLOADED",
+      uploaderProjectId: "project-1",
+    });
+    await db.insert(asset).values({
+      id: "asset-1",
+      projectId: "project-1",
+      name: "asset.pdf",
       folderId: "folder-1",
-      file: {
-        name: "asset.pdf",
-        format: "pdf",
-        description: null,
-        size: 1,
-        createdAt: "2026-01-01T00:00:00.000Z",
-        meta: "{}",
-        status: "UPLOADED",
-      },
-    };
-    server.use(
-      ownershipHandler,
-      db.get("AssetFolder", () =>
-        json([
-          {
-            id: "folder-1",
-            projectId: "project-1",
-            name: "Folder",
-            parentId: null,
-            createdAt: "2026-01-01T00:00:00.000Z",
-          },
-        ])
-      ),
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("name")) {
-          return json([]);
-        }
-        if (url.searchParams.has("id")) {
-          return json([
-            {
-              id: "asset-1",
-              projectId: "project-1",
-              name: "asset.pdf",
-              file: assetRow.file,
-            },
-          ]);
-        }
-        return json([assetRow]);
-      }),
-      db.patch("Project", () => empty({ status: 204 })),
-      db.delete("Asset", () => {
+    });
+    const calls: string[] = [];
+    const watchedDb = withQueryHook(db, ({ kind, table }) => {
+      if (kind === "delete" && table === asset) {
         calls.push("asset-delete");
-        return empty({ status: 204 });
-      }),
-      db.patch("File", () => empty({ status: 204 })),
-      db.delete("AssetFolder", () => {
+      }
+      if (kind === "delete" && table === assetFolder) {
         calls.push("folder-delete");
-        return json([{ id: "folder-1" }]);
-      }),
-      db.patch("Build", () => {
+      }
+      if (kind === "update" && table === build) {
         calls.push("build-update");
-        return empty({ headers: { "Content-Range": "*/1" } });
-      })
-    );
+      }
+    });
 
     const result = await patchLoadedBuild(
       {
@@ -277,22 +237,16 @@ describe("patchBuild", () => {
           }),
         ],
       },
-      createContext()
+      createContext(watchedDb)
     );
 
     expect(result.status).toBe("ok");
     expect(calls).toEqual(["asset-delete", "folder-delete", "build-update"]);
+    expect(await db.select().from(assetFolder)).toEqual([]);
   });
 
   test("applies transactions, validates data, and updates build with optimistic version guard", async () => {
-    let updatedBuild: unknown;
-    server.use(
-      db.get("Build", () => json([buildRow])),
-      db.patch("Build", async ({ request }) => {
-        updatedBuild = await request.json();
-        return empty({ headers: { "Content-Range": "*/1" } });
-      })
-    );
+    await seedBuild();
 
     const result = await patchBuild(
       {
@@ -305,11 +259,12 @@ describe("patchBuild", () => {
     );
 
     expect(result).toEqual({ status: "ok", version: 4 });
+    const updatedBuild = await readBuild();
     expect(updatedBuild).toMatchObject({
       version: 4,
       lastTransactionId: "tx-1",
     });
-    expect(JSON.parse((updatedBuild as { props: string }).props)).toEqual([
+    expect(JSON.parse(updatedBuild.props)).toEqual([
       {
         id: "prop-1",
         instanceId: "body-1",
@@ -321,51 +276,39 @@ describe("patchBuild", () => {
   });
 
   test("applies page path changes from normalized page id patches", async () => {
-    let updatedBuild: unknown;
-    server.use(
-      db.get("Build", () =>
-        json([
+    await seedBuild({
+      pages: JSON.stringify({
+        meta: {},
+        homePageId: "page-1",
+        rootFolderId: "root",
+        pages: [
           {
-            ...buildRow,
-            pages: JSON.stringify({
-              meta: {},
-              homePageId: "page-1",
-              rootFolderId: "root",
-              pages: [
-                {
-                  id: "page-1",
-                  name: "Home",
-                  path: "",
-                  title: "Home",
-                  meta: {},
-                  rootInstanceId: "body-1",
-                },
-                {
-                  id: "page-2",
-                  name: "About",
-                  path: "/about",
-                  title: "About",
-                  meta: {},
-                  rootInstanceId: "body-1",
-                },
-              ],
-              folders: [
-                {
-                  id: "root",
-                  name: "Root",
-                  slug: "",
-                  children: ["page-1", "page-2"],
-                },
-              ],
-            }),
+            id: "page-1",
+            name: "Home",
+            path: "",
+            title: "Home",
+            meta: {},
+            rootInstanceId: "body-1",
           },
-        ])
-      ),
-      db.patch("Build", async ({ request }) => {
-        updatedBuild = await request.json();
-        return empty({ headers: { "Content-Range": "*/1" } });
-      })
-    );
+          {
+            id: "page-2",
+            name: "About",
+            path: "/about",
+            title: "About",
+            meta: {},
+            rootInstanceId: "body-1",
+          },
+        ],
+        folders: [
+          {
+            id: "root",
+            name: "Root",
+            slug: "",
+            children: ["page-1", "page-2"],
+          },
+        ],
+      }),
+    });
 
     const result = await patchBuild(
       {
@@ -394,7 +337,7 @@ describe("patchBuild", () => {
 
     expect(result).toEqual({ status: "ok", version: 4 });
     expect(
-      JSON.parse((updatedBuild as { pages: string }).pages).pages.find(
+      JSON.parse((await readBuild()).pages).pages.find(
         (page: { id: string }) => page.id === "page-2"
       )?.path
     ).toBe("/company");
@@ -873,16 +816,7 @@ describe("patchBuild", () => {
   });
 
   test("returns ok when retrying a transaction already saved by the server", async () => {
-    let didPatch = false;
-    server.use(
-      db.get("Build", () =>
-        json([{ ...buildRow, version: 4, lastTransactionId: "tx-1" }])
-      ),
-      db.patch("Build", () => {
-        didPatch = true;
-        return empty({ headers: { "Content-Range": "*/1" } });
-      })
-    );
+    await seedBuild({ version: 4, lastTransactionId: "tx-1" });
 
     const result = await patchBuild(
       {
@@ -895,11 +829,12 @@ describe("patchBuild", () => {
     );
 
     expect(result).toEqual({ status: "ok", version: 4 });
-    expect(didPatch).toBe(false);
+    // Nothing is applied twice.
+    expect((await readBuild()).props).toBe(buildRow.props);
   });
 
   test("returns version_mismatched when loaded build version differs", async () => {
-    server.use(db.get("Build", () => json([{ ...buildRow, version: 4 }])));
+    await seedBuild({ version: 4 });
 
     const result = await patchBuild(
       {
@@ -915,10 +850,18 @@ describe("patchBuild", () => {
   });
 
   test("returns version_mismatched when optimistic update affects no rows", async () => {
-    server.use(
-      db.get("Build", () => json([buildRow])),
-      db.patch("Build", () => empty({ headers: { "Content-Range": "*/0" } }))
-    );
+    await seedBuild();
+    // Another save lands between loading the build and updating it.
+    let bumped = false;
+    const racingDb = withQueryHook(db, async ({ kind, table }) => {
+      if (kind === "select" && table === build && bumped === false) {
+        bumped = true;
+        await db
+          .update(build)
+          .set({ version: 4 })
+          .where(eq(build.id, "build-1"));
+      }
+    });
 
     const result = await patchBuild(
       {
@@ -927,21 +870,15 @@ describe("patchBuild", () => {
         clientVersion: 3,
         transactions: [transaction()],
       },
-      createContext()
+      createContext(racingDb)
     );
 
     expect(result).toEqual(singlePlayerVersionMismatchResult);
+    expect((await readBuild()).props).toBe(buildRow.props);
   });
 
   test("rejects unknown namespaces", async () => {
-    let didPatch = false;
-    server.use(
-      db.get("Build", () => json([buildRow])),
-      db.patch("Build", () => {
-        didPatch = true;
-        return empty({ headers: { "Content-Range": "*/1" } });
-      })
-    );
+    await seedBuild();
 
     const result = await patchBuild(
       {
@@ -966,7 +903,7 @@ describe("patchBuild", () => {
       status: "error",
       errors: 'Unknown namespace "unknown"',
     });
-    expect(didPatch).toBe(false);
+    expect((await readBuild()).version).toBe(3);
   });
 
   test("core patch helper is decoupled from asset app logic", async () => {
@@ -998,16 +935,7 @@ describe("patchBuild", () => {
   });
 
   test("does not mark build as saved when asset patching fails", async () => {
-    let didPatchBuild = false;
-    server.use(
-      ownershipHandler,
-      db.get("Build", () => json([buildRow])),
-      db.get("Asset", () => json([])),
-      db.patch("Build", () => {
-        didPatchBuild = true;
-        return empty({ headers: { "Content-Range": "*/1" } });
-      })
-    );
+    await seedBuild();
 
     await expect(
       patchBuild(
@@ -1039,6 +967,9 @@ describe("patchBuild", () => {
       )
     ).rejects.toThrow();
 
-    expect(didPatchBuild).toBe(false);
+    expect(await readBuild()).toMatchObject({
+      version: 3,
+      lastTransactionId: "previous-tx",
+    });
   });
 });

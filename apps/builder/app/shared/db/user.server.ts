@@ -1,4 +1,12 @@
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  eq,
+  maybeOne,
+  one,
+  user as userTable,
+  workspace,
+  type Database,
+} from "@webstudio-is/db";
 import { createId } from "@webstudio-is/sdk";
 import {
   AuthorizationError,
@@ -8,14 +16,28 @@ import type { GitHubProfile } from "remix-auth-github";
 import type { GoogleProfile } from "remix-auth-google";
 import { z } from "zod";
 
-export type User = Omit<
+// The Webstudio user. The row also holds Better Auth's columns (sign-in name,
+// ban state); those stay on the server.
+const userColumns = {
+  id: userTable.id,
+  createdAt: userTable.createdAt,
+  email: userTable.email,
+  image: userTable.image,
+  provider: userTable.provider,
+  username: userTable.username,
+  projectsTags: userTable.projectsTags,
+};
+
+type UserRow = Pick<
   Database["public"]["Tables"]["User"]["Row"],
-  "projectsTags"
-> & {
+  keyof typeof userColumns
+>;
+
+export type User = Omit<UserRow, "projectsTags"> & {
   projectsTags: Array<ProjectTag>;
 };
 
-const formatUser = (user: Database["public"]["Tables"]["User"]["Row"]) => {
+const formatUser = (user: UserRow) => {
   return {
     ...user,
     projectsTags: (user.projectsTags || []) as User["projectsTags"],
@@ -23,18 +45,17 @@ const formatUser = (user: Database["public"]["Tables"]["User"]["Row"]) => {
 };
 
 export const getUserById = async (context: AppContext, id: User["id"]) => {
-  const dbUser = await context.postgrest.client
-    .from("User")
-    .select()
-    .eq("id", id)
-    .single();
+  const rows = await context.db
+    .select(userColumns)
+    .from(userTable)
+    .where(eq(userTable.id, id));
 
-  if (dbUser.error) {
-    console.error(dbUser.error);
+  if (rows.length !== 1) {
+    console.error(`User ${id} not found`);
     throw new Error("User not found");
   }
 
-  return formatUser(dbUser.data);
+  return formatUser(rows[0]);
 };
 
 const genericCreateAccount = async (
@@ -47,14 +68,15 @@ const genericCreateAccount = async (
   },
   syncProfile = false
 ): Promise<User> => {
-  const dbUser = await context.postgrest.client
-    .from("User")
-    .select()
-    .eq("email", userData.email)
-    .single();
+  const existingUser = maybeOne(
+    await context.db
+      .select(userColumns)
+      .from(userTable)
+      .where(eq(userTable.email, userData.email))
+  );
 
-  if (dbUser.error == null) {
-    let user = dbUser.data;
+  if (existingUser !== null) {
+    let user = existingUser;
 
     if (
       syncProfile &&
@@ -62,92 +84,82 @@ const genericCreateAccount = async (
         user.image !== userData.image ||
         user.provider !== userData.provider)
     ) {
-      const updatedUser = await context.postgrest.client
-        .from("User")
-        .update({
-          username: userData.username,
-          image: userData.image,
-          provider: userData.provider,
-        })
-        .eq("id", user.id)
-        .select()
-        .single();
-
-      if (updatedUser.error) {
-        console.error(updatedUser.error);
+      try {
+        user = one(
+          await context.db
+            .update(userTable)
+            .set({
+              username: userData.username,
+              image: userData.image,
+              provider: userData.provider,
+            })
+            .where(eq(userTable.id, user.id))
+            .returning(userColumns)
+        );
+      } catch (error) {
+        console.error(error);
         throw new Error("Failed to update user profile");
       }
-
-      user = updatedUser.data;
     }
 
     // Ensure the user has a default workspace — it may be missing if
     // the original workspace insert failed after user creation.
-    const existingWorkspace = await context.postgrest.client
-      .from("Workspace")
-      .select("id")
-      .eq("userId", dbUser.data.id)
-      .eq("isDefault", true)
-      .maybeSingle();
+    const existingWorkspace = maybeOne(
+      await context.db
+        .select({ id: workspace.id })
+        .from(workspace)
+        .where(
+          and(
+            eq(workspace.userId, existingUser.id),
+            eq(workspace.isDefault, true)
+          )
+        )
+    );
 
-    if (existingWorkspace.data === null) {
-      const ws = await context.postgrest.client
-        .from("Workspace")
-        .insert({
+    if (existingWorkspace === null) {
+      await context.db
+        .insert(workspace)
+        .values({
           name: "My workspace",
           isDefault: true,
-          userId: dbUser.data.id,
+          userId: existingUser.id,
         })
-        .select("id")
-        .single();
-
-      if (ws.error) {
-        console.error("Failed to lazily create default workspace", ws.error);
-      }
+        .catch((error) => {
+          console.error("Failed to lazily create default workspace", error);
+        });
     }
 
     return formatUser(user);
   }
 
-  // https://github.com/PostgREST/postgrest/blob/bfbd033c6e9f38cfbc8b1cfe19ee009a9379e3dd/docs/references/errors.rst#L234
-  if (dbUser.error.code !== "PGRST116") {
-    console.error(dbUser.error);
-    throw new Error("User not found");
-  }
-
   const userId = createId();
 
-  const newUser = await context.postgrest.client
-    .from("User")
-    .insert({
-      id: userId,
-      ...userData,
-    })
-    .select()
-    .single();
-
-  if (newUser.error) {
-    console.error(newUser.error);
+  let newUser: UserRow;
+  try {
+    newUser = one(
+      await context.db
+        .insert(userTable)
+        .values({ id: userId, ...userData })
+        .returning(userColumns)
+    );
+  } catch (error) {
+    console.error(error);
     throw new Error("Failed to create user");
   }
 
   // Every user gets a default workspace that cannot be deleted.
-  const workspace = await context.postgrest.client
-    .from("Workspace")
-    .insert({
+  try {
+    await context.db.insert(workspace).values({
       name: "My workspace",
       isDefault: true,
       userId,
-    })
-    .select("id")
-    .single();
-
-  if (workspace.error) {
-    console.error(workspace.error);
+    });
+  } catch (error) {
+    console.error(error);
     throw new Error("Failed to create default workspace");
   }
 
-  return formatUser(newUser.data);
+  return formatUser(newUser);
 };
 
 export const createOrLoginWithOAuth = async (
@@ -195,15 +207,13 @@ export const updateUserProjectsTags = async (
       "Only logged in users can update project tags"
     );
   }
-  const result = await context.postgrest.client
-    .from("User")
-    .update({ projectsTags: tags })
-    .eq("id", context.authorization.userId)
-    .select()
-    .single();
-
-  if (result.error) {
-    throw result.error;
-  }
-  return result.data.projectsTags as ProjectTag[];
+  const updated = one(
+    await context.db
+      .update(userTable)
+      .set({ projectsTags: tags })
+      .where(eq(userTable.id, context.authorization.userId))
+      .returning({ projectsTags: userTable.projectsTags }),
+    "User"
+  );
+  return updated.projectsTags as ProjectTag[];
 };

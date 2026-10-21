@@ -1,10 +1,5 @@
 import { describe, test, expect } from "vitest";
-import {
-  createTestServer,
-  db,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "../context/context.server";
 import { defaultPlanFeatures } from "@webstudio-is/plans";
 import {
@@ -156,10 +151,10 @@ describe("isRolePermitted", () => {
 });
 
 // ---------------------------------------------------------------------------
-// MSW integration tests
+// Database integration tests
 // ---------------------------------------------------------------------------
 
-const server = createTestServer();
+const db = setupTestDb();
 
 // Each test uses a unique projectId so the memoized `check()` doesn't
 // return a cached result from a previous test.
@@ -167,7 +162,7 @@ const uid = () => `proj-${Math.random().toString(36).slice(2)}`;
 
 const makeUserCtx = (userId = "user-1", maxWorkspaces = 5): AppContext =>
   ({
-    ...testContext,
+    db,
     authorization: { type: "user", userId },
     getOwnerPlanFeatures: async () => ({
       ...defaultPlanFeatures,
@@ -175,68 +170,90 @@ const makeUserCtx = (userId = "user-1", maxWorkspaces = 5): AppContext =>
     }),
   }) as unknown as AppContext;
 
+/** A project owned by `owner-1` in workspace `ws-<projectId>`. */
+const seedWorkspaceProject = async (projectId: string) => {
+  const workspaceId = crypto.randomUUID();
+  await seed.workspace(db, { id: workspaceId, userId: "owner-1" });
+  await seed.project(db, { id: projectId, userId: "owner-1", workspaceId });
+  return workspaceId;
+};
+
+const seedMember = async (
+  projectId: string,
+  userId: string,
+  relation: "viewers" | "editors" | "builders" | "administrators"
+) => {
+  const workspaceId = await seedWorkspaceProject(projectId);
+  await seed.workspaceMember(db, { workspaceId, userId, relation });
+};
+
 // ---------------------------------------------------------------------------
 // checkProjectPermit — user auth
 // ---------------------------------------------------------------------------
 
-describe("checkProjectPermit — user direct owner (msw)", () => {
+describe("checkProjectPermit — user direct owner", () => {
   test("allows edit when user directly owns the project", async () => {
     const projectId = uid();
-    server.use(db.get("Project", () => json({ id: projectId })));
+    await seed.project(db, { id: projectId, userId: "user-1" });
     const allowed = await checkProjectPermit({
       projectId,
       permit: "edit",
       authInfo: { type: "user", userId: "user-1" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(true);
   });
 
   test("allows via workspace member relation", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Project", () => json(null)),
-      db.get("WorkspaceProjectAuthorization", () =>
-        json([{ relation: "builders" }])
-      )
-    );
+    await seedMember(projectId, "user-2", "builders");
     const allowed = await checkProjectPermit({
       projectId,
       permit: "build",
       authInfo: { type: "user", userId: "user-2" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(true);
   });
 
   test("denies when user has insufficient workspace relation", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Project", () => json(null)),
-      db.get("WorkspaceProjectAuthorization", () =>
-        json([{ relation: "viewers" }])
-      )
-    );
+    await seedMember(projectId, "user-3", "viewers");
     const allowed = await checkProjectPermit({
       projectId,
       permit: "edit",
       authInfo: { type: "user", userId: "user-3" },
-      postgrestClient: testContext.postgrest.client,
+      db,
+    });
+    expect(allowed).toBe(false);
+  });
+
+  test("denies a removed workspace member", async () => {
+    const projectId = uid();
+    const workspaceId = await seedWorkspaceProject(projectId);
+    await seed.workspaceMember(db, {
+      workspaceId,
+      userId: "user-5",
+      relation: "administrators",
+      removedAt: new Date().toISOString(),
+    });
+    const allowed = await checkProjectPermit({
+      projectId,
+      permit: "view",
+      authInfo: { type: "user", userId: "user-5" },
+      db,
     });
     expect(allowed).toBe(false);
   });
 
   test("denies when user has no access at all", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Project", () => json(null)),
-      db.get("WorkspaceProjectAuthorization", () => json([]))
-    );
+    await seedWorkspaceProject(projectId);
     const allowed = await checkProjectPermit({
       projectId,
       permit: "view",
       authInfo: { type: "user", userId: "user-4" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(false);
   });
@@ -251,62 +268,49 @@ const legacyTemplateId = "5e086cf4-4293-471c-8eab-ddca8b5cd4db";
 
 describe("checkProjectPermit — template projects no longer bypass auth", () => {
   test("denies view without a real owner, workspace, or token relation", async () => {
-    server.use(
-      db.get("Project", () => json(null)),
-      db.get("WorkspaceProjectAuthorization", () => json([]))
-    );
+    await seed.project(db, { id: legacyTemplateId, userId: "owner-1" });
     const allowed = await checkProjectPermit({
       projectId: legacyTemplateId,
       permit: "view",
       authInfo: { type: "user", userId: "unrelated-user" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(false);
   });
 
   test("denies edit for an unrelated user on a template project", async () => {
-    server.use(
-      db.get("Project", () => json(null)),
-      db.get("WorkspaceProjectAuthorization", () => json([]))
-    );
+    await seed.project(db, { id: legacyTemplateId, userId: "owner-1" });
     const allowed = await checkProjectPermit({
       projectId: legacyTemplateId,
       permit: "edit",
-      authInfo: { type: "user", userId: "unrelated-user" },
-      postgrestClient: testContext.postgrest.client,
+      authInfo: { type: "user", userId: "unrelated-user-2" },
+      db,
     });
     expect(allowed).toBe(false);
   });
 
   test("allows view when a real token grants it", async () => {
-    server.use(
-      db.get("AuthorizationToken", ({ request }) => {
-        const url = new URL(request.url);
-        // The token branch must filter by the relations that grant "view".
-        // A regression in this gate (e.g. dropping the .in("relation") filter)
-        // would let any existing token succeed, so we assert the filter is sent.
-        expect(url.searchParams.get("relation")).toContain(
-          "in.(viewers,editors,builders,administrators)"
-        );
-        return json({ token: "template-tok" });
-      })
-    );
+    await seed.project(db, { id: legacyTemplateId, userId: "owner-1" });
+    await seed.authorizationToken(db, {
+      token: "template-tok",
+      projectId: legacyTemplateId,
+      relation: "viewers",
+    });
     const allowed = await checkProjectPermit({
       projectId: legacyTemplateId,
       permit: "view",
       authInfo: { type: "token", authToken: "template-tok" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(true);
   });
 
   test("denies view when the token does not exist", async () => {
-    server.use(db.get("AuthorizationToken", () => json(null)));
     const allowed = await checkProjectPermit({
       projectId: legacyTemplateId,
       permit: "view",
       authInfo: { type: "token", authToken: "missing-tok" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(false);
   });
@@ -316,47 +320,62 @@ describe("checkProjectPermit — template projects no longer bypass auth", () =>
 // checkProjectPermit — token auth
 // ---------------------------------------------------------------------------
 
-describe("checkProjectPermit — token auth (msw)", () => {
+describe("checkProjectPermit — token auth", () => {
   test("allows when token exists with matching relation", async () => {
     const projectId = uid();
-    server.use(db.get("AuthorizationToken", () => json({ token: "tok-1" })));
+    await seed.project(db, { id: projectId, userId: "owner-1" });
+    await seed.authorizationToken(db, { token: "tok-1", projectId });
     const allowed = await checkProjectPermit({
       projectId,
       permit: "view",
       authInfo: { type: "token", authToken: "tok-1" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(true);
   });
 
+  test("denies when the token's relation doesn't grant the permit", async () => {
+    const projectId = uid();
+    await seed.project(db, { id: projectId, userId: "owner-1" });
+    await seed.authorizationToken(db, {
+      token: "tok-viewer",
+      projectId,
+      relation: "viewers",
+    });
+    const allowed = await checkProjectPermit({
+      projectId,
+      permit: "edit",
+      authInfo: { type: "token", authToken: "tok-viewer" },
+      db,
+    });
+    expect(allowed).toBe(false);
+  });
+
   test("denies when token not found", async () => {
     const projectId = uid();
-    server.use(db.get("AuthorizationToken", () => json(null)));
     const allowed = await checkProjectPermit({
       projectId,
       permit: "view",
       authInfo: { type: "token", authToken: "tok-missing" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(false);
   });
 
   test("denies when token belongs to another project", async () => {
     const projectId = uid();
-    server.use(
-      db.get("AuthorizationToken", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.get("projectId") === `eq.${projectId}`) {
-          return json(null);
-        }
-        return json({ token: "other-project-token" });
-      })
-    );
+    const otherProjectId = uid();
+    await seed.project(db, { id: projectId, userId: "owner-1" });
+    await seed.project(db, { id: otherProjectId, userId: "owner-1" });
+    await seed.authorizationToken(db, {
+      token: "other-project-token",
+      projectId: otherProjectId,
+    });
     const allowed = await checkProjectPermit({
       projectId,
       permit: "view",
       authInfo: { type: "token", authToken: "other-project-token" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(false);
   });
@@ -367,7 +386,7 @@ describe("checkProjectPermit — token auth (msw)", () => {
       projectId,
       permit: "own",
       authInfo: { type: "token", authToken: "tok-any" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(false);
   });
@@ -384,7 +403,7 @@ describe("checkProjectPermit — service auth", () => {
       projectId,
       permit: "view",
       authInfo: { type: "service" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(true);
   });
@@ -395,7 +414,7 @@ describe("checkProjectPermit — service auth", () => {
       projectId,
       permit: "edit",
       authInfo: { type: "service" },
-      postgrestClient: testContext.postgrest.client,
+      db,
     });
     expect(allowed).toBe(false);
   });
@@ -405,21 +424,10 @@ describe("checkProjectPermit — service auth", () => {
 // hasProjectPermit — workspace downgrade guard
 // ---------------------------------------------------------------------------
 
-describe("hasProjectPermit — workspace downgrade guard (msw)", () => {
+describe("hasProjectPermit — workspace downgrade guard", () => {
   test("denies workspace member when owner plan has maxWorkspaces <= 1", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Project", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("userId")) {
-          return json(null);
-        }
-        return json({ id: projectId, userId: "owner-1" });
-      }),
-      db.get("WorkspaceProjectAuthorization", () =>
-        json([{ relation: "editors" }])
-      )
-    );
+    await seedMember(projectId, "user-2", "editors");
     const ctx = makeUserCtx("user-2", 1);
 
     const allowed = await hasProjectPermit({ projectId, permit: "edit" }, ctx);
@@ -428,18 +436,7 @@ describe("hasProjectPermit — workspace downgrade guard (msw)", () => {
 
   test("allows workspace member when owner plan has maxWorkspaces > 1", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Project", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("userId")) {
-          return json(null);
-        }
-        return json({ id: projectId, userId: "owner-1" });
-      }),
-      db.get("WorkspaceProjectAuthorization", () =>
-        json([{ relation: "editors" }])
-      )
-    );
+    await seedMember(projectId, "user-2", "editors");
     const ctx = makeUserCtx("user-2", 5);
 
     const allowed = await hasProjectPermit({ projectId, permit: "edit" }, ctx);
@@ -449,7 +446,7 @@ describe("hasProjectPermit — workspace downgrade guard (msw)", () => {
   test("anonymous auth always denied without hitting DB", async () => {
     const projectId = uid();
     const ctx = {
-      ...testContext,
+      db,
       authorization: { type: "anonymous" },
       getOwnerPlanFeatures: async () => defaultPlanFeatures,
     } as unknown as AppContext;
@@ -462,13 +459,10 @@ describe("hasProjectPermit — workspace downgrade guard (msw)", () => {
 // getProjectPermit
 // ---------------------------------------------------------------------------
 
-describe("getProjectPermit (msw)", () => {
+describe("getProjectPermit", () => {
   test("returns first matching permit from ordered list", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Project", () => json({ id: projectId })),
-      db.get("WorkspaceProjectAuthorization", () => json([]))
-    );
+    await seed.project(db, { id: projectId, userId: "user-1" });
     const ctx = makeUserCtx("user-1");
 
     const permit = await getProjectPermit(
@@ -480,10 +474,7 @@ describe("getProjectPermit (msw)", () => {
 
   test("returns undefined when no permit matches", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Project", () => json(null)),
-      db.get("WorkspaceProjectAuthorization", () => json([]))
-    );
+    await seed.project(db, { id: projectId, userId: "owner-1" });
     const ctx = makeUserCtx("user-no-access");
 
     const permit = await getProjectPermit(

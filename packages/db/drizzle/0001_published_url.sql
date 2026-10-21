@@ -1,0 +1,3 @@
+DROP VIEW "public"."DashboardProject";--> statement-breakpoint
+ALTER TABLE "Project" ADD COLUMN "publishedUrl" text;--> statement-breakpoint
+CREATE VIEW "public"."DashboardProject" AS (SELECT "Project".id, "Project".title, "Project".tags, "Project".domain, "Project"."userId", "Project"."workspaceId", "Project"."isDeleted", "Project"."createdAt", "Project"."previewImageAssetId", "Project"."marketplaceApprovalStatus", (EXISTS ( SELECT 1 FROM "Build" WHERE "Build"."projectId" = "Project".id AND "Build".deployment IS NOT NULL)) AS "isPublished", "Project"."publishedUrl" FROM "Project");

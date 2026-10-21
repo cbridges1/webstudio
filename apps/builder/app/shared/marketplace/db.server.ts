@@ -6,6 +6,7 @@ import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import type { Project } from "@webstudio-is/project";
 import { loadAssetsByProject } from "@webstudio-is/asset-uploader/server";
 import { serializePages } from "@webstudio-is/project-migrations/pages";
+import { approvedMarketplaceProduct, asset, inArray } from "@webstudio-is/db";
 
 export const getBuildProdData = async (
   { projectId }: { projectId: Project["id"] },
@@ -27,16 +28,13 @@ export const getBuildProdData = async (
 export const getItems = async (
   context: AppContext
 ): Promise<Array<MarketplaceOverviewItem>> => {
-  const approvedMarketplaceProducts = await context.postgrest.client
-    .from("ApprovedMarketplaceProduct")
-    .select();
-  if (approvedMarketplaceProducts.error) {
-    throw approvedMarketplaceProducts.error;
-  }
+  const approvedMarketplaceProducts = await context.db
+    .select()
+    .from(approvedMarketplaceProduct);
 
   const items: MarketplaceOverviewItem[] = [];
 
-  for (const product of approvedMarketplaceProducts.data) {
+  for (const product of approvedMarketplaceProducts) {
     if (product.marketplaceProduct === null || product.projectId === null) {
       continue;
     }
@@ -61,15 +59,12 @@ export const getItems = async (
 
   const assets = new Map<string, string>();
   if (assetIds.length > 0) {
-    const data = await context.postgrest.client
-      .from("Asset")
-      .select()
-      .in("id", assetIds);
-    if (data.error) {
-      throw data.error;
-    }
-    for (const asset of data.data) {
-      assets.set(asset.id, asset.name);
+    const rows = await context.db
+      .select({ id: asset.id, name: asset.name })
+      .from(asset)
+      .where(inArray(asset.id, assetIds));
+    for (const row of rows) {
+      assets.set(row.id, row.name);
     }
   }
 

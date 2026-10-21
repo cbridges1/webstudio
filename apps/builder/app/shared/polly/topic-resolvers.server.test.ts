@@ -1,14 +1,10 @@
 import { describe, test, expect, afterEach } from "vitest";
-import {
-  createTestServer,
-  db,
-  testContext,
-  json,
-} from "@webstudio-is/postgrest/testing";
+import { product, transactionLog } from "@webstudio-is/db";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { resolveTopics } from "./topic-resolvers.server";
 
-const server = createTestServer();
+const db = setupTestDb();
 
 afterEach(() => {
   delete process.env.PLANS;
@@ -16,50 +12,48 @@ afterEach(() => {
 
 const createContext = (userId = "user-1"): AppContext =>
   ({
-    ...testContext,
+    db,
     authorization: { type: "user", userId },
   }) as unknown as AppContext;
 
 const anonymousContext = {
-  ...testContext,
+  db,
   authorization: { type: "anonymous" },
 } as unknown as AppContext;
 
-// Helper: member row with workspace embedded
-const memberRow = (workspaceId: string, ownerId: string, name: string) => ({
-  workspaceId,
-  workspace: { userId: ownerId, name },
-});
+/** A workspace owned by `ownerId` with `memberId` as an active member. */
+const seedMembership = async (
+  ownerId: string,
+  memberId: string,
+  name: string
+) => {
+  const workspaceId = crypto.randomUUID();
+  await seed.workspace(db, { id: workspaceId, userId: ownerId, name });
+  await seed.workspaceMember(db, { workspaceId, userId: memberId });
+};
 
 // ─── seatSuspended ─────────────────────────────────────────────
 
-describe("notifications (msw)", () => {
+describe("notifications", () => {
   test("returns empty list for non-user authorization", async () => {
     const result = await resolveTopics(["notifications"], anonymousContext);
     expect(result.notifications).toEqual([]);
   });
 });
 
-describe("seatSuspended (msw)", () => {
+describe("seatSuspended", () => {
   test("returns false for non-user authorization", async () => {
     const result = await resolveTopics(["seatSuspended"], anonymousContext);
     expect(result.seatSuspended).toBe(false);
   });
 
   test("returns false when user has no workspace memberships", async () => {
-    server.use(db.get("WorkspaceMember", () => json([])));
-
     const result = await resolveTopics(["seatSuspended"], createContext());
     expect(result.seatSuspended).toBe(false);
   });
 
   test("returns false when all memberships are user's own workspaces", async () => {
-    server.use(
-      db.get("WorkspaceMember", () =>
-        // workspace.userId === userId → filtered out as own workspace
-        json([memberRow("ws-1", "user-1", "My Workspace")])
-      )
-    );
+    await seedMembership("user-1", "user-1", "My Workspace");
 
     const result = await resolveTopics(
       ["seatSuspended"],
@@ -69,13 +63,8 @@ describe("seatSuspended (msw)", () => {
   });
 
   test("returns workspace name when owner has default (free) plan", async () => {
-    server.use(
-      db.get("WorkspaceMember", () =>
-        json([memberRow("ws-owner", "owner-1", "Owner Workspace")])
-      ),
-      // getPlanInfo: no user products → defaultPlanFeatures (maxWorkspaces=1 → suspended)
-      db.get("UserProduct", () => json([]))
-    );
+    // No purchases → defaultPlanFeatures (maxWorkspaces=1 → suspended)
+    await seedMembership("owner-1", "user-1", "Owner Workspace");
 
     const result = await resolveTopics(
       ["seatSuspended"],
@@ -88,18 +77,18 @@ describe("seatSuspended (msw)", () => {
     process.env.PLANS = JSON.stringify([
       { name: "Pro", features: { maxWorkspaces: 5 } },
     ]);
-
-    server.use(
-      db.get("WorkspaceMember", () =>
-        json([memberRow("ws-owner", "owner-1", "Owner Workspace")])
-      ),
-      db.get("UserProduct", () =>
-        json([
-          { userId: "owner-1", productId: "prod-pro", subscriptionId: null },
-        ])
-      ),
-      db.get("Product", () => json([{ id: "prod-pro", name: "Pro", meta: {} }]))
-    );
+    await seedMembership("owner-1", "user-1", "Owner Workspace");
+    await db.insert(product).values({ id: "prod-pro", name: "Pro", meta: {} });
+    await db.insert(transactionLog).values({
+      eventId: "evt-pro",
+      userId: "owner-1",
+      productId: "prod-pro",
+      eventData: {
+        type: "checkout.session.completed",
+        created: 100,
+        data: { object: { status: "complete" } },
+      },
+    });
 
     const result = await resolveTopics(
       ["seatSuspended"],

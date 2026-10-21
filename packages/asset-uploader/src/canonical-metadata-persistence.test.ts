@@ -3,12 +3,8 @@ import {
   canonicalAssetMetadataExtractorGeneration,
   createCanonicalAssetFileEntry,
 } from "@webstudio-is/content-engine/compiler";
-import {
-  createTestServer,
-  db,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+import { asset, assetFileMetadata, eq, file, type Db } from "@webstudio-is/db";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import {
   deleteCanonicalAssetFileEntryIfMatches,
   deleteStaleCanonicalAssetFileEntries,
@@ -16,7 +12,7 @@ import {
   replaceCanonicalAssetFileEntry,
 } from "./canonical-metadata-persistence";
 
-const server = createTestServer();
+const db = setupTestDb();
 const document = {
   _id: "asset-1",
   _type: "asset.file" as const,
@@ -48,104 +44,161 @@ const row = {
   updatedAt: "2026-07-18T00:00:00.000Z",
 };
 
-const loadEntry = async () =>
+const loadEntry = async (client: Db = db) =>
   (
     await loadCanonicalAssetFileEntries({
-      client: testContext.postgrest.client,
+      client,
       projectId: "project-1",
     })
   )[0];
 
+/** A database answering every metadata query with `rows`. */
+const createDbReturning = (rows: unknown[]) =>
+  ({
+    select: () => ({
+      from: () => ({
+        where: () => ({ orderBy: async () => rows }),
+      }),
+    }),
+  }) as unknown as Db;
+
+const source = {
+  storageName: "stored.md",
+  fileUpdatedAt: "2026-07-18T00:00:00.000Z",
+  fileSize: 100,
+  contentHash: "a".repeat(64),
+  filename: "post.md",
+  description: "Summary",
+  folderId: "blog",
+};
+
+/** asset-1 of project-1, pointing at the uploaded file `source` describes. */
+const seedSourceAsset = async () => {
+  await seed.project(db, { id: "project-1", userId: "user-1" });
+  await seed.assetFolder(db, { id: "blog", projectId: "project-1" });
+  await seed.asset(
+    db,
+    {
+      id: "asset-1",
+      projectId: "project-1",
+      name: source.storageName,
+      filename: source.filename,
+      description: source.description,
+      folderId: source.folderId,
+    },
+    {
+      size: source.fileSize,
+      updatedAt: source.fileUpdatedAt,
+      contentHash: source.contentHash,
+    }
+  );
+};
+
+const storedRows = async () => await db.select().from(assetFileMetadata);
+
 describe("canonical asset metadata persistence", () => {
-  test("replaces older revisions for one canonical asset", async () => {
-    server.use(
-      db.post("rpc/replace_asset_file_metadata", async ({ request }) => {
-        expect(await request.json()).toEqual({
-          p_project_id: "project-1",
-          p_asset_id: "asset-1",
-          p_revision: "sha256:one",
-          p_document: storedDocument,
-          p_source: {
-            storageName: "stored.md",
-            fileUpdatedAt: "2026-07-18T00:00:00.000Z",
-            fileSize: 100,
-            contentHash: "a".repeat(64),
-            filename: "post.md",
-            description: "Summary",
-            folderId: "blog",
-          },
-        });
-        return json(true);
-      })
-    );
+  test("stores metadata while the asset still matches its source", async () => {
+    await seedSourceAsset();
+
     await expect(
-      replaceCanonicalAssetFileEntry({
-        client: testContext.postgrest.client,
-        entry,
-        source: {
-          storageName: "stored.md",
-          fileUpdatedAt: "2026-07-18T00:00:00.000Z",
-          fileSize: 100,
-          contentHash: "a".repeat(64),
-          filename: "post.md",
-          description: "Summary",
-          folderId: "blog",
-        },
-      })
+      replaceCanonicalAssetFileEntry({ client: db, entry, source })
     ).resolves.toEqual(entry);
+
+    expect(await storedRows()).toEqual([
+      expect.objectContaining({
+        projectId: "project-1",
+        assetId: "asset-1",
+        revision: "sha256:one",
+        document: storedDocument,
+      }),
+    ]);
+  });
+
+  test("replaces older revisions for one canonical asset", async () => {
+    await seedSourceAsset();
+    const older = createCanonicalAssetFileEntry({
+      projectId: "project-1",
+      document: { ...document, revision: "sha256:zero" },
+    });
+    await replaceCanonicalAssetFileEntry({ client: db, entry: older, source });
+
+    await replaceCanonicalAssetFileEntry({ client: db, entry, source });
+
+    expect(await storedRows()).toEqual([
+      expect.objectContaining({ revision: "sha256:one" }),
+    ]);
   });
 
   test("rejects a replacement when its source snapshot is stale", async () => {
-    server.use(db.post("rpc/replace_asset_file_metadata", () => json(false)));
+    await seedSourceAsset();
+    // The asset was renamed after its metadata was extracted.
+    await db
+      .update(asset)
+      .set({ filename: "renamed.md" })
+      .where(eq(asset.id, "asset-1"));
+
     await expect(
-      replaceCanonicalAssetFileEntry({
-        client: testContext.postgrest.client,
-        entry,
-        source: {
-          storageName: "stored.md",
-          fileUpdatedAt: "2026-07-18T00:00:00.000Z",
-          fileSize: 100,
-        },
-      })
+      replaceCanonicalAssetFileEntry({ client: db, entry, source })
+    ).rejects.toThrow("source changed during update");
+    expect(await storedRows()).toEqual([]);
+  });
+
+  test("rejects a replacement when the file is no longer uploaded", async () => {
+    await seedSourceAsset();
+    await db
+      .update(file)
+      .set({ status: "UPLOADING" })
+      .where(eq(file.name, source.storageName));
+
+    await expect(
+      replaceCanonicalAssetFileEntry({ client: db, entry, source })
     ).rejects.toThrow("source changed during update");
   });
 
   test("loads project entries in deterministic key order", async () => {
-    server.use(
-      db.get("AssetFileMetadata", ({ request }) => {
-        expect(new URL(request.url).searchParams.get("order")).toBe(
-          "assetId.asc"
-        );
-        return json([row]);
-      })
-    );
+    await seedSourceAsset();
+    await seed.asset(db, {
+      id: "asset-0",
+      projectId: "project-1",
+      name: "zero.md",
+    });
+    const first = createCanonicalAssetFileEntry({
+      projectId: "project-1",
+      document: { ...document, _id: "asset-0", contentRef: "asset:zero.md" },
+    });
+    await db.insert(assetFileMetadata).values([
+      { ...entry, document: storedDocument },
+      {
+        ...first,
+        document: {
+          ...first.document,
+          $webstudioMetadataRequirements: "properties+excerpt",
+          $webstudioExtractorGeneration:
+            canonicalAssetMetadataExtractorGeneration,
+        },
+      },
+    ]);
+
     await expect(
-      loadCanonicalAssetFileEntries({
-        client: testContext.postgrest.client,
-        projectId: "project-1",
-      })
-    ).resolves.toEqual([entry]);
+      loadCanonicalAssetFileEntries({ client: db, projectId: "project-1" })
+    ).resolves.toEqual([first, entry]);
   });
 
   test("loads cached metadata requirements without exposing the storage marker", async () => {
-    server.use(
-      db.get("AssetFileMetadata", () =>
-        json([
-          {
-            ...row,
-            document: {
-              ...document,
-              properties: {},
-              $webstudioMetadataRequirements: "excerpt",
-              $webstudioExtractorGeneration:
-                canonicalAssetMetadataExtractorGeneration,
-            },
+    const loaded = await loadEntry(
+      createDbReturning([
+        {
+          ...row,
+          document: {
+            ...document,
+            properties: {},
+            $webstudioMetadataRequirements: "excerpt",
+            $webstudioExtractorGeneration:
+              canonicalAssetMetadataExtractorGeneration,
           },
-        ])
-      )
+        },
+      ])
     );
-
-    const loaded = await loadEntry();
 
     expect(loaded?.metadataRequirements).toEqual({
       structuredProperties: false,
@@ -160,22 +213,18 @@ describe("canonical asset metadata persistence", () => {
   });
 
   test("treats metadata from an older extractor generation as unprepared", async () => {
-    server.use(
-      db.get("AssetFileMetadata", () =>
-        json([
-          {
-            ...row,
-            document: {
-              ...storedDocument,
-              $webstudioExtractorGeneration:
-                canonicalAssetMetadataExtractorGeneration - 1,
-            },
+    const loaded = await loadEntry(
+      createDbReturning([
+        {
+          ...row,
+          document: {
+            ...storedDocument,
+            $webstudioExtractorGeneration:
+              canonicalAssetMetadataExtractorGeneration - 1,
           },
-        ])
-      )
+        },
+      ])
     );
-
-    const loaded = await loadEntry();
 
     expect(loaded?.metadataRequirements).toEqual({
       structuredProperties: false,
@@ -191,13 +240,10 @@ describe("canonical asset metadata persistence", () => {
       $webstudioExtractorGeneration: _extractorGeneration,
       ...legacyDocument
     } = storedDocument;
-    server.use(
-      db.get("AssetFileMetadata", () =>
-        json([{ ...row, document: legacyDocument }])
-      )
-    );
 
-    const loaded = await loadEntry();
+    const loaded = await loadEntry(
+      createDbReturning([{ ...row, document: legacyDocument }])
+    );
 
     expect(loaded?.metadataRequirements).toEqual({
       structuredProperties: false,
@@ -206,51 +252,54 @@ describe("canonical asset metadata persistence", () => {
   });
 
   test("rejects rows whose database and document identities disagree", async () => {
-    server.use(
-      db.get("AssetFileMetadata", () => json([{ ...row, assetId: "asset-2" }]))
-    );
-    await expect(loadEntry()).rejects.toThrow("identity is inconsistent");
+    // The table's check constraint prevents this; the loader checks anyway.
+    await expect(
+      loadEntry(createDbReturning([{ ...row, assetId: "asset-2" }]))
+    ).rejects.toThrow("identity is inconsistent");
   });
 
-  test("requests stale deletion only for the selected project assets", async () => {
-    server.use(
-      db.post("rpc/delete_stale_asset_file_metadata", async ({ request }) => {
-        expect(await request.json()).toEqual({
-          p_project_id: "project-1",
-          p_asset_ids: ["asset-1", "asset-2"],
-        });
-        return json(2);
-      })
+  test("deletes stale metadata only for the selected assets without uploaded files", async () => {
+    await seedSourceAsset();
+    await seed.asset(
+      db,
+      { id: "asset-2", projectId: "project-1", name: "two.md" },
+      { status: "UPLOADING" }
     );
+    const second = createCanonicalAssetFileEntry({
+      projectId: "project-1",
+      document: { ...document, _id: "asset-2", contentRef: "asset:two.md" },
+    });
+    await db.insert(assetFileMetadata).values([
+      { ...entry, document: storedDocument },
+      { ...second, document: { ...second.document } },
+    ]);
+
     await expect(
       deleteStaleCanonicalAssetFileEntries({
-        client: testContext.postgrest.client,
+        client: db,
         projectId: "project-1",
-        assetIds: ["asset-1", "asset-2"],
+        assetIds: ["asset-2", "asset-1", "asset-2"],
       })
-    ).resolves.toBe(2);
+    ).resolves.toBe(1);
+    expect((await storedRows()).map((stored) => stored.assetId)).toEqual([
+      "asset-1",
+    ]);
   });
 
   test("deletes standard metadata only when the complete snapshot still matches", async () => {
-    server.use(
-      db.post(
-        "rpc/delete_asset_file_metadata_if_matches",
-        async ({ request }) => {
-          expect(await request.json()).toEqual({
-            p_project_id: "project-1",
-            p_asset_id: "asset-1",
-            p_revision: "sha256:one",
-            p_document: storedDocument,
-          });
-          return json(1);
-        }
-      )
-    );
+    await seedSourceAsset();
+    await replaceCanonicalAssetFileEntry({ client: db, entry, source });
+
+    const changed = createCanonicalAssetFileEntry({
+      projectId: "project-1",
+      document: { ...document, properties: { title: "Changed" } },
+    });
     await expect(
-      deleteCanonicalAssetFileEntryIfMatches({
-        client: testContext.postgrest.client,
-        entry,
-      })
+      deleteCanonicalAssetFileEntryIfMatches({ client: db, entry: changed })
+    ).resolves.toBe(0);
+    await expect(
+      deleteCanonicalAssetFileEntryIfMatches({ client: db, entry })
     ).resolves.toBe(1);
+    expect(await storedRows()).toEqual([]);
   });
 });

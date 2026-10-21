@@ -25,7 +25,6 @@
     "**/__generated__/**",
     "codemod/**",
     "packages/*/lib/**",
-    "packages/prisma-client/prisma/migrations/**",
     "packages/cli/templates/**",
     "fixtures/**",
     "packages/sdk-components-animation/private-src/polyfill/**",

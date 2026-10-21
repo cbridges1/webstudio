@@ -1,4 +1,12 @@
-import { describe, test, expect, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  test,
+  expect,
+  vi,
+} from "vitest";
 
 // vi.hoisted runs before ESM imports, so env.server.ts sees these values.
 vi.hoisted(() => {
@@ -7,20 +15,24 @@ vi.hoisted(() => {
 });
 
 import { http, HttpResponse } from "msw";
-import {
-  createTestServer,
-  db,
-  json,
-  empty,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+import { setupServer } from "msw/node";
+import { notification, product, transactionLog } from "@webstudio-is/db";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import { createCallerFactory } from "@webstudio-is/trpc-interface/index.server";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { defaultPlanFeatures, type PlanFeatures } from "@webstudio-is/plans";
 import { workspaceRouter } from "./workspace-router.server";
 import env from "~/env/env.server";
 
-const server = createTestServer();
+// The payment worker is an HTTP service; requests to it are mocked.
+const server = setupServer();
+beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+
+const db = setupTestDb();
+
+const WS1 = "00000000-0000-4000-8000-000000000001";
 
 const createCaller = createCallerFactory(workspaceRouter);
 
@@ -39,7 +51,7 @@ const createContext = (
   }>
 ): AppContext =>
   ({
-    ...testContext,
+    db,
     authorization: {
       type: "user",
       userId: overrides?.userId ?? "owner-1",
@@ -52,85 +64,66 @@ const createContext = (
   }) as unknown as AppContext;
 
 // ---------------------------------------------------------------------------
-// Helpers – the addMember flow touches MANY PostgREST tables. The router code
-// makes its own queries (seat-limit HEAD counts, invitee lookup, existing-
-// member check) and then calls workspaceApi.addMember which duplicates some
-// of those queries behind assertOwner / assertUser.  We use a single handler
-// per table that inspects the request URL to distinguish the different calls.
+// Helpers
 // ---------------------------------------------------------------------------
 
+/** WS1, owned by owner-1. */
+const seedWorkspace = async () => {
+  await seed.workspace(db, { id: WS1, userId: "owner-1" });
+};
+
+/** Answers the payment worker's /seats/sync with `response`, or HTTP 500 for null. */
+const mockPaymentWorker = (
+  response: object | null = { type: "success" as const, seats: 1 },
+  onRequest?: (body: { workspaceId: string; delta?: number }) => void
+) => {
+  server.use(
+    http.post(`${env.PAYMENT_WORKER_URL}/seats/sync`, async ({ request }) => {
+      onRequest?.(
+        (await request.json()) as { workspaceId: string; delta?: number }
+      );
+      if (response === null) {
+        return new HttpResponse(null, { status: 500 });
+      }
+      return HttpResponse.json(response);
+    })
+  );
+};
+
 /**
- * Set up all MSW handlers needed for a full addMember happy-path.
- * Individual tests override specific handlers via `server.use(…)` *after*
- * calling this function.
- *
- * The payment worker now owns member counting via /seats/sync, so no
- * countAllMembers DB mocks are needed here — only the per-workspace
- * seat-limit HEAD counts.
+ * WS1 with `memberCount` members and `pendingInviteCount` pending invites, and
+ * an invitee account (invitee@test.com).
  */
-const setupAddMemberMocks = (opts?: {
-  /** Active members in the target workspace (used for HEAD count) */
-  workspaceMemberCount?: number;
-  /** Pending invites for the target workspace (used for HEAD count) */
-  pendingInviteCount?: number;
-  /** Payment worker JSON response, or `null` to return HTTP 500. */
-  paymentWorkerResponse?: object | null;
-}) => {
+const setupAddMember = async (
+  opts: {
+    workspaceMemberCount?: number;
+    pendingInviteCount?: number;
+    paymentWorkerResponse?: object | null;
+  } = {}
+) => {
   const {
     workspaceMemberCount = 1,
     pendingInviteCount = 0,
     paymentWorkerResponse = { type: "success" as const, seats: 1 },
-  } = opts ?? {};
-
-  server.use(
-    // ---- Workspace (router seat-limit + assertOwner) ----
-    db.get("Workspace", () =>
-      json({ id: "ws-1", userId: "owner-1", isDeleted: false })
-    ),
-
-    // ---- User (router invitee-lookup + workspaceApi.addMember lookup) ----
-    db.get("User", () =>
-      json({ id: "user-2", email: "invitee@test.com", username: "invitee" })
-    ),
-
-    // ---- WorkspaceMember ----
-    // GET: router existing-member check + workspaceApi.addMember check
-    db.get("WorkspaceMember", () => json(null)),
-    // HEAD: per-workspace seat-limit count
-    db.head("WorkspaceMember", () =>
-      empty({ headers: { "Content-Range": `*/${workspaceMemberCount}` } })
-    ),
-
-    // ---- Notification ----
-    // HEAD: router pending-invite count for seat limit
-    db.head("Notification", () =>
-      empty({ headers: { "Content-Range": `*/${pendingInviteCount}` } })
-    ),
-    // GET: createNotification duplicate check
-    db.get("Notification", () => json(null)),
-    // POST: Notification insert (createNotification)
-    db.post("Notification", () =>
-      json(
-        {
-          id: "notif-1",
-          type: "workspaceInvite",
-          recipientId: "user-2",
-          senderId: "owner-1",
-          status: "pending",
-          payload: { workspaceId: "ws-1", relation: "editors" },
-        },
-        { status: 201 }
-      )
-    ),
-
-    // ---- Payment worker (/seats/sync) ----
-    http.post(`${env.PAYMENT_WORKER_URL}/seats/sync`, () => {
-      if (paymentWorkerResponse === null) {
-        return new HttpResponse(null, { status: 500 });
-      }
-      return HttpResponse.json(paymentWorkerResponse);
-    })
-  );
+  } = opts;
+  await seedWorkspace();
+  await seed.user(db, { id: "user-2", email: "invitee@test.com" });
+  for (let index = 0; index < workspaceMemberCount; index += 1) {
+    await seed.workspaceMember(db, {
+      workspaceId: WS1,
+      userId: `member-${index}`,
+    });
+  }
+  for (let index = 0; index < pendingInviteCount; index += 1) {
+    await seed.user(db, { id: `pending-${index}` });
+    await db.insert(notification).values({
+      type: "workspaceInvite",
+      recipientId: `pending-${index}`,
+      senderId: "owner-1",
+      payload: { workspaceId: WS1, relation: "editors" },
+    });
+  }
+  mockPaymentWorker(paymentWorkerResponse);
 };
 
 // ---------------------------------------------------------------------------
@@ -139,16 +132,12 @@ const setupAddMemberMocks = (opts?: {
 
 describe("addMember", () => {
   test("rejects when maxWorkspaces <= 1 (free/pro plan)", async () => {
-    server.use(
-      db.get("Workspace", () =>
-        json({ id: "ws-1", userId: "owner-1", isDeleted: false })
-      )
-    );
+    await seedWorkspace();
     const ctx = createContext({ planFeatures: defaultPlanFeatures });
     const caller = createCaller(ctx);
 
     const result = await caller.addMember({
-      workspaceId: "ws-1",
+      workspaceId: WS1,
       email: "invitee@test.com",
       relation: "editors",
     });
@@ -162,21 +151,16 @@ describe("addMember", () => {
   test("rejects non-owners before billing sync", async () => {
     let paymentWorkerCalled = false;
 
-    server.use(
-      db.get("Workspace", () =>
-        json({ id: "ws-1", userId: "owner-1", isDeleted: false })
-      ),
-      http.post(`${env.PAYMENT_WORKER_URL}/seats/sync`, () => {
-        paymentWorkerCalled = true;
-        return HttpResponse.json({ type: "success", seats: 1 });
-      })
-    );
+    await seedWorkspace();
+    mockPaymentWorker(undefined, () => {
+      paymentWorkerCalled = true;
+    });
 
     const ctx = createContext({ userId: "member-1" });
     const caller = createCaller(ctx);
 
     const result = await caller.addMember({
-      workspaceId: "ws-1",
+      workspaceId: WS1,
       email: "invitee@test.com",
       relation: "editors",
     });
@@ -194,10 +178,10 @@ describe("addMember", () => {
     const caller = createCaller(ctx);
 
     // 2 members + 0 pending = 2 >= maxSeatsPerWorkspace(2)
-    setupAddMemberMocks({ workspaceMemberCount: 2, pendingInviteCount: 0 });
+    await setupAddMember({ workspaceMemberCount: 2, pendingInviteCount: 0 });
 
     const result = await caller.addMember({
-      workspaceId: "ws-1",
+      workspaceId: WS1,
       email: "invitee@test.com",
       relation: "editors",
     });
@@ -214,10 +198,10 @@ describe("addMember", () => {
     const caller = createCaller(ctx);
 
     // 1 member + 1 pending = 2 >= maxSeatsPerWorkspace(2)
-    setupAddMemberMocks({ workspaceMemberCount: 1, pendingInviteCount: 1 });
+    await setupAddMember({ workspaceMemberCount: 1, pendingInviteCount: 1 });
 
     const result = await caller.addMember({
-      workspaceId: "ws-1",
+      workspaceId: WS1,
       email: "invitee@test.com",
       relation: "editors",
     });
@@ -232,7 +216,7 @@ describe("addMember", () => {
     const ctx = createContext();
     const caller = createCaller(ctx);
 
-    setupAddMemberMocks({
+    await setupAddMember({
       paymentWorkerResponse: {
         type: "error",
         error: "Your card was declined.",
@@ -240,7 +224,7 @@ describe("addMember", () => {
     });
 
     const result = await caller.addMember({
-      workspaceId: "ws-1",
+      workspaceId: WS1,
       email: "invitee@test.com",
       relation: "editors",
     });
@@ -255,10 +239,10 @@ describe("addMember", () => {
     const ctx = createContext();
     const caller = createCaller(ctx);
 
-    setupAddMemberMocks({ paymentWorkerResponse: null });
+    await setupAddMember({ paymentWorkerResponse: null });
 
     const result = await caller.addMember({
-      workspaceId: "ws-1",
+      workspaceId: WS1,
       email: "invitee@test.com",
       relation: "editors",
     });
@@ -273,27 +257,24 @@ describe("addMember", () => {
     const ctx = createContext();
     const caller = createCaller(ctx);
 
-    let capturedBody: { workspaceId: string; delta: number } | undefined;
+    let capturedBody: { workspaceId: string; delta?: number } | undefined;
 
-    setupAddMemberMocks();
+    await setupAddMember();
 
     // Override the payment worker handler to capture the request body.
-    server.use(
-      http.post(`${env.PAYMENT_WORKER_URL}/seats/sync`, async ({ request }) => {
-        capturedBody = (await request.json()) as typeof capturedBody;
-        return HttpResponse.json({ type: "success", seats: 1 });
-      })
-    );
+    mockPaymentWorker(undefined, (body) => {
+      capturedBody = body;
+    });
 
     const result = await caller.addMember({
-      workspaceId: "ws-1",
+      workspaceId: WS1,
       email: "invitee@test.com",
       relation: "editors",
     });
 
     expect(result.success).toBe(true);
     expect(capturedBody).toBeDefined();
-    expect(capturedBody!.workspaceId).toBe("ws-1");
+    expect(capturedBody!.workspaceId).toBe(WS1);
     expect(capturedBody!.delta).toBe(1);
   });
 
@@ -301,18 +282,45 @@ describe("addMember", () => {
     const ctx = createContext();
     const caller = createCaller(ctx);
 
-    setupAddMemberMocks({ workspaceMemberCount: 2 });
+    await setupAddMember({ workspaceMemberCount: 2 });
 
     const result = await caller.addMember({
-      workspaceId: "ws-1",
+      workspaceId: WS1,
       email: "invitee@test.com",
       relation: "editors",
     });
 
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.notificationId).toBeDefined();
+      expect(await db.select().from(notification)).toEqual([
+        expect.objectContaining({
+          id: result.notificationId,
+          type: "workspaceInvite",
+          recipientId: "user-2",
+          payload: { workspaceId: WS1, relation: "editors" },
+        }),
+      ]);
     }
+  });
+
+  test("rejects an invitee without an account before billing", async () => {
+    let paymentWorkerCalled = false;
+    await seedWorkspace();
+    mockPaymentWorker(undefined, () => {
+      paymentWorkerCalled = true;
+    });
+
+    const result = await createCaller(createContext()).addMember({
+      workspaceId: WS1,
+      email: "nobody@test.com",
+      relation: "editors",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toContain("No Webstudio account found");
+    }
+    expect(paymentWorkerCalled).toBe(false);
   });
 });
 
@@ -324,29 +332,22 @@ describe("removeMember", () => {
   test("calls payment worker to sync seats after removal", async () => {
     let capturedBody: { workspaceId: string; delta?: number } | undefined;
 
-    server.use(
-      // assertOwner
-      db.get("Workspace", () =>
-        json({ id: "ws-1", userId: "owner-1", isDeleted: false })
-      ),
-      // soft-delete via PATCH
-      db.patch("WorkspaceMember", () => json({ userId: "user-2" })),
-      http.post(`${env.PAYMENT_WORKER_URL}/seats/sync`, async ({ request }) => {
-        capturedBody = (await request.json()) as typeof capturedBody;
-        return HttpResponse.json({ type: "success", seats: 0 });
-      })
-    );
+    await seedWorkspace();
+    await seed.workspaceMember(db, { workspaceId: WS1, userId: "user-2" });
+    mockPaymentWorker({ type: "success", seats: 0 }, (body) => {
+      capturedBody = body;
+    });
 
     const ctx = createContext();
     const caller = createCaller(ctx);
     const result = await caller.removeMember({
-      workspaceId: "ws-1",
+      workspaceId: WS1,
       memberUserId: "user-2",
     });
 
     expect(result.success).toBe(true);
     expect(capturedBody).toBeDefined();
-    expect(capturedBody!.workspaceId).toBe("ws-1");
+    expect(capturedBody!.workspaceId).toBe(WS1);
     // No delta — member is already removed from DB
     expect(capturedBody!.delta).toBe(0);
   });
@@ -358,15 +359,11 @@ describe("removeMember", () => {
 
 describe("syncSeats", () => {
   test("rejects when maxWorkspaces <= 1", async () => {
-    server.use(
-      db.get("Workspace", () =>
-        json({ id: "ws-1", userId: "owner-1", isDeleted: false })
-      )
-    );
+    await seedWorkspace();
     const ctx = createContext({ planFeatures: defaultPlanFeatures });
     const caller = createCaller(ctx);
 
-    const result = await caller.syncSeats({ workspaceId: "ws-1" });
+    const result = await caller.syncSeats({ workspaceId: WS1 });
 
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -377,23 +374,18 @@ describe("syncSeats", () => {
   test("calls payment worker with workspaceId (no delta)", async () => {
     let capturedBody: { workspaceId: string; delta?: number } | undefined;
 
-    server.use(
-      db.get("Workspace", () =>
-        json({ id: "ws-1", userId: "owner-1", isDeleted: false })
-      ),
-      http.post(`${env.PAYMENT_WORKER_URL}/seats/sync`, async ({ request }) => {
-        capturedBody = (await request.json()) as typeof capturedBody;
-        return HttpResponse.json({ type: "success", seats: 3 });
-      })
-    );
+    await seedWorkspace();
+    mockPaymentWorker({ type: "success", seats: 3 }, (body) => {
+      capturedBody = body;
+    });
 
     const ctx = createContext();
     const caller = createCaller(ctx);
-    const result = await caller.syncSeats({ workspaceId: "ws-1" });
+    const result = await caller.syncSeats({ workspaceId: WS1 });
 
     expect(result.success).toBe(true);
     expect(capturedBody).toBeDefined();
-    expect(capturedBody!.workspaceId).toBe("ws-1");
+    expect(capturedBody!.workspaceId).toBe(WS1);
     // No delta for manual sync
     expect(capturedBody!.delta).toBe(0);
   });
@@ -404,63 +396,60 @@ describe("syncSeats", () => {
 // ---------------------------------------------------------------------------
 
 describe("listMembers", () => {
-  const setupListMembersMocks = (opts: {
+  const setupListMembers = async (opts: {
     memberCount?: number;
-    transactionLog?: object | null;
+    /** Extra seats bought, or null for no subscription event */
+    extraSeats?: number | null;
   }) => {
-    const { memberCount = 2, transactionLog = null } = opts;
-
-    const members = Array.from({ length: memberCount }, (_, i) => ({
-      userId: `m-${i + 1}`,
-      relation: "editors",
-      createdAt: "2024-01-01T00:00:00.000Z",
-    }));
-
-    server.use(
-      // listMembers: Workspace lookup + owner-or-member check
-      db.get("Workspace", () =>
-        json({ id: "ws-1", userId: "owner-1", isDeleted: false })
-      ),
-      // listMembers: WorkspaceMember SELECT (members list + access check)
-      db.get("WorkspaceMember", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("userId")) {
-          return json({ userId: url.searchParams.get("userId") });
-        }
-        return json(members);
-      }),
-      // listMembers: Notification GET (pending invites for this workspace)
-      db.get("Notification", () => json([])),
-      // listMembers: User batch lookup
-      db.get("User", () =>
-        json([
-          { id: "owner-1", email: "owner@test.com", username: "owner" },
-          ...members.map((m) => ({
-            id: m.userId,
-            email: `${m.userId}@test.com`,
-            username: m.userId,
-          })),
-        ])
-      ),
-      // getExtraPaidSeats: Product lookup + TransactionLog query
-      db.get("Product", () => json([{ id: "prod-seats" }])),
-      db.get("TransactionLog", () => json(transactionLog))
-    );
+    const { memberCount = 2, extraSeats = null } = opts;
+    await seed.user(db, {
+      id: "owner-1",
+      email: "owner@test.com",
+      username: "owner",
+    });
+    await seedWorkspace();
+    for (let index = 1; index <= memberCount; index += 1) {
+      await seed.user(db, {
+        id: `m-${index}`,
+        email: `m-${index}@test.com`,
+        username: `m-${index}`,
+      });
+      await seed.workspaceMember(db, {
+        workspaceId: WS1,
+        userId: `m-${index}`,
+        relation: "editors",
+      });
+    }
+    await db
+      .insert(product)
+      .values({ id: "prod-seats", name: "Seats", meta: {} });
+    if (extraSeats !== null) {
+      await db.insert(transactionLog).values({
+        eventId: "evt-seats",
+        userId: "owner-1",
+        productId: "prod-seats",
+        eventData: {
+          type: "customer.subscription.updated",
+          created: 1000,
+          data: {
+            object: {
+              object: "subscription",
+              id: "sub-seats",
+              items: { data: [{ quantity: extraSeats }] },
+            },
+          },
+        },
+      });
+    }
   };
 
   test("maxSeats = seatsIncluded + extraSeats when subscription exists", async () => {
     // seatsIncluded=4, quantity=2 → maxSeats=6
-    setupListMembersMocks({
-      transactionLog: {
-        eventData: {
-          data: { object: { items: { data: [{ quantity: 2 }] } } },
-        },
-      },
-    });
+    await setupListMembers({ extraSeats: 2 });
 
     const ctx = createContext();
     const caller = createCaller(ctx);
-    const result = await caller.listMembers({ workspaceId: "ws-1" });
+    const result = await caller.listMembers({ workspaceId: WS1 });
 
     expect(result.success).toBe(true);
     if (result.success) {
@@ -470,11 +459,11 @@ describe("listMembers", () => {
 
   test("maxSeats = seatsIncluded when no subscription events", async () => {
     // seatsIncluded=4, no TransactionLog event → paidSeats=null → maxSeats=4
-    setupListMembersMocks({ transactionLog: null });
+    await setupListMembers({ extraSeats: null });
 
     const ctx = createContext();
     const caller = createCaller(ctx);
-    const result = await caller.listMembers({ workspaceId: "ws-1" });
+    const result = await caller.listMembers({ workspaceId: WS1 });
 
     expect(result.success).toBe(true);
     if (result.success) {
@@ -483,17 +472,11 @@ describe("listMembers", () => {
   });
 
   test("maxSeats = seatsIncluded when subscription has quantity=0", async () => {
-    setupListMembersMocks({
-      transactionLog: {
-        eventData: {
-          data: { object: { items: { data: [{ quantity: 0 }] } } },
-        },
-      },
-    });
+    await setupListMembers({ extraSeats: 0 });
 
     const ctx = createContext();
     const caller = createCaller(ctx);
-    const result = await caller.listMembers({ workspaceId: "ws-1" });
+    const result = await caller.listMembers({ workspaceId: WS1 });
 
     expect(result.success).toBe(true);
     if (result.success) {
@@ -502,7 +485,7 @@ describe("listMembers", () => {
   });
 
   test("maxSeats uses workspace owner's seats for member callers", async () => {
-    setupListMembersMocks({ transactionLog: null });
+    await setupListMembers({ extraSeats: null });
 
     const ctx = createContext({
       userId: "m-1",
@@ -510,7 +493,7 @@ describe("listMembers", () => {
       ownerPlanFeatures: teamPlan,
     });
     const caller = createCaller(ctx);
-    const result = await caller.listMembers({ workspaceId: "ws-1" });
+    const result = await caller.listMembers({ workspaceId: WS1 });
 
     expect(result.success).toBe(true);
     if (result.success) {
@@ -519,11 +502,11 @@ describe("listMembers", () => {
   });
 
   test("returns owner, members, and pendingInvites", async () => {
-    setupListMembersMocks({ memberCount: 2, transactionLog: null });
+    await setupListMembers({ memberCount: 2, extraSeats: null });
 
     const ctx = createContext();
     const caller = createCaller(ctx);
-    const result = await caller.listMembers({ workspaceId: "ws-1" });
+    const result = await caller.listMembers({ workspaceId: WS1 });
 
     expect(result.success).toBe(true);
     if (result.success) {

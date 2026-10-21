@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@webstudio-is/postgrest": "workspace:*",
+    "@webstudio-is/db": "workspace:*",
     "@webstudio-is/project": "workspace:*",
     "@webstudio-is/project-build": "workspace:*",
     "@webstudio-is/sdk": "workspace:*",
@@ -20,7 +20,6 @@
   },
   "devDependencies": {
     "@webstudio-is/tsconfig": "workspace:*",
-    "msw": "^2.13.2",
     "vitest": "^3.1.2"
   },
   "exports": {

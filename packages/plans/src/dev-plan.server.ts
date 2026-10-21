@@ -1,6 +1,4 @@
-import type { Client } from "@webstudio-is/postgrest/index.server";
-
-type PostgrestContext = { client: Client };
+import { eq, product, transactionLog, user, type Db } from "@webstudio-is/db";
 
 /**
  * Upsert or delete dev plan rows in the DB for the given user email.
@@ -14,72 +12,57 @@ type PostgrestContext = { client: Client };
 export const applyDevPlan = async (
   email: string,
   planName: string | null,
-  context: { postgrest: PostgrestContext }
+  context: { db: Db }
 ) => {
-  const { postgrest } = context;
-  // Resolve userId from email (user was already created by the authenticator).
-  const userResult = await postgrest.client
-    .from("User")
-    .select("id")
-    .eq("email", email)
-    .single();
+  const { db } = context;
+  try {
+    // Resolve userId from email (user was already created by the authenticator).
+    const [row] = await db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.email, email));
 
-  if (userResult.error) {
-    console.error("[applyDevPlan] Failed to find user:", userResult.error);
-    return;
-  }
-
-  const userId = userResult.data?.id as string | undefined;
-  if (!userId) {
-    console.error("[applyDevPlan] No user found for email:", email);
-    return;
-  }
-
-  if (planName !== null) {
-    const productId = `dev-product-${planName}`;
-
-    const productResult = await postgrest.client.from("Product").upsert({
-      id: productId,
-      name: planName,
-      meta: {},
-      features: [],
-      images: [],
-    });
-    if (productResult.error) {
-      console.error(
-        "[applyDevPlan] Failed to upsert Product:",
-        productResult.error
-      );
+    const userId = row?.id;
+    if (!userId) {
+      console.error("[applyDevPlan] No user found for email:", email);
       return;
     }
 
-    const txResult = await postgrest.client.from("TransactionLog").upsert({
-      eventId: `dev-${userId}`,
-      userId,
-      productId,
-      eventData: {
-        type: "checkout.session.completed",
-        created: Math.floor(Date.now() / 1000),
-        data: { object: { status: "complete" } },
-      },
-    });
-    if (txResult.error) {
-      console.error(
-        "[applyDevPlan] Failed to upsert TransactionLog:",
-        txResult.error
-      );
+    if (planName !== null) {
+      const productId = `dev-product-${planName}`;
+      const productRow = {
+        id: productId,
+        name: planName,
+        meta: {},
+        features: [],
+        images: [],
+      };
+      await db
+        .insert(product)
+        .values(productRow)
+        .onConflictDoUpdate({ target: product.id, set: productRow });
+
+      const transaction = {
+        eventId: `dev-${userId}`,
+        userId,
+        productId,
+        eventData: {
+          type: "checkout.session.completed",
+          created: Math.floor(Date.now() / 1000),
+          data: { object: { status: "complete" } },
+        },
+      };
+      await db.insert(transactionLog).values(transaction).onConflictDoUpdate({
+        target: transactionLog.eventId,
+        set: transaction,
+      });
+    } else {
+      // Remove any existing dev plan row — the user becomes free tier.
+      await db
+        .delete(transactionLog)
+        .where(eq(transactionLog.eventId, `dev-${userId}`));
     }
-  } else {
-    // Remove any existing dev plan row — the user becomes free tier.
-    const deleteResult = await postgrest.client
-      .from("TransactionLog")
-      .delete()
-      .eq("eventId", `dev-${userId}`);
-    if (deleteResult.error) {
-      console.error(
-        "[applyDevPlan] Failed to delete TransactionLog:",
-        deleteResult.error
-      );
-    }
+  } catch (error) {
+    console.error("[applyDevPlan] Failed to apply the dev plan:", error);
   }
 };

@@ -11,7 +11,16 @@ import { unpublishBuild } from "@webstudio-is/project-build/server";
 import { validateDomain } from "./validate";
 import { cnameFromUserId } from "./cname-from-user-id";
 import type { Project } from "@webstudio-is/project";
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  countDistinct,
+  domain as domainTable,
+  eq,
+  one,
+  project as projectTable,
+  projectDomain,
+  type Database,
+} from "@webstudio-is/db";
 
 type Result = { success: false; error: string } | { success: true };
 
@@ -65,47 +74,30 @@ export const create = async (
 
   const { domain } = validationResult;
 
-  // Create domain in domain table
-  const upsertResult = await context.postgrest.client
-    .from("Domain")
-    .upsert(
-      {
-        id: createId(),
-        domain,
-        status: "INITIALIZING",
-      },
-      // Do not update if exists
-      { onConflict: "domain", ignoreDuplicates: true }
-    )
-    .eq("domain", domain);
+  try {
+    // Create domain in domain table; keep an existing one as it is.
+    await context.db
+      .insert(domainTable)
+      .values({ id: createId(), domain, status: "INITIALIZING" })
+      .onConflictDoNothing({ target: domainTable.domain });
 
-  if (upsertResult.error) {
-    return createErrorResponse(upsertResult.error);
-  }
+    const { id: domainId } = one(
+      await context.db
+        .select({ id: domainTable.id })
+        .from(domainTable)
+        .where(eq(domainTable.domain, domain)),
+      "Domain"
+    );
+    const txtRecord = createId();
 
-  // Get domain id (upsert in postgrest does not return anything in case of conflict and ignoreDuplicates)
-  const domainRow = await context.postgrest.client
-    .from("Domain")
-    .select("id")
-    .eq("domain", domain)
-    .single();
-
-  if (domainRow.error) {
-    return createErrorResponse(domainRow.error);
-  }
-
-  const domainId = domainRow.data.id;
-  const txtRecord = createId();
-
-  const result = await context.postgrest.client.from("ProjectDomain").insert({
-    domainId,
-    projectId: props.projectId,
-    txtRecord,
-    cname: await cnameFromUserId(ownerId),
-  });
-
-  if (result.error) {
-    return createErrorResponse(result.error);
+    await context.db.insert(projectDomain).values({
+      domainId,
+      projectId: props.projectId,
+      txtRecord,
+      cname: await cnameFromUserId(ownerId),
+    });
+  } catch (error) {
+    return createErrorResponse(error);
   }
 
   return { success: true };
@@ -131,49 +123,47 @@ export const verify = async (
     throw new Error("You don't have access to create this project domains");
   }
 
-  const projectDomain = await context.postgrest.client
-    .from("ProjectDomain")
-    .select(
-      `
-      txtRecord,
-      cname,
-      domain:Domain(*)
-      `
-    )
-    .eq("domainId", props.domainId)
-    .eq("projectId", props.projectId)
-    .single();
-
-  if (projectDomain.error) {
-    return createErrorResponse(projectDomain.error);
+  let projectDomainRow: { txtRecord: string; domain: string };
+  try {
+    projectDomainRow = one(
+      await context.db
+        .select({
+          txtRecord: projectDomain.txtRecord,
+          domain: domainTable.domain,
+        })
+        .from(projectDomain)
+        .innerJoin(domainTable, eq(domainTable.id, projectDomain.domainId))
+        .where(
+          and(
+            eq(projectDomain.domainId, props.domainId),
+            eq(projectDomain.projectId, props.projectId)
+          )
+        ),
+      "Domain"
+    );
+  } catch (error) {
+    return createErrorResponse(error);
   }
 
-  const domain = projectDomain.data.domain?.domain;
-
-  if (domain == null) {
-    return createErrorResponse("Domain not found");
-  }
+  const { domain, txtRecord } = projectDomainRow;
 
   // @todo: TXT verification and domain initialization should be implemented in the future as queue service
   const createDomainResult = await context.domain.domainTrpc.create.mutate({
     domain,
-    txtRecord: projectDomain.data.txtRecord,
+    txtRecord,
   });
 
   if (createDomainResult.success === false) {
     return createDomainResult;
   }
 
-  const domainUpdateResult = await context.postgrest.client
-    .from("Domain")
-    .update({
-      status: "PENDING",
-      txtRecord: projectDomain.data.txtRecord,
-    })
-    .eq("id", props.domainId);
-
-  if (domainUpdateResult.error) {
-    return createErrorResponse(domainUpdateResult.error);
+  try {
+    await context.db
+      .update(domainTable)
+      .set({ status: "PENDING", txtRecord })
+      .where(eq(domainTable.id, props.domainId));
+  } catch (error) {
+    return createErrorResponse(error);
   }
 
   return { success: true };
@@ -199,20 +189,22 @@ export const remove = async (
     throw new Error("You don't have access to delete this project domains");
   }
 
-  const projectDomainResult = await context.postgrest.client
-    .from("ProjectDomain")
-    .select("domain:Domain(id, domain)")
-    .eq("domainId", props.domainId)
-    .eq("projectId", props.projectId)
-    .single();
-
-  if (projectDomainResult.error) {
-    return createErrorResponse(projectDomainResult.error);
-  }
-
-  const domain = projectDomainResult.data.domain;
-  if (domain === null) {
-    return createErrorResponse("Domain not found");
+  const projectDomainFilter = and(
+    eq(projectDomain.domainId, props.domainId),
+    eq(projectDomain.projectId, props.projectId)
+  );
+  let domain: { id: string; domain: string };
+  try {
+    domain = one(
+      await context.db
+        .select({ id: domainTable.id, domain: domainTable.domain })
+        .from(projectDomain)
+        .innerJoin(domainTable, eq(domainTable.id, projectDomain.domainId))
+        .where(projectDomainFilter),
+      "Domain"
+    );
+  } catch (error) {
+    return createErrorResponse(error);
   }
 
   const deploymentResult = await context.deployment.deploymentTrpc.unpublish
@@ -241,38 +233,26 @@ export const remove = async (
     throw error;
   });
 
-  const deleteResult = await context.postgrest.client
-    .from("ProjectDomain")
-    .delete()
-    .eq("domainId", props.domainId)
-    .eq("projectId", props.projectId);
+  try {
+    await context.db.delete(projectDomain).where(projectDomainFilter);
 
-  if (deleteResult.error) {
-    return createErrorResponse(deleteResult.error);
-  }
+    const remainingDomains = await context.db.$count(
+      projectDomain,
+      eq(projectDomain.domainId, props.domainId)
+    );
 
-  const remainingDomains = await context.postgrest.client
-    .from("ProjectDomain")
-    .select("domainId", { count: "exact", head: true })
-    .eq("domainId", props.domainId);
-
-  if (remainingDomains.error) {
-    return createErrorResponse(remainingDomains.error);
-  }
-
-  if (remainingDomains.count === 0) {
-    const updateResult = await context.postgrest.client
-      .from("Domain")
-      .update({
-        status: "INITIALIZING",
-        error: "Removed from project",
-        txtRecord: null,
-      })
-      .eq("id", props.domainId);
-
-    if (updateResult.error) {
-      return createErrorResponse(updateResult.error);
+    if (remainingDomains === 0) {
+      await context.db
+        .update(domainTable)
+        .set({
+          status: "INITIALIZING",
+          error: "Removed from project",
+          txtRecord: null,
+        })
+        .where(eq(domainTable.id, props.domainId));
     }
+  } catch (error) {
+    return createErrorResponse(error);
   }
 
   return { success: true };
@@ -333,39 +313,36 @@ export const updateStatus = async (
   const { data } = statusResult;
 
   // update domain status
-  const updatedDomainResult = await context.postgrest.client
-    .from("Domain")
-    .update({
-      status: statusToStatusEnum(data.status),
-      error: data.status === "error" ? data.error : null,
-    })
-    .eq("domain", domain)
-    .select("*")
-    .single();
-
-  if (updatedDomainResult.error) {
-    return createErrorResponse(updatedDomainResult.error);
+  try {
+    const updatedDomain = one(
+      await context.db
+        .update(domainTable)
+        .set({
+          status: statusToStatusEnum(data.status),
+          error: data.status === "error" ? data.error : null,
+        })
+        .where(eq(domainTable.domain, domain))
+        .returning(),
+      "Domain"
+    );
+    return { success: true, domain: updatedDomain };
+  } catch (error) {
+    return createErrorResponse(error);
   }
-
-  return { success: true, domain: updatedDomainResult.data };
 };
 
 export const countTotalDomains = async (
   userId: string,
   context: AppContext
 ): Promise<number> => {
-  const result = await context.postgrest.client
-    .from("Domain")
-    .select("Project!ProjectDomain!inner(id)", {
-      count: "exact",
-      head: true,
-    })
-    .eq("Project.userId", userId)
-    .eq("Project.isDeleted", false);
+  // Domains linked to at least one of the user's live projects.
+  const [{ count }] = await context.db
+    .select({ count: countDistinct(projectDomain.domainId) })
+    .from(projectDomain)
+    .innerJoin(projectTable, eq(projectTable.id, projectDomain.projectId))
+    .where(
+      and(eq(projectTable.userId, userId), eq(projectTable.isDeleted, false))
+    );
 
-  if (result.error) {
-    throw result.error;
-  }
-
-  return result.count ?? 0;
+  return count;
 };

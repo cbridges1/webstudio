@@ -1,3 +1,4 @@
+import { build, eq, one } from "@webstudio-is/db";
 import { z } from "zod";
 import {
   AuthorizationError,
@@ -200,17 +201,15 @@ const relayPatchInput = z.object({
 });
 
 const loadBuildProjectId = async (ctx: AppContext, buildId: string) => {
-  const build = await ctx.postgrest.client
-    .from("Build")
-    .select("projectId")
-    .eq("id", buildId)
-    .single();
+  const { projectId } = one(
+    await ctx.db
+      .select({ projectId: build.projectId })
+      .from(build)
+      .where(eq(build.id, buildId)),
+    "Build"
+  );
 
-  if (build.error) {
-    throw build.error;
-  }
-
-  return String(build.data.projectId);
+  return projectId;
 };
 
 const assertBrowserPatchContext = ({

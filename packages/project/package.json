@@ -15,7 +15,7 @@
     "@webstudio-is/authorization-token": "workspace:*",
     "@webstudio-is/feature-flags": "workspace:*",
     "@webstudio-is/plans": "workspace:*",
-    "@webstudio-is/postgrest": "workspace:*",
+    "@webstudio-is/db": "workspace:*",
     "@webstudio-is/project-build": "workspace:*",
     "@webstudio-is/project-migrations": "workspace:*",
     "@webstudio-is/sdk": "workspace:*",
@@ -28,7 +28,6 @@
   },
   "devDependencies": {
     "@webstudio-is/tsconfig": "workspace:*",
-    "msw": "^2.13.2",
     "vitest": "^3.1.2"
   },
   "exports": {

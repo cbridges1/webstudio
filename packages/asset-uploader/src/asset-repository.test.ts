@@ -50,7 +50,7 @@ import {
 } from "./folder-persistence";
 
 const context = {
-  postgrest: { client: {} },
+  db: {},
 } as unknown as AppContext;
 const assetClient: AssetObjectStore = {
   readFile: vi.fn(),
@@ -251,7 +251,7 @@ describe("PostgresAssetRepository", () => {
         expect(
           dependencies.synchronizeCanonicalAssets
         ).toHaveBeenCalledExactlyOnceWith({
-          client: context.postgrest.client,
+          client: context.db,
           assetClient: assetStore,
           projectId: "project-1",
           assetIds: ["post"],
@@ -714,7 +714,7 @@ describe("PostgresAssetRepository", () => {
     ).rejects.toThrow("Use New entry");
     expect(dependencies.deleteAssetsWithClient).toHaveBeenCalledWith(
       { projectId: "project-1", ids: [uploadedAsset.id] },
-      context.postgrest.client
+      context.db
     );
   });
 
@@ -931,7 +931,7 @@ describe("PostgresAssetRepository", () => {
     ).rejects.toThrow('Collection entry "notes.txt" must be an MDX file');
     expect(dependencies.deleteAssetsWithClient).toHaveBeenCalledWith(
       { projectId: "project-1", ids: [configAsset.id] },
-      context.postgrest.client
+      context.db
     );
   });
 
@@ -1000,7 +1000,7 @@ describe("PostgresAssetRepository", () => {
     ).rejects.toThrow('Collection entry "notes.txt" must be an MDX file');
     expect(dependencies.deleteAssetsWithClient).toHaveBeenCalledWith(
       { projectId: "project-1", ids: [configAsset.id] },
-      context.postgrest.client
+      context.db
     );
   });
 
@@ -1289,7 +1289,7 @@ describe("PostgresAssetRepository", () => {
       } else {
         expect(dependencies.deleteAssetsWithClient).toHaveBeenCalledWith(
           { projectId: "project-1", ids: [createdAsset.id] },
-          context.postgrest.client
+          context.db
         );
       }
     }
@@ -1731,7 +1731,7 @@ describe("PostgresAssetRepository", () => {
     ).rejects.toThrow("Collection templates must be MDX files");
     expect(dependencies.deleteAssetsWithClient).toHaveBeenCalledWith(
       { projectId: "project-1", ids: [templateAsset.id] },
-      context.postgrest.client
+      context.db
     );
   });
 
@@ -1934,7 +1934,7 @@ describe("PostgresAssetRepository", () => {
         assetId: createdAsset.id,
         name: createdAsset.name,
       },
-      context.postgrest.client
+      context.db
     );
     expect(dependencies.uploadFile).not.toHaveBeenCalled();
 
@@ -1956,7 +1956,7 @@ describe("PostgresAssetRepository", () => {
         assetId: createdAsset.id,
         name: createdAsset.name,
       },
-      context.postgrest.client
+      context.db
     );
   });
 
@@ -2611,18 +2611,18 @@ describe("PostgresAssetRepository", () => {
     expect(dependencies.loadAssetsByProjectWithClient).toHaveBeenNthCalledWith(
       1,
       "project-1",
-      context.postgrest.client
+      context.db
     );
     expect(dependencies.loadAssetsByProjectWithClient).toHaveBeenNthCalledWith(
       2,
       "project-1",
-      context.postgrest.client,
+      context.db,
       ["asset-1"]
     );
     expect(dependencies.loadAssetsByProjectWithClient).toHaveBeenNthCalledWith(
       3,
       "project-1",
-      context.postgrest.client,
+      context.db,
       ["asset-1"]
     );
     expect(dependencies.hasProjectPermit).toHaveBeenCalledWith(
@@ -2673,7 +2673,7 @@ describe("PostgresAssetRepository", () => {
     await expect(repository.deleteFolder("folder-1")).resolves.toBeUndefined();
     expect(dependencies.deleteAssetFoldersWithClient).toHaveBeenCalledWith(
       { projectId: "project-1", ids: ["folder-1"] },
-      context.postgrest.client
+      context.db
     );
   });
 
@@ -2766,7 +2766,7 @@ describe("PostgresAssetRepository", () => {
     });
     expect(dependencies.upsertAssetFolderWithClient).toHaveBeenCalledWith(
       { projectId: "project-1", folder },
-      context.postgrest.client
+      context.db
     );
     expect(dependencies.uploadFile).toHaveBeenCalledTimes(2);
     dependencies.loadAssetFoldersByProjectWithClient.mockResolvedValue([
@@ -3213,12 +3213,12 @@ describe("PostgresAssetRepository", () => {
       context
     );
     expect(dependencies.synchronizeCanonicalAssets).toHaveBeenCalledWith({
-      client: context.postgrest.client,
+      client: context.db,
       assetClient,
       projectId: "project-1",
     });
     expect(dependencies.loadCanonicalAssetFileEntries).toHaveBeenCalledWith({
-      client: context.postgrest.client,
+      client: context.db,
       projectId: "project-1",
     });
     expect(dependencies.loadCanonicalAssetFileEntries).toHaveBeenCalledTimes(2);
@@ -3431,7 +3431,7 @@ describe("PostgresAssetRepository", () => {
       expect(dependencies.synchronizeCanonicalAssets).not.toHaveBeenCalled();
       expect(dependencies.loadCanonicalAssetFileEntries).not.toHaveBeenCalled();
       expect(dependencies.loadCanonicalAssetBaseEntries).toHaveBeenCalledWith({
-        client: context.postgrest.client,
+        client: context.db,
         projectId: "project-1",
       });
       expect(readFile).not.toHaveBeenCalled();
@@ -5029,7 +5029,7 @@ describe("PostgresAssetRepository", () => {
 
     expect(dependencies.synchronizeCanonicalAssets).not.toHaveBeenCalled();
     expect(dependencies.loadCanonicalAssetFileEntries).toHaveBeenCalledWith({
-      client: context.postgrest.client,
+      client: context.db,
       projectId: "project-1",
       assetIds: ["published", "draft"],
     });
@@ -5334,7 +5334,7 @@ describe("PostgresAssetRepository", () => {
           folderId: "blog",
         },
       },
-      context.postgrest.client
+      context.db
     );
   });
 
@@ -5381,7 +5381,7 @@ describe("PostgresAssetRepository", () => {
 
     expect(dependencies.deleteAssetsWithClient).toHaveBeenCalledWith(
       { projectId: "project-1", ids: ["asset-1", "asset-2"] },
-      context.postgrest.client
+      context.db
     );
     expect(dependencies.synchronizeCanonicalAssets).not.toHaveBeenCalled();
   });
@@ -5496,7 +5496,7 @@ describe("PostgresAssetRepository", () => {
     );
 
     expect(dependencies.synchronizeCanonicalAssets).toHaveBeenCalledWith({
-      client: context.postgrest.client,
+      client: context.db,
       assetClient,
       projectId: "project-1",
       assetIds: ["asset-1", "asset-2"],
@@ -5559,7 +5559,7 @@ describe("PostgresAssetRepository", () => {
     expect(urlResult.__diagnostics__.unresolved).toBeUndefined();
     expect(dependencies.loadAssetsByProjectWithClient).toHaveBeenCalledWith(
       "project-1",
-      context.postgrest.client,
+      context.db,
       ["asset-1"]
     );
     dependencies.loadAssetsByProjectWithClient.mockClear();

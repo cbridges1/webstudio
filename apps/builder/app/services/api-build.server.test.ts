@@ -1,12 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createDefaultPages } from "@webstudio-is/project-build";
 import type { CompactBuild } from "@webstudio-is/project-build";
-import {
-  createTestServer,
-  db,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import { buildPatchTransaction } from "@webstudio-is/protocol";
 import { getApiCompatibilityPayload } from "@webstudio-is/trpc-interface/api-compatibility";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
@@ -85,7 +80,8 @@ test("separates validated restore points from raw build patches", () => {
   ).toBe(false);
 });
 
-const server = createTestServer();
+const testDb = setupTestDb();
+const testContext = { db: testDb } as unknown as AppContext;
 
 type ProjectSummaryInput = Parameters<typeof serializeProjectSummary>[0];
 type SnapshotBuildInput = Parameters<typeof createBuildSnapshot>[0]["build"];
@@ -162,10 +158,11 @@ afterEach(() => {
 
 describe("api build loading", () => {
   test("loads a specific project build version", async () => {
-    server.use(db.get("Build", () => json([createBuildRow()])));
+    await seed.project(testDb, { id: "project-1", userId: "user-1" });
+    await seed.build(testDb, createBuildRow());
 
     await expect(
-      loadBuildByProjectVersion(testContext as AppContext, "project-1", 3)
+      loadBuildByProjectVersion(testContext, "project-1", 3)
     ).resolves.toMatchObject({
       id: "build-1",
       projectId: "project-1",
@@ -174,10 +171,11 @@ describe("api build loading", () => {
   });
 
   test("throws not found when project build version is missing", async () => {
-    server.use(db.get("Build", () => json([])));
+    await seed.project(testDb, { id: "project-1", userId: "user-1" });
+    await seed.build(testDb, createBuildRow());
 
     await expect(
-      loadBuildByProjectVersion(testContext as AppContext, "project-1", 99)
+      loadBuildByProjectVersion(testContext, "project-1", 99)
     ).rejects.toMatchObject({
       code: "NOT_FOUND",
       message: "Build version not found for project",

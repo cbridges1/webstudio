@@ -3,7 +3,7 @@ import {
   type AppContext,
 } from "@webstudio-is/trpc-interface/index.server";
 import { patchLoadedBuild } from "@webstudio-is/project/index.server";
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import { build as buildTable, eq, one, type Database } from "@webstudio-is/db";
 import type { AssetObjectReader } from "@webstudio-is/asset-uploader/server";
 import { createAssetClient } from "~/shared/asset-client";
 import {
@@ -82,22 +82,18 @@ const selectBuildColumns = async (
   buildId: string,
   columns: readonly BuildColumn[]
 ) => {
-  const build = await context.postgrest.client
-    .from("Build")
-    .select(columns.join(", "))
-    .eq("id", buildId);
+  const builds = await context.db
+    .select(
+      Object.fromEntries(columns.map((column) => [column, buildTable[column]]))
+    )
+    .from(buildTable)
+    .where(eq(buildTable.id, buildId));
 
-  if (build.error) {
-    throw build.error;
+  if (builds.length !== 1) {
+    throw new Error(`Results contain ${builds.length} row(s) requires 1 row`);
   }
 
-  if (build.data.length !== 1) {
-    throw new Error(
-      `Results contain ${build.data.length} row(s) requires 1 row`
-    );
-  }
-
-  return build.data[0] as unknown as Partial<BuildRow> &
+  return builds[0] as unknown as Partial<BuildRow> &
     Pick<BuildRow, (typeof columns)[number]>;
 };
 
@@ -147,20 +143,15 @@ export const toPatchResult = async (error: unknown): Promise<PatchResult> => {
 };
 
 const loadBuildState = async (context: AppContext, buildId: string) => {
-  const build = await context.postgrest.client
-    .from("Build")
-    .select("projectId, version")
-    .eq("id", buildId)
-    .single();
+  const { projectId, version } = one(
+    await context.db
+      .select({ projectId: buildTable.projectId, version: buildTable.version })
+      .from(buildTable)
+      .where(eq(buildTable.id, buildId)),
+    "Build"
+  );
 
-  if (build.error) {
-    throw build.error;
-  }
-
-  return {
-    projectId: String(build.data.projectId),
-    version: Number(build.data.version),
-  };
+  return { projectId, version };
 };
 
 const loadBuildForContentMode = async (

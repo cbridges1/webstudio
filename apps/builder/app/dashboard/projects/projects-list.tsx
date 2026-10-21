@@ -20,6 +20,7 @@ import type { User } from "~/shared/db/user.server";
 import { ProjectMenu } from "./project-menu";
 import { formatDate } from "./utils";
 import type { SortField, SortOrder } from "./sort";
+import { getPublishedDomain } from "~/shared/published-domain";
 
 const projectColumns =
   "minmax(0, 35fr) repeat(3, minmax(0, 20fr)) minmax(0, 5fr)";
@@ -78,6 +79,7 @@ export const ProjectsListItem = ({
     latestBuildVirtual,
     tags,
     domainsVirtual,
+    publishedUrl,
   },
   publisherHost,
   projectsTags,
@@ -86,7 +88,11 @@ export const ProjectsListItem = ({
     (d: { domain: string; status: string; verified: boolean }) =>
       d.status === "ACTIVE" && d.verified
   )?.domain;
-  const displayDomain = customDomain ?? `${domain}.${publisherHost}`;
+  // selfhost: the deployed site's address wins over the custom-domain lookup
+  const displayDomain =
+    publishedUrl != null
+      ? getPublishedDomain({ domain, publishedUrl }, publisherHost)
+      : (customDomain ?? `${domain}.${publisherHost}`);
   const [openDialog, setOpenDialog] = useState<DialogType | undefined>();
   const [isHidden, setIsHidden] = useState(false);
 

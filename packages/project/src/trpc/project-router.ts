@@ -13,6 +13,16 @@ import { defaultPlanFeatures } from "@webstudio-is/plans";
 import { getExtraPaidSeats } from "@webstudio-is/plans/index.server";
 import { projectTitle } from "../shared/project-schema";
 import { marketplaceApprovalStatus } from "../shared/marketplace-schema";
+import {
+  and,
+  build,
+  eq,
+  isNull,
+  maybeOne,
+  publishedBuilds,
+  userPublishCount,
+  type Db,
+} from "@webstudio-is/db";
 
 export const projectRouter = router({
   rename: procedure
@@ -127,15 +137,13 @@ export const projectRouter = router({
           }
         }
 
-        const result = await ctx.postgrest.client
-          .from("user_publish_count")
-          .select("count")
-          .eq("user_id", ownerId)
-          .maybeSingle();
-        if (result.error) {
-          throw result.error;
-        }
-        const count = result.data?.count ?? 0;
+        const result = maybeOne(
+          await ctx.db
+            .select({ count: userPublishCount.count })
+            .from(userPublishCount)
+            .where(eq(userPublishCount.user_id, ownerId))
+        );
+        const count = result?.count ?? 0;
         if (limit === undefined) {
           return { success: true, data: count };
         }
@@ -169,16 +177,12 @@ export const projectRouter = router({
         if (permit === undefined) {
           throw new AuthorizationError("Not authorized to access this project");
         }
-        const publishedBuilds = await ctx.postgrest.client
-          .from("published_builds")
-          .select("*")
-          .eq("projectId", input.projectId);
-        if (publishedBuilds.error) {
-          throw publishedBuilds.error;
-        }
         return {
           success: true,
-          data: publishedBuilds.data,
+          data: await ctx.db
+            .select()
+            .from(publishedBuilds)
+            .where(eq(publishedBuilds.projectId, input.projectId)),
         };
       } catch (error) {
         return createErrorResponse(error);
@@ -208,16 +212,7 @@ export const projectRouter = router({
           if (!permit) {
             throw new AuthorizationError("Not authorized");
           }
-          const build = await ctx.postgrest.client.rpc(
-            "restore_development_build",
-            {
-              project_id: input.projectId,
-              from_build_id: input.fromBuildId,
-            }
-          );
-          if (build.error) {
-            throw build.error;
-          }
+          await restoreDevelopmentBuild(ctx.db, input);
           return {
             success: true,
           };
@@ -229,3 +224,46 @@ export const projectRouter = router({
 });
 
 export type ProjectRouter = typeof projectRouter;
+
+/** Replaces the development build's content with a copy of another build's. */
+const restoreDevelopmentBuild = async (
+  db: Db,
+  input: { projectId: string; fromBuildId: string }
+) => {
+  await db.transaction(async (tx) => {
+    const source = maybeOne(
+      await tx
+        .select({
+          version: build.version,
+          lastTransactionId: build.lastTransactionId,
+          pages: build.pages,
+          breakpoints: build.breakpoints,
+          styles: build.styles,
+          styleSources: build.styleSources,
+          styleSourceSelections: build.styleSourceSelections,
+          props: build.props,
+          dataSources: build.dataSources,
+          resources: build.resources,
+          instances: build.instances,
+          marketplaceProduct: build.marketplaceProduct,
+          projectSettings: build.projectSettings,
+        })
+        .from(build)
+        .where(
+          and(
+            eq(build.projectId, input.projectId),
+            eq(build.id, input.fromBuildId)
+          )
+        )
+    );
+    if (source === null) {
+      return;
+    }
+    await tx
+      .update(build)
+      .set(source)
+      .where(
+        and(eq(build.projectId, input.projectId), isNull(build.deployment))
+      );
+  });
+};

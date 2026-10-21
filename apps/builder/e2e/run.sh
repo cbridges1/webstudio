@@ -13,7 +13,6 @@ case "$mode" in
   dev-backend)
     export E2E_SKIP_CLEANUP=true
     export E2E_RUN_TESTS=false
-    export E2E_START_POSTGREST=true
     export E2E_DB_BOOTSTRAP=if-empty
     export E2E_INSTALL_PLAYWRIGHT=false
     ;;
@@ -21,17 +20,11 @@ case "$mode" in
     export E2E_SKIP_CLEANUP=true
     export E2E_DB_BOOTSTRAP=if-empty
     export E2E_INSTALL_PLAYWRIGHT=false
-    export E2E_BUILDER_URL="${E2E_BUILDER_URL:-https://127.0.0.1:3000}"
+    export E2E_BUILDER_URL="${E2E_BUILDER_URL:-http://localhost:3000}"
     ;;
   schema-cache)
     export E2E_DB_BOOTSTRAP=migrations
     export E2E_WRITE_SCHEMA_SNAPSHOT=true
-    export E2E_RUN_TESTS=false
-    ;;
-  supabase-migrations)
-    export E2E_BACKEND_MODE=supabase
-    export E2E_BUILD_DATABASE_IMAGE=false
-    export E2E_DB_BOOTSTRAP=migrations
     export E2E_RUN_TESTS=false
     ;;
   ci-shard)
@@ -52,16 +45,11 @@ if [ "${PLAYWRIGHT_ARGS[0]:-}" = "--" ]; then
 fi
 
 export PGPORT="${E2E_PGPORT:-55434}"
-export POSTGREST_PORT="${E2E_POSTGREST_PORT:-55435}"
 export POSTGRES_DB="${E2E_POSTGRES_DB:-webstudio}"
-# The Supabase image owns the schema as this required bootstrap role. Callers
-# can still replace migration connections through E2E_DATABASE_URL and
-# E2E_DIRECT_URL.
-export POSTGRES_USER="supabase_admin"
+export POSTGRES_USER="${E2E_POSTGRES_USER:-webstudio}"
 export POSTGRES_PASSWORD="${E2E_POSTGRES_PASSWORD:-pass}"
-export DATABASE_URL="${E2E_DATABASE_URL:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${PGPORT}/${POSTGRES_DB}?pgbouncer=true}"
-export DIRECT_URL="${E2E_DIRECT_URL:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${PGPORT}/${POSTGRES_DB}}"
-export POSTGREST_URL="${E2E_POSTGREST_URL:-http://localhost:${POSTGREST_PORT}}"
+export DATABASE_URL="${E2E_DATABASE_URL:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${PGPORT}/${POSTGRES_DB}}"
+export DIRECT_URL="${E2E_DIRECT_URL:-$DATABASE_URL}"
 export E2E_BACKEND_MODE="${E2E_BACKEND_MODE:-test}"
 
 source "$ROOT_DIR/apps/builder/backend/lib.sh"
@@ -70,15 +58,13 @@ builder_backend_init "$E2E_BACKEND_MODE"
 builder_backend_init_schema_snapshot
 
 export E2E_DB_BOOTSTRAP="${E2E_DB_BOOTSTRAP:-auto}"
-export E2E_BUILD_DATABASE_IMAGE="${E2E_BUILD_DATABASE_IMAGE:-true}"
-export E2E_GENERATE_PRISMA="${E2E_GENERATE_PRISMA:-auto}"
+export E2E_BUILD_DATABASE_IMAGE="${E2E_BUILD_DATABASE_IMAGE:-false}"
 export E2E_DOCKER_PULL_TIMEOUT_SECONDS="${E2E_DOCKER_PULL_TIMEOUT_SECONDS:-300}"
 export E2E_DOCKER_TIMEOUT_SECONDS="${E2E_DOCKER_TIMEOUT_SECONDS:-60}"
 export E2E_MIGRATIONS_TIMEOUT_SECONDS="${E2E_MIGRATIONS_TIMEOUT_SECONDS:-300}"
 export E2E_INSTALL_PLAYWRIGHT="${E2E_INSTALL_PLAYWRIGHT:-auto}"
 export E2E_PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS="${E2E_PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS:-600}"
 export E2E_RUN_TESTS="${E2E_RUN_TESTS:-true}"
-export E2E_START_POSTGREST="${E2E_START_POSTGREST:-$E2E_RUN_TESTS}"
 export E2E_BUILDER_BUILD_TIMEOUT_SECONDS="${E2E_BUILDER_BUILD_TIMEOUT_SECONDS:-600}"
 export E2E_TEST_COMMAND_TIMEOUT_SECONDS="${E2E_TEST_COMMAND_TIMEOUT_SECONDS:-900}"
 export E2E_TEST_SELECTION_TIMEOUT_SECONDS="${E2E_TEST_SELECTION_TIMEOUT_SECONDS:-60}"
@@ -164,7 +150,7 @@ run_builder_e2e_tests() {
 validate_builder_e2e_selection() {
   (
     cd "$ROOT_DIR/apps/builder"
-    export E2E_BUILDER_URL="${E2E_BUILDER_URL:-https://127.0.0.1:3000}"
+    export E2E_BUILDER_URL="${E2E_BUILDER_URL:-http://localhost:3000}"
     if [ "${#PLAYWRIGHT_ARGS[@]}" -eq 0 ]; then
       pnpm e2e:ci --list
     else
@@ -193,19 +179,11 @@ run_step "prepare e2e database image" "$E2E_DOCKER_PULL_TIMEOUT_SECONDS" \
 run_step "start e2e database" "$E2E_DOCKER_TIMEOUT_SECONDS" \
   builder_backend_start_db
 
-run_step "generate prisma client" "$E2E_MIGRATIONS_TIMEOUT_SECONDS" \
-  builder_generate_prisma_client "$E2E_GENERATE_PRISMA"
-
 run_step "wait for e2e database" "$E2E_DOCKER_TIMEOUT_SECONDS" \
   builder_backend_wait_for_db "$E2E_DOCKER_TIMEOUT_SECONDS"
 
 run_step "bootstrap database schema" "$E2E_MIGRATIONS_TIMEOUT_SECONDS" \
   bootstrap_database
-
-if [ "$E2E_START_POSTGREST" = "true" ]; then
-  run_step "start e2e postgrest" "$E2E_DOCKER_TIMEOUT_SECONDS" \
-    builder_backend_start_postgrest
-fi
 
 if [ "$E2E_RUN_TESTS" = "true" ]; then
   run_step "install playwright chromium" "$E2E_PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS" \

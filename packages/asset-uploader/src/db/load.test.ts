@@ -1,63 +1,50 @@
 import { describe, test, expect, vi } from "vitest";
-import {
-  createTestServer,
-  db,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { AuthorizationError } from "@webstudio-is/trpc-interface/index.server";
 import { asset } from "@webstudio-is/sdk";
 import { loadAssetsByProject } from "./load";
 
-const server = createTestServer();
+const db = setupTestDb();
 
 const createContext = (): AppContext =>
   ({
-    ...testContext,
+    db,
     authorization: { type: "user", userId: "user-1" },
     getOwnerPlanFeatures: () => Promise.resolve({}),
   }) as unknown as AppContext;
 
-/**
- * hasProjectPermit checks direct ownership via:
- *   GET /Project?id=eq.{id}&userId=eq.{userId}
- * Returning a row grants access. Include this in each test that needs
- * hasProjectPermit to pass.
- */
-const projectOwnershipHandler = db.get("Project", () => json({ id: "proj-1" }));
-
-// Asset row with File join as PostgREST returns it (select alias `assetId:id`
-// causes the column to appear as `assetId` in the response).
-const assetRow = {
-  assetId: "asset-1",
-  projectId: "proj-1",
-  filename: "photo.jpg",
-  description: null,
-  folderId: null,
-  file: {
-    name: "photo.jpg",
-    format: "jpg",
-    description: null,
-    size: 12345,
-    createdAt: "2024-01-01T00:00:00.000Z",
-    updatedAt: "2024-02-01T00:00:00.000Z",
-    meta: JSON.stringify({ width: 800, height: 600 }),
-    status: "UPLOADED",
-  },
+const fileRow = {
+  format: "jpg",
+  size: 12345,
+  createdAt: "2024-01-01T00:00:00.000Z",
+  updatedAt: "2024-02-01T00:00:00.000Z",
+  meta: JSON.stringify({ width: 800, height: 600 }),
 };
 
-describe("loadAssetsByProject (msw)", () => {
+/** proj-1, owned by user-1. */
+const seedProject = async () => {
+  await seed.project(db, { id: "proj-1", userId: "user-1" });
+};
+
+describe("loadAssetsByProject", () => {
   test("returns formatted assets for an authorised project", async () => {
-    server.use(
-      projectOwnershipHandler,
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.get("projectId")).toBe("eq.proj-1");
-        expect(url.searchParams.get("file.status")).toBe("eq.UPLOADED");
-        return json([assetRow]);
-      }),
-      db.get("AssetFolder", () => json([]))
+    await seedProject();
+    await seed.asset(
+      db,
+      {
+        id: "asset-1",
+        projectId: "proj-1",
+        name: "photo.jpg",
+        filename: "photo.jpg",
+      },
+      fileRow
+    );
+    // Files still uploading are left out.
+    await seed.asset(
+      db,
+      { id: "asset-2", projectId: "proj-1", name: "pending.jpg" },
+      { ...fileRow, status: "UPLOADING" }
     );
 
     const result = await loadAssetsByProject("proj-1", createContext());
@@ -73,34 +60,25 @@ describe("loadAssetsByProject (msw)", () => {
   });
 
   test("returns empty array when project has no uploaded assets", async () => {
-    server.use(
-      projectOwnershipHandler,
-      db.get("Asset", () => json([])),
-      db.get("AssetFolder", () => json([]))
-    );
+    await seedProject();
 
     const result = await loadAssetsByProject("proj-1", createContext());
     expect(result).toEqual([]);
   });
 
   test("loads malformed font metadata as a generic file and reports it", async () => {
-    const malformedFontRow = {
-      ...assetRow,
-      assetId: "font-1",
-      filename: "Inter",
-      file: {
-        ...assetRow.file,
+    await seedProject();
+    await seed.asset(
+      db,
+      {
+        id: "font-1",
+        projectId: "proj-1",
         name: "Inter.woff2",
-        format: "woff2",
-        meta: JSON.stringify({}),
+        filename: "Inter",
       },
-    };
-    const report = vi.spyOn(console, "error").mockImplementation(() => {});
-    server.use(
-      projectOwnershipHandler,
-      db.get("Asset", () => json([malformedFontRow])),
-      db.get("AssetFolder", () => json([]))
+      { ...fileRow, format: "woff2", meta: JSON.stringify({}) }
     );
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
 
     try {
       const result = await loadAssetsByProject("proj-1", createContext());
@@ -134,34 +112,23 @@ describe("loadAssetsByProject (msw)", () => {
     }
   });
 
-  test("places assets with a missing folder in the root", async () => {
-    server.use(
-      projectOwnershipHandler,
-      db.get("Asset", () =>
-        json([{ ...assetRow, folderId: "deleted-folder" }])
-      ),
-      db.get("AssetFolder", () => json([]))
-    );
-
-    const [asset] = await loadAssetsByProject("proj-1", createContext());
-    expect(asset).not.toHaveProperty("folderId");
-  });
-
   test("preserves references to existing folders", async () => {
-    server.use(
-      projectOwnershipHandler,
-      db.get("Asset", () => json([{ ...assetRow, folderId: "folder-1" }])),
-      db.get("AssetFolder", () =>
-        json([
-          {
-            id: "folder-1",
-            projectId: "proj-1",
-            name: "Images",
-            parentId: null,
-            createdAt: "2024-01-01T00:00:00.000Z",
-          },
-        ])
-      )
+    await seedProject();
+    await seed.assetFolder(db, {
+      id: "folder-1",
+      projectId: "proj-1",
+      name: "Images",
+      createdAt: "2024-01-01T00:00:00.000Z",
+    });
+    await seed.asset(
+      db,
+      {
+        id: "asset-1",
+        projectId: "proj-1",
+        name: "photo.jpg",
+        folderId: "folder-1",
+      },
+      fileRow
     );
 
     const [asset] = await loadAssetsByProject("proj-1", createContext());
@@ -169,15 +136,7 @@ describe("loadAssetsByProject (msw)", () => {
   });
 
   test("throws AuthorizationError when caller lacks access", async () => {
-    // Use a project the test user does not own ("proj-denied") so hasProjectPermit
-    // returns false. We cannot reuse "proj-1" here because hasProjectPermit is
-    // memoized and previous tests have already cached allowed=true for that id.
-    server.use(
-      // Ownership check: no row found for proj-denied
-      db.get("Project", () => json(null)),
-      // Workspace fallback: no workspace membership
-      db.get("WorkspaceProjectAuthorization", () => json([]))
-    );
+    await seed.project(db, { id: "proj-denied", userId: "owner-1" });
 
     await expect(
       loadAssetsByProject("proj-denied", createContext())

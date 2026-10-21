@@ -6,7 +6,7 @@ import {
 } from "@webstudio-is/asset-uploader/server";
 import type { Build } from "@webstudio-is/project-build";
 import { loadRawBuildById } from "@webstudio-is/project-build/server";
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import { and, build as buildTable, eq, type Database } from "@webstudio-is/db";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import type { Project } from "./project";
 import { updatePreviewImage } from "./project";
@@ -76,7 +76,7 @@ export const patchLoadedBuild = async (
     result.assetFolderPatches.length === 0
       ? []
       : await patchAssetFoldersWithClient(
-          { projectId, client: context.postgrest.client },
+          { projectId, client: context.db },
           result.assetFolderPatches.flat(),
           { deferDeletes: true }
         );
@@ -89,28 +89,26 @@ export const patchLoadedBuild = async (
   }
   await deleteAssetFoldersWithClient(
     { projectId, ids: deletedAssetFolderIds },
-    context.postgrest.client
+    context.db
   );
 
-  const update = await context.postgrest.client
-    .from("Build")
-    .update(buildUpdate, { count: "exact" })
-    .match({
-      id: buildId,
-      projectId,
-      version: clientVersion,
+  const updated = await context.db
+    .update(buildTable)
+    .set(buildUpdate)
+    .where(
+      and(
+        eq(buildTable.id, buildId),
+        eq(buildTable.projectId, projectId),
+        eq(buildTable.version, clientVersion)
+      )
+    )
+    .returning({ id: buildTable.id })
+    .catch((error) => {
+      console.error(error);
+      throw error;
     });
 
-  if (update.error) {
-    console.error(update.error);
-    throw update.error;
-  }
-  if (update.count == null) {
-    console.error("Update count is null");
-    throw new Error("Update count is null");
-  }
-
-  if (update.count === 0) {
+  if (updated.length === 0) {
     return singlePlayerVersionMismatchResult;
   }
 

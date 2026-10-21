@@ -1,125 +1,81 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
 import {
-  createClient,
+  and,
+  authorizationToken,
+  asset,
+  build,
+  createDb,
+  desc,
+  eq,
+  file,
+  isNull,
+  one,
+  project,
+  sql,
   type Database,
-} from "@webstudio-is/postgrest/index.server";
+} from "@webstudio-is/db";
 import env from "../app/env/env.server";
 
-const execFileAsync = promisify(execFile);
+const db = createDb(env.DATABASE_URL, { max: 2 });
 
-const backendScript = fileURLToPath(
-  new URL("../backend/run.sh", import.meta.url)
-);
-
-const postgrest = createClient(env.POSTGREST_URL, env.POSTGREST_API_KEY);
-
-const throwIfError = <Data>({
-  error,
-  data,
-}: {
-  error: { message: string } | null;
-  data: Data;
-}): NonNullable<Data> => {
-  if (error) {
-    throw new Error(error.message);
+/** Removes every row from every application table, keeping the schema. */
+export const resetDatabase = async () => {
+  const { rows } = await db.execute<{ tablename: string }>(
+    sql`SELECT tablename FROM pg_tables WHERE schemaname = 'public'`
+  );
+  if (rows.length === 0) {
+    return;
   }
-  if (data === null || data === undefined) {
-    throw new Error("Expected PostgREST response data");
-  }
-  return data;
+  const names = rows.map((row) => `"${row.tablename}"`).join(", ");
+  await db.execute(sql.raw(`TRUNCATE TABLE ${names} RESTART IDENTITY CASCADE`));
 };
 
-export const resetDatabase = async () => {
-  const sql = `
-    DO $$
-    DECLARE
-      table_names text;
-    BEGIN
-      SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
-      INTO table_names
-      FROM pg_tables
-      WHERE schemaname = 'public'
-        AND tablename <> '_prisma_migrations';
-
-      IF table_names IS NOT NULL THEN
-        EXECUTE 'TRUNCATE TABLE ' || table_names || ' RESTART IDENTITY CASCADE';
-      END IF;
-    END $$;
-  `;
-
-  await execFileAsync(
-    "bash",
-    [
-      backendScript,
-      process.env.E2E_BACKEND_MODE ?? "test",
-      "exec",
-      "-T",
-      "db",
-      "sh",
-      "-c",
-      'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "$1"',
-      "sh",
-      sql,
-    ],
-    { maxBuffer: 1024 * 1024 }
-  );
+/** Resolves once the database accepts queries. */
+export const waitForDatabase = async (timeoutMs = 30_000) => {
+  const startedAt = Date.now();
+  let lastError: unknown;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      await db.execute(sql`SELECT 1`);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw new Error(`Timed out waiting for the database: ${String(lastError)}`);
 };
 
 type Tables = Database["public"]["Tables"];
 
-export const updateBuild = async (
-  id: string,
-  row: Tables["Build"]["Update"]
-) => {
-  return throwIfError(
-    await postgrest.from("Build").update(row).eq("id", id).select().single()
-  );
-};
+export const updateBuild = async (id: string, row: Tables["Build"]["Update"]) =>
+  one(await db.update(build).set(row).where(eq(build.id, id)).returning());
 
 export const updateProject = async (
   id: string,
   row: Tables["Project"]["Update"]
-) => {
-  return throwIfError(
-    await postgrest.from("Project").update(row).eq("id", id).select().single()
-  );
-};
+) =>
+  one(await db.update(project).set(row).where(eq(project.id, id)).returning());
 
 export const insertAuthorizationToken = async (
   row: Tables["AuthorizationToken"]["Insert"]
-) => {
-  return throwIfError(
-    await postgrest.from("AuthorizationToken").insert(row).select().single()
-  );
-};
+) => one(await db.insert(authorizationToken).values(row).returning());
 
-export const insertFile = async (row: Tables["File"]["Insert"]) => {
-  return throwIfError(
-    await postgrest.from("File").insert(row).select().single()
-  );
-};
+export const insertFile = async (row: Tables["File"]["Insert"]) =>
+  one(await db.insert(file).values(row).returning());
 
-export const insertAsset = async (row: Tables["Asset"]["Insert"]) => {
-  return throwIfError(
-    await postgrest.from("Asset").insert(row).select().single()
-  );
-};
+export const insertAsset = async (row: Tables["Asset"]["Insert"]) =>
+  one(await db.insert(asset).values(row).returning());
 
 export const loadDevBuild = async ({
   projectId,
 }: {
   projectId: string;
-}): Promise<Database["public"]["Tables"]["Build"]["Row"]> => {
-  return throwIfError(
-    await postgrest
-      .from("Build")
-      .select("*")
-      .eq("projectId", projectId)
-      .is("deployment", null)
-      .order("createdAt", { ascending: false })
+}): Promise<Tables["Build"]["Row"]> =>
+  one(
+    await db
+      .select()
+      .from(build)
+      .where(and(eq(build.projectId, projectId), isNull(build.deployment)))
+      .orderBy(desc(build.createdAt))
       .limit(1)
-      .single()
   );
-};

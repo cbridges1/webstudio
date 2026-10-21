@@ -1,12 +1,15 @@
 import { describe, test, expect } from "vitest";
-import { http, HttpResponse } from "msw";
 import {
-  createTestServer,
-  db,
-  json,
-  empty,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+  and,
+  asset as assetTable,
+  assetFolder,
+  asc,
+  eq,
+  file as fileTable,
+  project as projectTable,
+  type Db,
+} from "@webstudio-is/db";
+import { seed, setupTestDb, withQueryHook } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { createDefaultCollectionConfig } from "@webstudio-is/content-engine";
 import {
@@ -29,13 +32,13 @@ import { patchAssets } from "./patch";
 import type { AssetObjectReader } from "./client";
 import type { Patch } from "immer";
 
-const server = createTestServer();
+const db = setupTestDb();
 
 const uid = () => `proj-${Math.random().toString(36).slice(2)}`;
 
-const createContext = (): AppContext =>
+const createContext = (contextDb: Db = db): AppContext =>
   ({
-    ...testContext,
+    db: contextDb,
     authorization: { type: "user", userId: "user-1" },
     getOwnerPlanFeatures: async () => ({}),
   }) as unknown as AppContext;
@@ -66,55 +69,134 @@ const createSourceAssetStore = (
   },
 });
 
-/** hasProjectPermit: direct ownership check — returns a row for any project */
-const ownershipHandler = db.get("Project", ({ request }) => {
-  const url = new URL(request.url);
-  if (url.searchParams.has("userId")) {
-    return json({ id: url.searchParams.get("id")?.replace("eq.", "") });
-  }
-  return json(null);
-});
+/** A project owned by user-1, so every permit check passes. */
+const seedOwnProject = async (projectId: string) => {
+  await seed.project(db, { id: projectId, userId: "user-1" });
+};
 
-const editorPermitHandlers = (projectId: string) => [
-  db.get("Project", ({ request }) => {
-    const url = new URL(request.url);
-    return url.searchParams.has("userId")
-      ? json(null)
-      : json({ id: projectId, userId: "owner-1" });
-  }),
-  db.get("WorkspaceProjectAuthorization", () =>
-    json([{ relation: "editors" }])
-  ),
-];
+/** A project owned by owner-1 in which user-1 is an editor (no build access). */
+const seedEditorProject = async (projectId: string) => {
+  const workspaceId = crypto.randomUUID();
+  await seed.workspace(db, { id: workspaceId, userId: "owner-1" });
+  await seed.project(db, { id: projectId, userId: "owner-1", workspaceId });
+  await seed.workspaceMember(db, {
+    workspaceId,
+    userId: "user-1",
+    relation: "editors",
+  });
+};
+
+const createdAt = "2026-01-01T00:00:00.000Z";
+
+type SeededAsset = {
+  id: string;
+  projectId: string;
+  filename?: string | null;
+  description?: string | null;
+  folderId?: string | null;
+  file: {
+    name: string;
+    format?: string;
+    size?: number;
+    meta?: string;
+    status?: "UPLOADING" | "UPLOADED";
+    isDeleted?: boolean;
+    uploaderProjectId?: string | null;
+    contentHash?: string | null;
+    createdAt?: string;
+    updatedAt?: string;
+  };
+};
+
+const photoFile = {
+  name: "photo.jpg",
+  format: "jpg",
+  size: 1000,
+  createdAt: "2024-01-01T00:00:00.000Z",
+  meta: JSON.stringify({ width: 100, height: 100 }),
+};
+
+/** An asset and its file. Files belong to the asset's project unless told otherwise. */
+const seedAsset = async ({ file, ...row }: SeededAsset) => {
+  await seed.asset(
+    db,
+    { ...row, name: file.name },
+    { uploaderProjectId: row.projectId, ...file }
+  );
+};
+
+const seedFolders = async (
+  projectId: string,
+  folders: Array<{ id: string; name: string; parentId?: string }>
+) => {
+  for (const folder of folders) {
+    await seed.assetFolder(db, { ...folder, projectId, createdAt });
+  }
+};
+
+const readFolders = async (projectId: string) =>
+  await db
+    .select({
+      id: assetFolder.id,
+      name: assetFolder.name,
+      parentId: assetFolder.parentId,
+    })
+    .from(assetFolder)
+    .where(eq(assetFolder.projectId, projectId))
+    .orderBy(asc(assetFolder.id));
+
+const readAssets = async (projectId: string) =>
+  await db
+    .select()
+    .from(assetTable)
+    .where(eq(assetTable.projectId, projectId))
+    .orderBy(asc(assetTable.id));
+
+const readFile = async (name: string) =>
+  (await db.select().from(fileTable).where(eq(fileTable.name, name)))[0];
+
+/** A database whose `kind` queries on `table` fail once they've run. */
+const failingOn = (kind: "update" | "delete" | "insert", table: unknown) =>
+  withQueryHook(db, ({ kind: queryKind, table: queryTable }) => {
+    if (queryKind === kind && queryTable === table) {
+      throw new Error("db error");
+    }
+  });
+
+/** Counts queries of one kind on one table. */
+const countingQueries = (
+  kind: "select" | "update" | "insert",
+  table: unknown
+) => {
+  const counter = { count: 0 };
+  const countingDb = withQueryHook(
+    db,
+    ({ kind: queryKind, table: queryTable }) => {
+      if (queryKind === kind && queryTable === table) {
+        counter.count += 1;
+      }
+    }
+  );
+  return { counter, countingDb };
+};
 
 describe("asset folder persistence", () => {
   test("validates and upserts one REST folder mutation", async () => {
     const projectId = uid();
-    const folder = {
-      id: "blog",
-      projectId,
-      name: "Blog",
-      createdAt: "2026-01-01T00:00:00.000Z",
-    };
-    server.use(
-      db.get("AssetFolder", () => json([])),
-      db.post("AssetFolder", async ({ request }) => {
-        expect(await request.json()).toEqual([{ ...folder, parentId: null }]);
-        return json({ ...folder, parentId: null });
-      })
-    );
+    await seedOwnProject(projectId);
+    const folder = { id: "blog", projectId, name: "Blog", createdAt };
 
     await expect(
-      upsertAssetFolderWithClient(
-        { projectId, folder },
-        testContext.postgrest.client
-      )
+      upsertAssetFolderWithClient({ projectId, folder }, db)
     ).resolves.toEqual(folder);
+    expect(await readFolders(projectId)).toEqual([
+      { id: "blog", name: "Blog", parentId: null },
+    ]);
   });
 
   test("rejects a REST folder with a missing parent before persistence", async () => {
     const projectId = uid();
-    server.use(db.get("AssetFolder", () => json([])));
+    await seedOwnProject(projectId);
 
     await expect(
       upsertAssetFolderWithClient(
@@ -125,27 +207,22 @@ describe("asset folder persistence", () => {
             projectId,
             name: "Blog",
             parentId: "missing",
-            createdAt: "2026-01-01T00:00:00.000Z",
+            createdAt,
           },
         },
-        testContext.postgrest.client
+        db
       )
     ).rejects.toThrow("Parent folder must exist");
+    expect(await readFolders(projectId)).toEqual([]);
   });
 
   test("serializes concurrent folder updates before validating cycles", async () => {
     const projectId = uid();
-    const createdAt = "2026-01-01T00:00:00.000Z";
-    let folders: Array<{
-      id: string;
-      projectId: string;
-      name: string;
-      parentId: string | null;
-      createdAt: string;
-    }> = [
-      { id: "a", projectId, name: "A", parentId: null, createdAt },
-      { id: "b", projectId, name: "B", parentId: null, createdAt },
-    ];
+    await seedOwnProject(projectId);
+    await seedFolders(projectId, [
+      { id: "a", name: "A" },
+      { id: "b", name: "B" },
+    ]);
     let readCount = 0;
     let writeCount = 0;
     let startFirstWrite = () => {};
@@ -156,51 +233,36 @@ describe("asset folder persistence", () => {
     const firstWriteCanFinish = new Promise<void>((resolve) => {
       releaseFirstWrite = resolve;
     });
-    server.use(
-      db.get("AssetFolder", () => {
+    const slowDb = withQueryHook(db, async ({ kind, table }) => {
+      if (table !== assetFolder) {
+        return;
+      }
+      if (kind === "select") {
         readCount += 1;
-        return json(folders);
-      }),
-      db.post("AssetFolder", async ({ request }) => {
+      }
+      if (kind === "insert") {
         writeCount += 1;
         if (writeCount === 1) {
           startFirstWrite();
           await firstWriteCanFinish;
         }
-        const [folder] = (await request.json()) as typeof folders;
-        folders = folders.map((current) =>
-          current.id === folder.id ? folder : current
-        );
-        return json(folder);
-      })
-    );
+      }
+    });
 
     const moveA = upsertAssetFolderWithClient(
       {
         projectId,
-        folder: {
-          id: "a",
-          projectId,
-          name: "A",
-          parentId: "b",
-          createdAt,
-        },
+        folder: { id: "a", projectId, name: "A", parentId: "b", createdAt },
       },
-      testContext.postgrest.client
+      slowDb
     );
     await firstWriteStarted;
     const moveB = upsertAssetFolderWithClient(
       {
         projectId,
-        folder: {
-          id: "b",
-          projectId,
-          name: "B",
-          parentId: "a",
-          createdAt,
-        },
+        folder: { id: "b", projectId, name: "B", parentId: "a", createdAt },
       },
-      testContext.postgrest.client
+      slowDb
     );
 
     await Promise.resolve();
@@ -213,82 +275,64 @@ describe("asset folder persistence", () => {
     expect(writeCount).toBe(1);
   });
 
+  /** A persisted cycle: a is in b and b is in a. */
+  const seedCycle = async (projectId: string) => {
+    await seedFolders(projectId, [
+      { id: "a", name: "A" },
+      { id: "b", name: "B", parentId: "a" },
+    ]);
+    await db
+      .update(assetFolder)
+      .set({ parentId: "b" })
+      .where(
+        and(eq(assetFolder.projectId, projectId), eq(assetFolder.id, "a"))
+      );
+  };
+
   test("repairs persisted cycles when folders are loaded", async () => {
     const projectId = uid();
-    const createdAt = "2026-01-01T00:00:00.000Z";
-    let folders: Array<{
-      id: string;
-      projectId: string;
-      name: string;
-      parentId: string | null;
-      createdAt: string;
-    }> = [
-      { id: "a", projectId, name: "A", parentId: "b", createdAt },
-      { id: "b", projectId, name: "B", parentId: "a", createdAt },
-    ];
-    server.use(
-      db.get("AssetFolder", () => json(folders)),
-      db.patch("AssetFolder", async ({ request }) => {
-        expect(await request.json()).toEqual({ parentId: null });
-        folders = folders.map((folder) =>
-          folder.id === "b" ? { ...folder, parentId: null } : folder
-        );
-        return json([{ id: "b" }]);
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedCycle(projectId);
 
     await expect(
-      loadAssetFoldersByProjectWithClient(
-        projectId,
-        testContext.postgrest.client,
-        ["a"]
-      )
+      loadAssetFoldersByProjectWithClient(projectId, db, ["a"])
     ).resolves.toEqual([
       { id: "a", projectId, name: "A", parentId: "b", createdAt },
     ]);
     await expect(
-      loadAssetFoldersByProjectWithClient(
-        projectId,
-        testContext.postgrest.client
-      )
+      loadAssetFoldersByProjectWithClient(projectId, db)
     ).resolves.toEqual([
       { id: "a", projectId, name: "A", parentId: "b", createdAt },
       { id: "b", projectId, name: "B", createdAt },
+    ]);
+    expect(await readFolders(projectId)).toEqual([
+      { id: "a", name: "A", parentId: "b" },
+      { id: "b", name: "B", parentId: null },
     ]);
   });
 
   test("reloads a cycle repair that loses a concurrent update", async () => {
     const projectId = uid();
-    const createdAt = "2026-01-01T00:00:00.000Z";
-    let folders: Array<{
-      id: string;
-      projectId: string;
-      name: string;
-      parentId: string | null;
-      createdAt: string;
-    }> = [
-      { id: "a", projectId, name: "A", parentId: "b", createdAt },
-      { id: "b", projectId, name: "B", parentId: "a", createdAt },
-    ];
+    await seedOwnProject(projectId);
+    await seedCycle(projectId);
     let readCount = 0;
-    server.use(
-      db.get("AssetFolder", () => {
+    // Another process repairs the cycle right after this one read the folders.
+    const racingDb = withQueryHook(db, async ({ kind, table }) => {
+      if (kind === "select" && table === assetFolder) {
         readCount += 1;
-        return json(folders);
-      }),
-      db.patch("AssetFolder", () => {
-        folders = folders.map((folder) =>
-          folder.id === "b" ? { ...folder, parentId: null } : folder
-        );
-        return json([]);
-      })
-    );
+        if (readCount === 1) {
+          await db
+            .update(assetFolder)
+            .set({ parentId: null })
+            .where(
+              and(eq(assetFolder.projectId, projectId), eq(assetFolder.id, "b"))
+            );
+        }
+      }
+    });
 
     await expect(
-      loadAssetFoldersByProjectWithClient(
-        projectId,
-        testContext.postgrest.client
-      )
+      loadAssetFoldersByProjectWithClient(projectId, racingDb)
     ).resolves.toEqual([
       { id: "a", projectId, name: "A", parentId: "b", createdAt },
       { id: "b", projectId, name: "B", createdAt },
@@ -298,253 +342,145 @@ describe("asset folder persistence", () => {
 
   test("reverts a move when a concurrent server creates a cycle", async () => {
     const projectId = uid();
-    const createdAt = "2026-01-01T00:00:00.000Z";
-    let folders: Array<{
-      id: string;
-      projectId: string;
-      name: string;
-      parentId: string | null;
-      createdAt: string;
-    }> = [
-      { id: "a", projectId, name: "A", parentId: null, createdAt },
-      { id: "b", projectId, name: "B", parentId: null, createdAt },
-    ];
-    let rollbackCount = 0;
-    server.use(
-      db.get("AssetFolder", () => json(folders)),
-      db.post("AssetFolder", async ({ request }) => {
-        const [folder] = (await request.json()) as typeof folders;
-        folders = folders.map((current) =>
-          current.id === folder.id ? folder : current
-        );
-        folders = folders.map((current) =>
-          current.id === "b" ? { ...current, parentId: "a" } : current
-        );
-        return json(folder);
-      }),
-      db.patch("AssetFolder", async ({ request }) => {
-        rollbackCount += 1;
-        const values = (await request.json()) as {
-          name: string;
-          parentId: string | null;
-        };
-        expect(values).toEqual({ name: "A", parentId: null });
-        folders = folders.map((folder) =>
-          folder.id === "a" ? { ...folder, ...values } : folder
-        );
-        return json([{ id: "a" }]);
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedFolders(projectId, [
+      { id: "a", name: "A" },
+      { id: "b", name: "B" },
+    ]);
+    // Another server moves b into a while this one moves a into b.
+    const racingDb = withQueryHook(db, async ({ kind, table }) => {
+      if (kind === "insert" && table === assetFolder) {
+        await db
+          .update(assetFolder)
+          .set({ parentId: "a" })
+          .where(
+            and(eq(assetFolder.projectId, projectId), eq(assetFolder.id, "b"))
+          );
+      }
+    });
 
     await expect(
       upsertAssetFolderWithClient(
         {
           projectId,
-          folder: {
-            id: "a",
-            projectId,
-            name: "A",
-            parentId: "b",
-            createdAt,
-          },
+          folder: { id: "a", projectId, name: "A", parentId: "b", createdAt },
         },
-        testContext.postgrest.client
+        racingDb
       )
     ).rejects.toThrow("conflicted with another move and was reverted");
-    expect(rollbackCount).toBe(1);
-    expect(folders).toEqual([
-      { id: "a", projectId, name: "A", parentId: null, createdAt },
-      { id: "b", projectId, name: "B", parentId: "a", createdAt },
+    expect(await readFolders(projectId)).toEqual([
+      { id: "a", name: "A", parentId: null },
+      { id: "b", name: "B", parentId: "a" },
     ]);
   });
 
   test("inserts parents before children", async () => {
     const projectId = uid();
+    await seedOwnProject(projectId);
     let inserted: Array<{ id: string }> = [];
-    server.use(
-      db.get("AssetFolder", () => json([])),
-      db.post("AssetFolder", async ({ request }) => {
-        inserted = (await request.json()) as Array<{ id: string }>;
-        return json(inserted);
-      })
-    );
+    const watchedDb = withQueryHook(db, ({ kind, table, rows }) => {
+      if (kind === "insert" && table === assetFolder) {
+        inserted = rows as Array<{ id: string }>;
+      }
+    });
 
-    await patchAssetFoldersWithClient(
-      { projectId, client: testContext.postgrest.client },
-      [
-        {
-          op: "add",
-          path: ["child"],
-          value: {
-            id: "child",
-            projectId,
-            name: "Child",
-            parentId: "parent",
-            createdAt: "2026-01-01T00:00:00.000Z",
-          },
+    await patchAssetFoldersWithClient({ projectId, client: watchedDb }, [
+      {
+        op: "add",
+        path: ["child"],
+        value: {
+          id: "child",
+          projectId,
+          name: "Child",
+          parentId: "parent",
+          createdAt,
         },
-        {
-          op: "add",
-          path: ["parent"],
-          value: {
-            id: "parent",
-            projectId,
-            name: "Parent",
-            createdAt: "2026-01-01T00:00:00.000Z",
-          },
-        },
-      ]
-    );
+      },
+      {
+        op: "add",
+        path: ["parent"],
+        value: { id: "parent", projectId, name: "Parent", createdAt },
+      },
+    ]);
 
     expect(inserted.map(({ id }) => id)).toEqual(["parent", "child"]);
+    expect(await readFolders(projectId)).toEqual([
+      { id: "child", name: "Child", parentId: "parent" },
+      { id: "parent", name: "Parent", parentId: null },
+    ]);
   });
 
   test("can defer folder deletion until assets are moved", async () => {
     const projectId = uid();
-    let deleteCount = 0;
-    server.use(
-      db.get("AssetFolder", () =>
-        json([
-          {
-            id: "folder",
-            projectId,
-            name: "Folder",
-            parentId: null,
-            createdAt: "2026-01-01T00:00:00.000Z",
-          },
-        ])
-      ),
-      db.delete("AssetFolder", () => {
-        deleteCount += 1;
-        return json([{ id: "folder" }]);
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedFolders(projectId, [{ id: "folder", name: "Folder" }]);
 
     const ids = await patchAssetFoldersWithClient(
-      { projectId, client: testContext.postgrest.client },
+      { projectId, client: db },
       [{ op: "remove", path: ["folder"] }],
       { deferDeletes: true }
     );
     expect(ids).toEqual(["folder"]);
-    expect(deleteCount).toBe(0);
+    expect(await readFolders(projectId)).toHaveLength(1);
 
-    await deleteAssetFoldersWithClient(
-      { projectId, ids },
-      testContext.postgrest.client
-    );
-    expect(deleteCount).toBe(1);
+    await deleteAssetFoldersWithClient({ projectId, ids }, db);
+    expect(await readFolders(projectId)).toEqual([]);
   });
 
   test("persists moving a nested folder to root as null", async () => {
     const projectId = uid();
-    let updatedParentId: unknown = "not-updated";
-    server.use(
-      db.get("AssetFolder", () =>
-        json([
-          {
-            id: "parent",
-            projectId,
-            name: "Parent",
-            parentId: null,
-            createdAt: "2026-01-01T00:00:00.000Z",
-          },
-          {
-            id: "child",
-            projectId,
-            name: "Child",
-            parentId: "parent",
-            createdAt: "2026-01-01T00:00:00.000Z",
-          },
-        ])
-      ),
-      db.post("AssetFolder", async ({ request }) => {
-        const [update] = (await request.json()) as Array<{
-          id: string;
-          name: string;
-          parentId: unknown;
-        }>;
-        updatedParentId = update.parentId;
-        return json([update]);
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedFolders(projectId, [
+      { id: "parent", name: "Parent" },
+      { id: "child", name: "Child", parentId: "parent" },
+    ]);
 
-    await patchAssetFoldersWithClient(
-      { projectId, client: testContext.postgrest.client },
-      [{ op: "remove", path: ["child", "parentId"] }]
-    );
-    expect(updatedParentId).toBeNull();
+    await patchAssetFoldersWithClient({ projectId, client: db }, [
+      { op: "remove", path: ["child", "parentId"] },
+    ]);
+    expect(await readFolders(projectId)).toEqual([
+      { id: "child", name: "Child", parentId: null },
+      { id: "parent", name: "Parent", parentId: null },
+    ]);
   });
 
   test("rejects folders that claim another project", async () => {
     const projectId = uid();
-    server.use(db.get("AssetFolder", () => json([])));
+    await seedOwnProject(projectId);
 
     await expect(
-      patchAssetFoldersWithClient(
-        { projectId, client: testContext.postgrest.client },
-        [
-          {
-            op: "add",
-            path: ["folder"],
-            value: {
-              id: "folder",
-              projectId: "another-project",
-              name: "Folder",
-              createdAt: "2026-01-01T00:00:00.000Z",
-            },
-          },
-        ]
-      )
-    ).rejects.toThrow("belongs to another project");
-  });
-
-  test("persists the normalized folder name returned by validation", async () => {
-    const projectId = uid();
-    let insertedName: string | undefined;
-    server.use(
-      db.get("AssetFolder", () => json([])),
-      db.post("AssetFolder", async ({ request }) => {
-        const rows = (await request.json()) as Array<{ name: string }>;
-        insertedName = rows[0]?.name;
-        return json(rows);
-      })
-    );
-
-    await patchAssetFoldersWithClient(
-      { projectId, client: testContext.postgrest.client },
-      [
+      patchAssetFoldersWithClient({ projectId, client: db }, [
         {
           op: "add",
           path: ["folder"],
           value: {
             id: "folder",
-            projectId,
-            name: "  Media  ",
-            createdAt: "2026-01-01T00:00:00.000Z",
+            projectId: "another-project",
+            name: "Folder",
+            createdAt,
           },
         },
-      ]
-    );
+      ])
+    ).rejects.toThrow("belongs to another project");
+  });
 
-    expect(insertedName).toBe("Media");
+  test("persists the normalized folder name returned by validation", async () => {
+    const projectId = uid();
+    await seedOwnProject(projectId);
+
+    await patchAssetFoldersWithClient({ projectId, client: db }, [
+      {
+        op: "add",
+        path: ["folder"],
+        value: { id: "folder", projectId, name: "  Media  ", createdAt },
+      },
+    ]);
+
+    expect(await readFolders(projectId)).toEqual([
+      { id: "folder", name: "Media", parentId: null },
+    ]);
   });
 });
-
-const assetRow = {
-  assetId: "asset-1",
-  projectId: "proj-1",
-  filename: "photo.jpg",
-  description: null,
-  file: {
-    name: "photo.jpg",
-    format: "jpg",
-    description: null,
-    size: 1000,
-    createdAt: "2024-01-01T00:00:00.000Z",
-    meta: JSON.stringify({ width: 100, height: 100 }),
-    status: "UPLOADED",
-  },
-};
 
 describe("asset patch persistence", () => {
   test("sync saves an existing entry revision while a required field still needs repair", async () => {
@@ -555,46 +491,39 @@ describe("asset patch persistence", () => {
       "old.mdx": "---\nslug: post\n---\nOld body.\n",
       "new.mdx": "---\nslug: post\n---\nRepaired body.\n",
     };
-    const row = (
-      assetId: string,
+    await seedOwnProject(projectId);
+    await seedFolders(projectId, [{ id: "posts", name: "posts" }]);
+    const seedEntry = async (
+      id: string,
       filename: string,
       name: keyof typeof sources
-    ) => ({
-      ...assetRow,
-      assetId,
-      projectId,
-      filename,
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name,
-        format: name.endsWith("json") ? "json" : "mdx",
-        meta: "{}",
-        size: sources[name].length,
-        isDeleted: false,
-      },
+    ) =>
+      await seedAsset({
+        id,
+        projectId,
+        filename,
+        folderId: "posts",
+        file: {
+          ...photoFile,
+          name,
+          format: name.endsWith("json") ? "json" : "mdx",
+          meta: "{}",
+          size: sources[name].length,
+        },
+      });
+    await seedEntry("config", "collection", "config.json");
+    await seedEntry("template", "template", "template.mdx");
+    await seedEntry("entry", "post", "old.mdx");
+    // The revision was uploaded before files recorded their project.
+    await seed.file(db, {
+      ...photoFile,
+      name: "new.mdx",
+      format: "mdx",
+      meta: "{}",
+      size: sources["new.mdx"].length,
+      uploaderProjectId: null,
     });
-    const nextFile = row("entry", "post", "new.mdx").file;
-    let swapped = false;
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () =>
-        json([
-          row("config", "collection", "config.json"),
-          row("template", "template", "template.mdx"),
-          row("entry", "post", "old.mdx"),
-        ])
-      ),
-      db.get("File", () => json([nextFile])),
-      db.patch("File", () => json({ name: nextFile.name })),
-      db.patch("Asset", () => {
-        swapped = true;
-        return json({ id: "entry" });
-      }),
-      http.post("http://test-postgrest/rpc/swap_asset_file", () =>
-        HttpResponse.json("invalid_revision")
-      )
-    );
+
     await expect(
       patchAssets(
         { projectId, assetStore: createSourceAssetStore(sources) },
@@ -602,85 +531,69 @@ describe("asset patch persistence", () => {
         createContext()
       )
     ).resolves.toBeUndefined();
-    expect(swapped).toBe(true);
+    expect(
+      (await readAssets(projectId)).find((asset) => asset.id === "entry")?.name
+    ).toBe("new.mdx");
   });
 
   test("loads only requested assets", async () => {
     const projectId = uid();
-    let idFilter: string | null = null;
-    server.use(
-      db.get("Asset", ({ request }) => {
-        idFilter = new URL(request.url).searchParams.get("id");
-        return json([{ ...assetRow, projectId }]);
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedAsset({ id: "asset-1", projectId, file: photoFile });
+    await seedAsset({
+      id: "asset-2",
+      projectId,
+      file: { ...photoFile, name: "other.jpg" },
+    });
 
     await expect(
-      loadAssetsByProjectWithClient(projectId, testContext.postgrest.client, [
-        "asset-1",
-      ])
+      loadAssetsByProjectWithClient(projectId, db, ["asset-1"])
     ).resolves.toEqual([expect.objectContaining({ id: "asset-1" })]);
-    expect(idFilter).toBe("in.(asset-1)");
   });
 
   test("does not query when no asset ids are requested", async () => {
     const projectId = uid();
-    let requestCount = 0;
-    server.use(
-      db.get("Asset", () => {
-        requestCount += 1;
-        return json([]);
-      })
-    );
+    const { counter, countingDb } = countingQueries("select", assetTable);
 
     await expect(
-      loadAssetsByProjectWithClient(projectId, testContext.postgrest.client, [])
+      loadAssetsByProjectWithClient(projectId, countingDb, [])
     ).resolves.toEqual([]);
-    expect(requestCount).toBe(0);
+    expect(counter.count).toBe(0);
   });
 
   test("loads incomplete upload reservations for conflict checks", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.get("projectId")).toBe(`eq.${projectId}`);
-        expect(url.searchParams.has("file.status")).toBe(false);
-        return json([
-          {
-            id: "uploading-entry",
-            projectId,
-            filename: "hello-world",
-            folderId: "posts",
-            file: {
-              name: "uploading-entry.mdx",
-              status: "UPLOADING",
-              isDeleted: false,
-              createdAt: "2026-09-03T12:00:00.000Z",
-              updatedAt: "2026-09-03T12:00:00.000Z",
-            },
-          },
-          {
-            id: "stale-entry",
-            projectId,
-            filename: "hello-world",
-            folderId: "posts",
-            file: {
-              name: "stale-entry.mdx",
-              status: "UPLOADING",
-              isDeleted: false,
-              createdAt: "2026-09-03T10:00:00.000Z",
-              updatedAt: "2026-09-03T10:00:00.000Z",
-            },
-          },
-        ]);
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedFolders(projectId, [{ id: "posts", name: "posts" }]);
+    await seedAsset({
+      id: "uploading-entry",
+      projectId,
+      filename: "hello-world",
+      folderId: "posts",
+      file: {
+        name: "uploading-entry.mdx",
+        status: "UPLOADING",
+        createdAt: "2026-09-03T12:00:00.000Z",
+        updatedAt: "2026-09-03T12:00:00.000Z",
+      },
+    });
+    await seedAsset({
+      id: "stale-entry",
+      projectId,
+      filename: "hello-world",
+      folderId: "posts",
+      file: {
+        name: "stale-entry.mdx",
+        status: "UPLOADING",
+        createdAt: "2026-09-03T10:00:00.000Z",
+        updatedAt: "2026-09-03T10:00:00.000Z",
+      },
+    });
 
     await expect(
       loadAssetUploadReservationsByProjectWithClient(
         projectId,
-        testContext.postgrest.client,
+        db,
         new Date("2026-09-03T12:15:00.000Z")
       )
     ).resolves.toEqual([
@@ -697,107 +610,73 @@ describe("asset patch persistence", () => {
 
   test("does not delete a file when the exact upload reservation is missing", async () => {
     const projectId = uid();
-    let deletedFile = false;
-    server.use(
-      db.delete("Asset", () => json(null)),
-      db.delete("File", () => {
-        deletedFile = true;
-        return empty({ status: 204 });
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedAsset({
+      id: "reserved",
+      projectId,
+      file: { name: "reservation.mdx", status: "UPLOADING" },
+    });
 
     await deleteAssetUploadReservationWithClient(
       { projectId, assetId: "missing", name: "reservation.mdx" },
-      testContext.postgrest.client
+      db
     );
 
-    expect(deletedFile).toBe(false);
+    expect(await readFile("reservation.mdx")).toBeDefined();
+    expect(await readAssets(projectId)).toHaveLength(1);
   });
 
   test("chunks large requested asset id filters", async () => {
     const projectId = uid();
-    const idFilters: string[] = [];
-    server.use(
-      db.get("Asset", ({ request }) => {
-        const idFilter = new URL(request.url).searchParams.get("id");
-        if (idFilter !== null) {
-          idFilters.push(idFilter);
-        }
-        return json([]);
-      })
-    );
+    const { counter, countingDb } = countingQueries("select", assetTable);
     const assetIds = Array.from(
       { length: 201 },
       (_, index) => `asset-${String(index).padStart(3, "0")}`
     );
 
     await expect(
-      loadAssetsByProjectWithClient(
-        projectId,
-        testContext.postgrest.client,
-        assetIds
-      )
+      loadAssetsByProjectWithClient(projectId, countingDb, assetIds)
     ).resolves.toEqual([]);
 
-    expect(idFilters).toHaveLength(3);
-    const filteredIds = idFilters.flatMap((filter) =>
-      filter.slice("in.(".length, -1).split(",")
-    );
-    expect(filteredIds).toEqual(assetIds);
-    expect(
-      idFilters.every(
-        (filter) => filter.slice("in.(".length, -1).split(",").length <= 100
-      )
-    ).toBe(true);
+    expect(counter.count).toBe(3);
   });
 
   test("rejects assets that are patched into another project", async () => {
     const projectId = uid();
-    server.use(db.get("Asset", () => json([{ ...assetRow, projectId }])));
+    await seedOwnProject(projectId);
+    await seedAsset({ id: "asset-1", projectId, file: photoFile });
 
     await expect(
-      patchAssetsWithClient(
-        { projectId, client: testContext.postgrest.client },
-        [
-          {
-            op: "replace",
-            path: ["asset-1", "projectId"],
-            value: "another-project",
-          },
-        ]
-      )
+      patchAssetsWithClient({ projectId, client: db }, [
+        {
+          op: "replace",
+          path: ["asset-1", "projectId"],
+          value: "another-project",
+        },
+      ])
     ).rejects.toThrow("belongs to another project");
   });
 
+  const fontFile = {
+    ...photoFile,
+    name: "font.woff2",
+    format: "woff2",
+    meta: JSON.stringify({ family: "Inter", style: "normal", weight: 400 }),
+  };
+
   test("preserves mutable file metadata in the validation snapshot", async () => {
     const projectId = uid();
-    const fontRow = {
-      ...assetRow,
-      projectId,
-      file: {
-        ...assetRow.file,
-        name: "font.woff2",
-        format: "woff2",
-        meta: JSON.stringify({
-          family: "Inter",
-          style: "normal",
-          weight: 400,
-        }),
-      },
-    };
+    await seedOwnProject(projectId);
+    await seedAsset({ id: "asset-1", projectId, file: fontFile });
     const nextMeta = {
       family: "Inter",
       style: "normal" as const,
       weight: 600,
     };
     let validatedMeta: unknown;
-    server.use(
-      db.get("Asset", () => json([fontRow])),
-      db.patch("File", () => json({ meta: JSON.stringify(nextMeta) }))
-    );
 
     await patchAssetsWithClient(
-      { projectId, client: testContext.postgrest.client },
+      { projectId, client: db },
       [{ op: "replace", path: ["asset-1", "meta"], value: nextMeta }],
       {
         validate: async ({ next }) => {
@@ -807,95 +686,59 @@ describe("asset patch persistence", () => {
     );
 
     expect(validatedMeta).toEqual(nextMeta);
+    expect((await readFile("font.woff2")).meta).toBe(JSON.stringify(nextMeta));
   });
 
   test("rejects invalid font metadata before persisting a raw asset patch", async () => {
     const projectId = uid();
-    const fontRow = {
-      ...assetRow,
-      projectId,
-      file: {
-        ...assetRow.file,
-        name: "font.woff2",
-        format: "woff2",
-        meta: JSON.stringify({
-          family: "Inter",
-          style: "normal",
-          weight: 400,
-        }),
-      },
-    };
-    let persisted = false;
-    server.use(
-      db.get("Asset", () => json([fontRow])),
-      db.patch("File", () => {
-        persisted = true;
-        return json({ meta: "{}" });
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedAsset({ id: "asset-1", projectId, file: fontFile });
 
     await expect(
-      patchAssetsWithClient(
-        { projectId, client: testContext.postgrest.client },
-        [
-          {
-            op: "replace",
-            path: ["asset-1", "meta"],
-            value: { family: "Inter", style: "normal" },
-          },
-        ]
-      )
+      patchAssetsWithClient({ projectId, client: db }, [
+        {
+          op: "replace",
+          path: ["asset-1", "meta"],
+          value: { family: "Inter", style: "normal" },
+        },
+      ])
     ).rejects.toThrow();
-    expect(persisted).toBe(false);
+    expect((await readFile("font.woff2")).meta).toBe(fontFile.meta);
   });
 
   test("updates only supplied metadata and reloads only that asset", async () => {
     const projectId = uid();
-    let update: unknown;
-    let readIdFilter: string | null = null;
-    server.use(
-      db.patch("Asset", async ({ request }) => {
-        update = await request.json();
-        return json({ id: "asset-1" });
-      }),
-      db.get("Asset", ({ request }) => {
-        readIdFilter = new URL(request.url).searchParams.get("id");
-        return json([{ ...assetRow, projectId, description: null }]);
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedAsset({
+      id: "asset-1",
+      projectId,
+      filename: "photo.jpg",
+      description: "Old",
+      file: photoFile,
+    });
 
     await expect(
       updateAssetMetadataWithClient(
-        {
-          projectId,
-          assetId: "asset-1",
-          values: { description: null },
-        },
-        testContext.postgrest.client
+        { projectId, assetId: "asset-1", values: { description: null } },
+        db
       )
     ).resolves.toEqual(
       expect.objectContaining({ id: "asset-1", description: undefined })
     );
-    expect(update).toEqual({ description: null });
-    expect(readIdFilter).toBe("in.(asset-1)");
+    expect(await readAssets(projectId)).toEqual([
+      expect.objectContaining({ filename: "photo.jpg", description: null }),
+    ]);
   });
 
   test("updates an asset filename only when the expected value is current", async () => {
     const projectId = uid();
-    let updatedFilename: unknown;
-    let expectedFilenameFilter: string | null = null;
-    server.use(
-      db.patch("Asset", async ({ request }) => {
-        const url = new URL(request.url);
-        expectedFilenameFilter = url.searchParams.get("filename");
-        updatedFilename = ((await request.json()) as { filename?: unknown })
-          .filename;
-        return json({ id: "asset-1" });
-      }),
-      db.get("Asset", () =>
-        json([{ ...assetRow, projectId, filename: "post-template" }])
-      )
-    );
+    await seedOwnProject(projectId);
+    await seedAsset({
+      id: "asset-1",
+      projectId,
+      filename: "template",
+      file: photoFile,
+    });
 
     await expect(
       updateAssetFilenameIfCurrentWithClient(
@@ -905,30 +748,24 @@ describe("asset patch persistence", () => {
           expectedFilename: "template",
           filename: "post-template",
         },
-        testContext.postgrest.client
+        db
       )
     ).resolves.toEqual(
       expect.objectContaining({ id: "asset-1", filename: "post-template" })
     );
-    expect(expectedFilenameFilter).toBe("eq.template");
-    expect(updatedFilename).toBe("post-template");
   });
 
   test("reports when a conditional filename update loses a race", async () => {
     const projectId = uid();
-    let reloaded = false;
-    server.use(
-      db.patch("Asset", ({ request }) => {
-        expect(new URL(request.url).searchParams.get("filename")).toBe(
-          "is.null"
-        );
-        return json(null);
-      }),
-      db.get("Asset", () => {
-        reloaded = true;
-        return json([]);
-      })
-    );
+    await seedOwnProject(projectId);
+    // Someone else already set a filename.
+    await seedAsset({
+      id: "asset-1",
+      projectId,
+      filename: "taken",
+      file: photoFile,
+    });
+    const { counter, countingDb } = countingQueries("select", assetTable);
 
     await expect(
       updateAssetFilenameIfCurrentWithClient(
@@ -938,48 +775,81 @@ describe("asset patch persistence", () => {
           expectedFilename: undefined,
           filename: "post-template",
         },
-        testContext.postgrest.client
+        countingDb
       )
     ).resolves.toBeUndefined();
-    expect(reloaded).toBe(false);
+    expect(counter.count).toBe(0);
+    expect((await readAssets(projectId))[0].filename).toBe("taken");
   });
 
   test("reports a missing metadata update as a repository not-found error", async () => {
     const projectId = uid();
-    server.use(db.patch("Asset", () => json(null)));
 
     await expect(
       updateAssetMetadataWithClient(
-        {
-          projectId,
-          assetId: "missing",
-          values: { description: "Missing" },
-        },
-        testContext.postgrest.client
+        { projectId, assetId: "missing", values: { description: "Missing" } },
+        db
       )
     ).rejects.toBeInstanceOf(AssetRepositoryNotFoundError);
   });
 
   test("reports a missing deletion as a repository not-found error", async () => {
     const projectId = uid();
-    server.use(db.get("Asset", () => json([])));
 
     await expect(
-      deleteAssetsWithClient(
-        { projectId, ids: ["missing"] },
-        testContext.postgrest.client
-      )
+      deleteAssetsWithClient({ projectId, ids: ["missing"] }, db)
     ).rejects.toBeInstanceOf(AssetRepositoryNotFoundError);
   });
 });
 
-describe("patchAssets (msw)", () => {
+const configSource = createDefaultCollectionConfig();
+const templateSource = "---\ndraft: true\n---\n\nStart writing.\n";
+const entrySource =
+  "---\ntitle: Hello world\nslug: hello-world\ndraft: true\n---\n\nBody.\n";
+
+/** A "posts" collection: its folder, config and template. */
+const seedCollection = async (
+  projectId: string,
+  { config = configSource }: { config?: string } = {}
+) => {
+  await seedFolders(projectId, [{ id: "posts", name: "posts" }]);
+  await seedAsset({
+    id: "config",
+    projectId,
+    filename: "collection",
+    folderId: "posts",
+    file: {
+      ...photoFile,
+      name: "config-storage.json",
+      format: "json",
+      size: config.length,
+      meta: "{}",
+    },
+  });
+  await seedAsset({
+    id: "template",
+    projectId,
+    filename: "template",
+    folderId: "posts",
+    file: {
+      ...photoFile,
+      name: "template-storage.mdx",
+      format: "mdx",
+      size: templateSource.length,
+      meta: "{}",
+    },
+  });
+};
+
+const collectionSources = (config = configSource) => ({
+  "config-storage.json": config,
+  "template-storage.mdx": templateSource,
+});
+
+describe("patchAssets", () => {
   test("throws when caller lacks edit access", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Project", () => json(null)),
-      db.get("WorkspaceProjectAuthorization", () => json([]))
-    );
+    await seed.project(db, { id: projectId, userId: "owner-1" });
 
     await expect(
       patchAssets(
@@ -992,10 +862,7 @@ describe("patchAssets (msw)", () => {
 
   test("no-op when patches are empty and no assets exist", async () => {
     const projectId = uid();
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([]))
-    );
+    await seedOwnProject(projectId);
 
     // Should complete without throwing
     await patchAssets(
@@ -1007,101 +874,35 @@ describe("patchAssets (msw)", () => {
 
   test("updates asset description via patch", async () => {
     const projectId = uid();
-    let localAssetRow: Omit<typeof assetRow, "description"> & {
-      description: string | null;
-    } = { ...assetRow, projectId };
-    let updatedDescription: string | undefined;
-
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([localAssetRow])),
-      db.patch("Asset", async ({ request }) => {
-        const body = (await request.json()) as { description?: string };
-        updatedDescription = body.description ?? undefined;
-        localAssetRow = {
-          ...localAssetRow,
-          description: body.description ?? localAssetRow.description,
-        };
-        return json({
-          id: localAssetRow.assetId,
-          filename: localAssetRow.filename,
-          description: localAssetRow.description,
-        });
-      })
-    );
-
-    const patches: Patch[] = [
-      {
-        op: "replace",
-        path: ["asset-1", "description"],
-        value: "New description",
-      },
-    ];
+    await seedOwnProject(projectId);
+    await seedAsset({ id: "asset-1", projectId, file: photoFile });
 
     await patchAssets(
       { projectId, assetStore: unusedAssetStore },
-      patches,
+      [
+        {
+          op: "replace",
+          path: ["asset-1", "description"],
+          value: "New description",
+        },
+      ],
       createContext()
     );
-    expect(updatedDescription).toBe("New description");
+    expect((await readAssets(projectId))[0].description).toBe(
+      "New description"
+    );
   });
 
   test("requires build access to patch collection configuration assets", async () => {
     const projectId = uid();
-    const configSource = createDefaultCollectionConfig();
-    const templateSource = "---\ndraft: true\n---\n\nStart writing.\n";
-    const configRow = {
-      ...assetRow,
-      assetId: "config",
-      projectId,
-      filename: "collection",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "config-storage.json",
-        format: "json",
-        size: configSource.length,
-      },
-    };
-    const templateRow = {
-      ...assetRow,
-      assetId: "template",
-      projectId,
-      filename: "template",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "template-storage.mdx",
-        format: "mdx",
-        size: templateSource.length,
-      },
-    };
-    let metadataUpdated = false;
-    server.use(
-      db.get("Project", ({ request }) => {
-        const url = new URL(request.url);
-        return url.searchParams.has("userId")
-          ? json(null)
-          : json({ id: projectId, userId: "owner-1" });
-      }),
-      db.get("WorkspaceProjectAuthorization", () =>
-        json([{ relation: "editors" }])
-      ),
-      db.get("Asset", () => json([configRow, templateRow])),
-      db.patch("Asset", () => {
-        metadataUpdated = true;
-        return json({ id: "template" });
-      })
-    );
+    await seedEditorProject(projectId);
+    await seedCollection(projectId);
 
     await expect(
       patchAssets(
         {
           projectId,
-          assetStore: createSourceAssetStore({
-            [configRow.file.name]: configSource,
-            [templateRow.file.name]: templateSource,
-          }),
+          assetStore: createSourceAssetStore(collectionSources()),
         },
         [
           {
@@ -1113,56 +914,45 @@ describe("patchAssets (msw)", () => {
         createContext()
       )
     ).rejects.toThrow("permission to configure");
-    expect(metadataUpdated).toBe(false);
+    expect(
+      (await readAssets(projectId)).find((asset) => asset.id === "template")
+        ?.description
+    ).toBeNull();
   });
 
   test("rejects mismatched asset map keys before collection authorization", async () => {
     const projectId = uid();
-    const configSource = createDefaultCollectionConfig();
-    const templateSource = "---\ndraft: true\n---\n\nStart writing.\n";
-    const configFile = {
-      ...assetRow.file,
+    await seedEditorProject(projectId);
+    await seedFolders(projectId, [{ id: "posts", name: "posts" }]);
+    await seedAsset({
+      id: "template",
+      projectId,
+      filename: "template",
+      folderId: "posts",
+      file: {
+        ...photoFile,
+        name: "template-storage.mdx",
+        format: "mdx",
+        size: templateSource.length,
+        meta: "{}",
+      },
+    });
+    await seed.file(db, {
+      ...photoFile,
       name: "config-storage.json",
       format: "json",
       size: configSource.length,
       meta: "{}",
       updatedAt: "2026-09-03T00:00:00.000Z",
       isDeleted: true,
-    };
-    const templateRow = {
-      ...assetRow,
-      assetId: "template",
-      projectId,
-      filename: "template",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "template-storage.mdx",
-        format: "mdx",
-        size: templateSource.length,
-        meta: "{}",
-      },
-    };
-    let inserted = false;
-    server.use(
-      ...editorPermitHandlers(projectId),
-      db.get("Asset", () => json([templateRow])),
-      db.get("File", () => json([configFile])),
-      db.patch("File", () => empty({ status: 204 })),
-      db.post("Asset", () => {
-        inserted = true;
-        return empty({ status: 201 });
-      })
-    );
+      uploaderProjectId: projectId,
+    });
 
     await expect(
       patchAssets(
         {
           projectId,
-          assetStore: createSourceAssetStore({
-            [configFile.name]: configSource,
-            [templateRow.file.name]: templateSource,
-          }),
+          assetStore: createSourceAssetStore(collectionSources()),
         },
         [
           {
@@ -1171,14 +961,14 @@ describe("patchAssets (msw)", () => {
             value: {
               id: "config",
               projectId,
-              name: configFile.name,
+              name: "config-storage.json",
               filename: "collection",
               folderId: "posts",
               type: "file",
               format: "json",
               size: configSource.length,
               description: null,
-              createdAt: configFile.createdAt,
+              createdAt: photoFile.createdAt,
               meta: {},
             },
           },
@@ -1186,77 +976,36 @@ describe("patchAssets (msw)", () => {
         createContext()
       )
     ).rejects.toThrow("does not match its map key");
-    expect(inserted).toBe(false);
+    expect(await readAssets(projectId)).toHaveLength(1);
   });
 
   test("validates collection moves with authoritative file metadata", async () => {
     const projectId = uid();
     const schema = JSON.parse(createDefaultCollectionConfig());
     schema["x-webstudio"].entries = ["*"];
-    const configSource = JSON.stringify(schema);
-    const templateSource = "---\ndraft: true\n---\n\nStart writing.\n";
-    const entrySource =
-      "---\ntitle: Hello world\nslug: hello-world\ndraft: true\n---\n\nBody.\n";
-    const configRow = {
-      ...assetRow,
-      assetId: "config",
-      projectId,
-      filename: "collection",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "config-storage.json",
-        format: "json",
-        size: configSource.length,
-        meta: "{}",
-      },
-    };
-    const templateRow = {
-      ...assetRow,
-      assetId: "template",
-      projectId,
-      filename: "template",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "template-storage.mdx",
-        format: "mdx",
-        size: templateSource.length,
-        meta: "{}",
-      },
-    };
-    const textEntryRow = {
-      ...assetRow,
-      assetId: "entry",
+    const config = JSON.stringify(schema);
+    await seedOwnProject(projectId);
+    await seedCollection(projectId, { config });
+    await seedAsset({
+      id: "entry",
       projectId,
       filename: "hello-world",
-      folderId: null,
       file: {
-        ...assetRow.file,
+        ...photoFile,
         name: "entry-storage.txt",
         format: "txt",
         size: entrySource.length,
         meta: "{}",
       },
-    };
-    let metadataUpdated = false;
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([configRow, templateRow, textEntryRow])),
-      db.patch("Asset", () => {
-        metadataUpdated = true;
-        return json({ id: "entry" });
-      })
-    );
+    });
 
     await expect(
       patchAssets(
         {
           projectId,
           assetStore: createSourceAssetStore({
-            [configRow.file.name]: configSource,
-            [templateRow.file.name]: templateSource,
-            [textEntryRow.file.name]: entrySource,
+            ...collectionSources(config),
+            "entry-storage.txt": entrySource,
           }),
         },
         [
@@ -1266,354 +1015,211 @@ describe("patchAssets (msw)", () => {
         createContext()
       )
     ).rejects.toThrow('Collection entry "hello-world.txt" must be an MDX file');
-    expect(metadataUpdated).toBe(false);
+    expect(
+      (await readAssets(projectId)).find((asset) => asset.id === "entry")
+        ?.folderId
+    ).toBeNull();
   });
 
   test("restores a valid collection entry through a sync patch", async () => {
     const projectId = uid();
-    const configSource = createDefaultCollectionConfig();
-    const templateSource = "---\ndraft: true\n---\n\nStart writing.\n";
-    const entrySource =
-      "---\ntitle: Hello world\nslug: hello-world\ndraft: true\n---\n\nBody.\n";
-    const configRow = {
-      ...assetRow,
-      assetId: "config",
-      projectId,
-      filename: "collection",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "config-storage.json",
-        format: "json",
-        size: configSource.length,
-      },
-    };
-    const templateRow = {
-      ...assetRow,
-      assetId: "template",
-      projectId,
-      filename: "template",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "template-storage.mdx",
+    await seedEditorProject(projectId);
+    await seedCollection(projectId);
+    for (const name of ["entry-storage.mdx", "invalid-entry-storage.mdx"]) {
+      await seed.file(db, {
+        ...photoFile,
+        name,
         format: "mdx",
-        size: templateSource.length,
-      },
-    };
-    const entryFile = {
-      ...assetRow.file,
-      name: "entry-storage.mdx",
+        size: entrySource.length,
+        meta: "{}",
+        updatedAt: "2026-09-03T00:00:00.000Z",
+        uploaderProjectId: projectId,
+      });
+    }
+    const entryValue = (id: string, name: string, filename: string) => ({
+      id,
+      projectId,
+      name,
+      filename,
+      folderId: "posts",
+      type: "file",
       format: "mdx",
       size: entrySource.length,
-      meta: "{}",
-      updatedAt: "2026-09-03T00:00:00.000Z",
-    };
-    const invalidEntryFile = {
-      ...entryFile,
-      name: "invalid-entry-storage.mdx",
-    };
-    let inserted = false;
-    const entryPatch: Patch[] = [
-      {
-        op: "add",
-        path: ["entry"],
-        value: {
-          id: "entry",
-          projectId,
-          name: "entry-storage.mdx",
-          filename: "hello-world",
-          folderId: "posts",
-          type: "file",
-          format: "mdx",
-          size: entrySource.length,
-          description: null,
-          createdAt: "2026-09-03T00:00:00.000Z",
-          meta: {},
-        },
-      },
-    ];
-    const invalidEntryPatch: Patch[] = [
-      {
-        op: "add",
-        path: ["invalid-entry"],
-        value: {
-          id: "invalid-entry",
-          projectId,
-          name: "invalid-entry-storage.mdx",
-          filename: "different-slug",
-          folderId: "posts",
-          type: "file",
-          format: "mdx",
-          size: entrySource.length,
-          description: null,
-          createdAt: "2026-09-03T00:00:00.000Z",
-          meta: {},
-        },
-      },
-    ];
-    server.use(
-      ...editorPermitHandlers(projectId),
-      db.get("Asset", () => json([configRow, templateRow])),
-      db.get("File", ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.get("status")).toBe("eq.UPLOADED");
-        const filter = url.searchParams.get("name") ?? "";
-        return json(
-          [entryFile, invalidEntryFile].filter(({ name }) =>
-            filter.includes(name)
-          )
-        );
-      }),
-      db.patch("File", () => empty({ status: 204 })),
-      db.post("Asset", () => {
-        inserted = true;
-        return empty({ status: 201 });
-      })
-    );
+      description: null,
+      createdAt: "2026-09-03T00:00:00.000Z",
+      meta: {},
+    });
 
     await expect(
       patchAssets(
         {
           projectId,
           assetStore: createSourceAssetStore({
-            [configRow.file.name]: configSource,
-            [templateRow.file.name]: templateSource,
+            ...collectionSources(),
             "entry-storage.mdx": entrySource,
             "invalid-entry-storage.mdx": entrySource,
           }),
         },
-        invalidEntryPatch,
+        [
+          {
+            op: "add",
+            path: ["invalid-entry"],
+            value: entryValue(
+              "invalid-entry",
+              "invalid-entry-storage.mdx",
+              "different-slug"
+            ),
+          },
+        ],
         createContext()
       )
     ).rejects.toThrow("slug must match the entry filename");
-    expect(inserted).toBe(false);
+    expect(await readAssets(projectId)).toHaveLength(2);
 
     await expect(
       patchAssets(
         {
           projectId,
           assetStore: createSourceAssetStore({
-            [configRow.file.name]: configSource,
-            [templateRow.file.name]: templateSource,
+            ...collectionSources(),
             "entry-storage.mdx": entrySource,
           }),
         },
-        entryPatch,
+        [
+          {
+            op: "add",
+            path: ["entry"],
+            value: entryValue("entry", "entry-storage.mdx", "hello-world"),
+          },
+        ],
         createContext()
       )
     ).resolves.toBeUndefined();
-    expect(inserted).toBe(true);
+    expect((await readAssets(projectId)).map((asset) => asset.id)).toContain(
+      "entry"
+    );
   });
 
   test("moves a valid entry back into its collection through a sync patch", async () => {
     const projectId = uid();
-    const configSource = createDefaultCollectionConfig();
-    const templateSource = "---\ndraft: true\n---\n\nStart writing.\n";
-    const entrySource =
-      "---\ntitle: Hello world\nslug: hello-world\ndraft: true\n---\n\nBody.\n";
-    const configRow = {
-      ...assetRow,
-      assetId: "config",
-      projectId,
-      filename: "collection",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "config-storage.json",
-        format: "json",
-        size: configSource.length,
-      },
-    };
-    const templateRow = {
-      ...assetRow,
-      assetId: "template",
-      projectId,
-      filename: "template",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "template-storage.mdx",
-        format: "mdx",
-        size: templateSource.length,
-      },
-    };
-    const entryRow = {
-      ...assetRow,
-      assetId: "entry",
+    await seedEditorProject(projectId);
+    await seedCollection(projectId);
+    await seedAsset({
+      id: "entry",
       projectId,
       filename: "hello-world",
-      folderId: null,
       file: {
-        ...assetRow.file,
+        ...photoFile,
         name: "entry-storage.mdx",
         format: "mdx",
         size: entrySource.length,
+        meta: "{}",
       },
-    };
-    let folderId: unknown;
-    server.use(
-      ...editorPermitHandlers(projectId),
-      db.get("Asset", () => json([configRow, templateRow, entryRow])),
-      db.patch("Asset", async ({ request }) => {
-        folderId = ((await request.json()) as { folderId: unknown }).folderId;
-        return json({ id: "entry" });
-      })
-    );
+    });
 
     await expect(
       patchAssets(
         {
           projectId,
           assetStore: createSourceAssetStore({
-            [configRow.file.name]: configSource,
-            [templateRow.file.name]: templateSource,
-            [entryRow.file.name]: entrySource,
+            ...collectionSources(),
+            "entry-storage.mdx": entrySource,
           }),
         },
         [{ op: "add", path: ["entry", "folderId"], value: "posts" }],
         createContext()
       )
     ).resolves.toBeUndefined();
-    expect(folderId).toBe("posts");
+    expect(
+      (await readAssets(projectId)).find((asset) => asset.id === "entry")
+        ?.folderId
+    ).toBe("posts");
   });
 
   test("allows invalid collection entries to be repaired one at a time", async () => {
     const projectId = uid();
-    const configSource = createDefaultCollectionConfig();
-    const templateSource = "---\ndraft: true\n---\n\nStart writing.\n";
     const invalidEntrySource = "---\nslug: missing-title\ndraft: true\n---\n";
-    const configRow = {
-      ...assetRow,
-      assetId: "config",
-      projectId,
-      filename: "collection",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "config-storage.json",
-        format: "json",
-        size: configSource.length,
-      },
-    };
-    const templateRow = {
-      ...assetRow,
-      assetId: "template",
-      projectId,
-      filename: "template",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "template-storage.mdx",
-        format: "mdx",
-        size: templateSource.length,
-      },
-    };
-    const firstEntryRow = {
-      ...assetRow,
-      assetId: "first-entry",
-      projectId,
-      filename: "missing-title",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "first-entry-storage.mdx",
-        format: "mdx",
-        size: invalidEntrySource.length,
-      },
-    };
-    const secondEntryRow = {
-      ...assetRow,
-      assetId: "second-entry",
-      projectId,
-      filename: "also-missing-title",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "second-entry-storage.mdx",
-        format: "mdx",
-        size: invalidEntrySource.length,
-      },
-    };
-    let updatedFolderId: unknown = "not-updated";
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () =>
-        json([configRow, templateRow, firstEntryRow, secondEntryRow])
-      ),
-      db.patch("Asset", async ({ request }) => {
-        updatedFolderId = ((await request.json()) as { folderId: unknown })
-          .folderId;
-        return json({ id: "first-entry", folderId: null });
-      })
-    );
+    await seedOwnProject(projectId);
+    await seedCollection(projectId);
+    for (const [id, filename] of [
+      ["first-entry", "missing-title"],
+      ["second-entry", "also-missing-title"],
+    ]) {
+      await seedAsset({
+        id,
+        projectId,
+        filename,
+        folderId: "posts",
+        file: {
+          ...photoFile,
+          name: `${id}-storage.mdx`,
+          format: "mdx",
+          size: invalidEntrySource.length,
+          meta: "{}",
+        },
+      });
+    }
 
     await expect(
       patchAssets(
         {
           projectId,
           assetStore: createSourceAssetStore({
-            [configRow.file.name]: configSource,
-            [templateRow.file.name]: templateSource,
-            [firstEntryRow.file.name]: invalidEntrySource,
-            [secondEntryRow.file.name]: invalidEntrySource,
+            ...collectionSources(),
+            "first-entry-storage.mdx": invalidEntrySource,
+            "second-entry-storage.mdx": invalidEntrySource,
           }),
         },
         [{ op: "remove", path: ["first-entry", "folderId"] }],
         createContext()
       )
     ).resolves.toBeUndefined();
-    expect(updatedFolderId).toBeNull();
+    expect(
+      (await readAssets(projectId)).find((asset) => asset.id === "first-entry")
+        ?.folderId
+    ).toBeNull();
   });
 
   test("renames supporting assets without validating unchanged entry content", async () => {
     const projectId = uid();
-    const configSource = createDefaultCollectionConfig();
-    const templateSource = "---\ndraft: true\n---\n";
-    const row = (
-      id: string,
-      filename: string,
-      format: string,
-      source: string
-    ) => ({
-      ...assetRow,
-      assetId: id,
-      projectId,
-      filename,
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: `${id}.${format}`,
-        format,
-        size: source.length,
-      },
-    });
-    const rows = [
-      row("config", "collection", "json", configSource),
-      row("template", "template", "mdx", templateSource),
-      row("invalid", "invalid", "mdx", "missing frontmatter"),
-      row("notes", "notes", "txt", "notes"),
-    ];
-    let filename: unknown;
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json(rows)),
-      db.patch("Asset", async ({ request }) => {
-        filename = ((await request.json()) as { filename: unknown }).filename;
-        return json({ id: "notes" });
-      })
-    );
+    const templateOnly = "---\ndraft: true\n---\n";
+    await seedOwnProject(projectId);
+    await seedFolders(projectId, [{ id: "posts", name: "posts" }]);
+    for (const [id, filename, format, source] of [
+      ["config", "collection", "json", configSource],
+      ["template", "template", "mdx", templateOnly],
+      ["invalid", "invalid", "mdx", "missing frontmatter"],
+      ["notes", "notes", "txt", "notes"],
+    ]) {
+      await seedAsset({
+        id,
+        projectId,
+        filename,
+        folderId: "posts",
+        file: {
+          ...photoFile,
+          name: `${id}.${format}`,
+          format,
+          size: source.length,
+          meta: "{}",
+        },
+      });
+    }
     const assetStore = createSourceAssetStore({
       "config.json": configSource,
-      "template.mdx": templateSource,
+      "template.mdx": templateOnly,
       // Neither ordinary content nor unchanged entries should be read.
     });
+
     await patchAssets(
       { projectId, assetStore },
       [{ op: "replace", path: ["notes", "filename"], value: "renamed" }],
       createContext()
     );
-    expect(filename).toBe("renamed");
+    expect(
+      (await readAssets(projectId)).find((asset) => asset.id === "notes")
+        ?.filename
+    ).toBe("renamed");
     await expect(
       patchAssets(
         { projectId, assetStore },
@@ -1633,141 +1239,85 @@ describe("patchAssets (msw)", () => {
     const projectId = uid();
     const schema = JSON.parse(createDefaultCollectionConfig());
     schema["x-webstudio"].entries = ["*"];
-    const configSource = JSON.stringify(schema);
-    const templateSource = "---\ndraft: true\n---\n\nStart writing.\n";
-    const configRow = {
-      ...assetRow,
-      assetId: "config",
-      projectId,
-      filename: "collection",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "config-storage.json",
-        format: "json",
-        size: configSource.length,
+    const config = JSON.stringify(schema);
+    await seedOwnProject(projectId);
+    await seedFolders(projectId, [{ id: "posts", name: "posts" }]);
+    for (const [name, format, size] of [
+      ["config-storage.json", "json", config.length],
+      ["template-storage.mdx", "mdx", templateSource.length],
+      ["notes.txt", "txt", 5],
+    ] as const) {
+      await seed.file(db, {
+        ...photoFile,
+        name,
+        format,
+        size,
+        meta: "{}",
+        updatedAt: "2026-09-03T00:00:00.000Z",
+        uploaderProjectId: projectId,
+      });
+    }
+    const added = (
+      id: string,
+      name: string,
+      filename: string,
+      format: string,
+      size: number
+    ) => ({
+      op: "add" as const,
+      path: [id],
+      value: {
+        id,
+        projectId,
+        name,
+        filename,
+        folderId: "posts",
+        type: "file",
+        format,
+        size,
+        description: null,
+        createdAt: "2026-09-03T00:00:00.000Z",
+        meta: {},
       },
-    };
-    const templateRow = {
-      ...assetRow,
-      assetId: "template",
-      projectId,
-      filename: "template",
-      folderId: "posts",
-      file: {
-        ...assetRow.file,
-        name: "template-storage.mdx",
-        format: "mdx",
-        size: templateSource.length,
-      },
-    };
-    let inserted = false;
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([])),
-      db.get("File", () =>
-        json([
-          {
-            ...configRow.file,
-            meta: "{}",
-            updatedAt: "2026-09-03T00:00:00.000Z",
-          },
-          {
-            ...templateRow.file,
-            meta: "{}",
-            updatedAt: "2026-09-03T00:00:00.000Z",
-          },
-          {
-            ...assetRow.file,
-            name: "notes.txt",
-            format: "txt",
-            size: 5,
-            meta: "{}",
-            updatedAt: "2026-09-03T00:00:00.000Z",
-          },
-        ])
-      ),
-      db.post("Asset", () => {
-        inserted = true;
-        return empty({ status: 201 });
-      })
-    );
+    });
 
     await expect(
       patchAssets(
         {
           projectId,
-          assetStore: createSourceAssetStore({
-            [configRow.file.name]: configSource,
-            [templateRow.file.name]: templateSource,
-          }),
+          assetStore: createSourceAssetStore(collectionSources(config)),
         },
         [
-          {
-            op: "add",
-            path: ["config"],
-            value: {
-              id: "config",
-              projectId,
-              name: configRow.file.name,
-              filename: "collection",
-              folderId: "posts",
-              type: "file",
-              format: "json",
-              size: configSource.length,
-              description: null,
-              createdAt: "2026-09-03T00:00:00.000Z",
-              meta: {},
-            },
-          },
-          {
-            op: "add",
-            path: ["template"],
-            value: {
-              id: "template",
-              projectId,
-              name: templateRow.file.name,
-              filename: "template",
-              folderId: "posts",
-              type: "file",
-              format: "mdx",
-              size: templateSource.length,
-              description: null,
-              createdAt: "2026-09-03T00:00:00.000Z",
-              meta: {},
-            },
-          },
-          {
-            op: "add",
-            path: ["notes"],
-            value: {
-              id: "notes",
-              projectId,
-              name: "notes.txt",
-              filename: "notes",
-              folderId: "posts",
-              type: "file",
-              format: "txt",
-              size: 5,
-              description: null,
-              createdAt: "2026-09-03T00:00:00.000Z",
-              meta: {},
-            },
-          },
+          added(
+            "config",
+            "config-storage.json",
+            "collection",
+            "json",
+            config.length
+          ),
+          added(
+            "template",
+            "template-storage.mdx",
+            "template",
+            "mdx",
+            templateSource.length
+          ),
+          added("notes", "notes.txt", "notes", "txt", 5),
         ],
         createContext()
       )
     ).rejects.toThrow('Collection entry "notes.txt" must be an MDX file');
-    expect(inserted).toBe(false);
+    expect(await readAssets(projectId)).toEqual([]);
   });
 
   test("persists legacy null-provenance asset metadata via patch", async () => {
     const projectId = uid();
-    let localAssetRow = {
-      ...assetRow,
+    await seedOwnProject(projectId);
+    await seedAsset({
+      id: "asset-1",
       projectId,
       file: {
-        ...assetRow.file,
+        ...photoFile,
         name: "font.woff2",
         format: "woff2",
         meta: JSON.stringify({
@@ -1777,22 +1327,7 @@ describe("patchAssets (msw)", () => {
         }),
         uploaderProjectId: null,
       },
-    };
-    let updatedMeta: unknown;
-
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([localAssetRow])),
-      db.get("File", () => json([localAssetRow.file])),
-      db.patch("File", async ({ request }) => {
-        updatedMeta = ((await request.json()) as { meta: unknown }).meta;
-        localAssetRow = {
-          ...localAssetRow,
-          file: { ...localAssetRow.file, meta: String(updatedMeta) },
-        };
-        return json({ meta: updatedMeta });
-      })
-    );
+    });
 
     await patchAssets(
       { projectId, assetStore: unusedAssetStore },
@@ -1806,107 +1341,70 @@ describe("patchAssets (msw)", () => {
       createContext()
     );
 
-    expect(updatedMeta).toBe(
-      JSON.stringify({ family: "Rajdhani", style: "normal", weight: 600 })
+    await expect(loadAssetsByProjectWithClient(projectId, db)).resolves.toEqual(
+      [
+        expect.objectContaining({
+          id: "asset-1",
+          meta: { family: "Rajdhani", style: "normal", weight: 600 },
+        }),
+      ]
     );
-    await expect(
-      loadAssetsByProjectWithClient(projectId, testContext.postgrest.client)
-    ).resolves.toEqual([
-      expect.objectContaining({
-        id: "asset-1",
-        meta: { family: "Rajdhani", style: "normal", weight: 600 },
-      }),
-    ]);
   });
 
   test("updates asset filename via patch", async () => {
     const projectId = uid();
-    let localAssetRow = { ...assetRow, projectId };
-    let updatedFilename: string | undefined;
-
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([localAssetRow])),
-      db.get("AssetFileMetadata", () => json([])),
-      db.patch("Asset", async ({ request }) => {
-        const body = (await request.json()) as { filename?: string };
-        updatedFilename = body.filename;
-        localAssetRow = {
-          ...localAssetRow,
-          filename: body.filename ?? localAssetRow.filename,
-        };
-        return json({
-          id: localAssetRow.assetId,
-          filename: localAssetRow.filename,
-          description: localAssetRow.description,
-        });
-      })
-    );
-
-    const patches: Patch[] = [
-      {
-        op: "replace",
-        path: ["asset-1", "filename"],
-        value: "renamed-photo.jpg",
-      },
-    ];
+    await seedOwnProject(projectId);
+    await seedAsset({
+      id: "asset-1",
+      projectId,
+      filename: "photo.jpg",
+      file: photoFile,
+    });
 
     await patchAssets(
       { projectId, assetStore: unusedAssetStore },
-      patches,
+      [
+        {
+          op: "replace",
+          path: ["asset-1", "filename"],
+          value: "renamed-photo.jpg",
+        },
+      ],
       createContext()
     );
-    expect(updatedFilename).toBe("renamed-photo.jpg");
-    await expect(
-      loadAssetsByProjectWithClient(projectId, testContext.postgrest.client)
-    ).resolves.toEqual([
-      expect.objectContaining({
-        id: "asset-1",
-        filename: "renamed-photo.jpg",
-      }),
-    ]);
+    await expect(loadAssetsByProjectWithClient(projectId, db)).resolves.toEqual(
+      [
+        expect.objectContaining({
+          id: "asset-1",
+          filename: "renamed-photo.jpg",
+        }),
+      ]
+    );
   });
 
   test("atomically swaps an asset file while preserving its id", async () => {
     const projectId = uid();
-    const localAssetRow = { ...assetRow, projectId };
-    let swapInput: unknown;
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([localAssetRow])),
-      db.patch("Asset", () =>
-        json({
-          filename: localAssetRow.filename,
-          description: localAssetRow.description,
-          folderId: null,
-        })
-      ),
-      http.post(
-        "http://test-postgrest/rpc/swap_asset_file",
-        async ({ request }) => {
-          swapInput = await request.json();
-          return HttpResponse.json("updated");
-        }
-      )
-    );
-
-    await patchAssetsWithClient(
-      { projectId, client: testContext.postgrest.client },
-      [
-        {
-          op: "replace",
-          path: ["asset-1", "name"],
-          value: "photo_revision.jpg",
-        },
-      ]
-    );
-
-    expect(swapInput).toEqual({
-      project_id: projectId,
-      asset_id: "asset-1",
-      expected_name: "photo.jpg",
-      replacement_name: "photo_revision.jpg",
+    await seedOwnProject(projectId);
+    await seedAsset({ id: "asset-1", projectId, file: photoFile });
+    await seed.file(db, {
+      ...photoFile,
+      name: "photo_revision.jpg",
+      uploaderProjectId: projectId,
     });
+
+    await patchAssetsWithClient({ projectId, client: db }, [
+      {
+        op: "replace",
+        path: ["asset-1", "name"],
+        value: "photo_revision.jpg",
+      },
+    ]);
+
+    expect(await readAssets(projectId)).toEqual([
+      expect.objectContaining({ id: "asset-1", name: "photo_revision.jpg" }),
+    ]);
+    // The replaced revision is no longer referenced.
+    expect((await readFile("photo.jpg")).isDeleted).toBe(true);
   });
 
   test("restores a shared clone file without requiring an owned revision", async () => {
@@ -1915,238 +1413,122 @@ describe("patchAssets (msw)", () => {
     const authoritativeMeta = { width: 1200, height: 800 };
     const forgedMeta = { width: 9999, height: 9999 };
     const staleMeta = { width: 320, height: 200 };
+    await seedOwnProject(projectId);
+    await seedOwnProject(sourceProjectId);
     const sharedFile = {
-      ...assetRow.file,
+      ...photoFile,
       name: "original_shared.jpg",
-      format: "jpg",
       size: 2000,
       meta: JSON.stringify(authoritativeMeta),
       uploaderProjectId: sourceProjectId,
       contentHash: "a".repeat(64),
-      isDeleted: false,
       updatedAt: "2026-09-06T00:00:00.000Z",
     };
-    const currentFile = {
-      ...sharedFile,
-      name: "current_clone.jpg",
-      size: 1000,
-      meta: JSON.stringify(staleMeta),
-      uploaderProjectId: projectId,
-      contentHash: "f".repeat(64),
-    };
-    let persistedFile = currentFile;
-    let persistedSharedMeta = sharedFile.meta;
-    let fileMetadataUpdates = 0;
-    const restoredFiles: string[] = [];
-    const directSwapInputs: Array<Record<string, unknown>> = [];
-    const swapInputs: Array<Record<string, unknown>> = [];
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () =>
-        json([
-          {
-            ...assetRow,
-            assetId: "entry",
-            projectId,
-            filename: "post",
-            folderId: null,
-            file: persistedFile,
-          },
-        ])
-      ),
-      db.get("File", ({ request }) => {
-        const url = new URL(request.url);
-        const nameFilter = url.searchParams.get("name") ?? "";
-        if (nameFilter.includes(sharedFile.name)) {
-          return json([{ ...sharedFile, meta: persistedSharedMeta }]);
-        }
-        return json([]);
-      }),
-      db.patch("File", async ({ request }) => {
-        const url = new URL(request.url);
-        const name = url.searchParams.get("name") ?? "";
-        const input = (await request.json()) as Record<string, unknown>;
-        if (Object.hasOwn(input, "isDeleted")) {
-          expect(url.searchParams.get("status")).toBe("eq.UPLOADED");
-          expect(input).toEqual({ isDeleted: false });
-          restoredFiles.push(name);
-          return json({ name: sharedFile.name });
-        }
-        if (typeof input.meta === "string") {
-          fileMetadataUpdates += 1;
-          persistedSharedMeta = input.meta;
-          return json({ meta: input.meta });
-        }
-        return json(null);
-      }),
-      db.patch("Asset", async ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.get("id")).toBe("eq.entry");
-        expect(url.searchParams.get("projectId")).toBe(`eq.${projectId}`);
-        expect(url.searchParams.get("name")).toBe(`eq.${currentFile.name}`);
-        const input = (await request.json()) as Record<string, unknown>;
-        directSwapInputs.push(input);
-        if (input.name !== sharedFile.name) {
-          return json(null);
-        }
-        persistedFile = sharedFile;
-        return json({ id: "entry" });
-      }),
-      http.post(
-        "http://test-postgrest/rpc/swap_asset_file",
-        async ({ request }) => {
-          const input = (await request.json()) as Record<string, unknown>;
-          swapInputs.push(input);
-          return HttpResponse.json("invalid_revision");
-        }
-      )
-    );
-    const assetStore = {
-      readFile: async () => {
-        throw new Error("Unexpected asset content read");
+    await seed.file(db, sharedFile);
+    await seedAsset({
+      id: "entry",
+      projectId,
+      filename: "post",
+      file: {
+        ...sharedFile,
+        name: "current_clone.jpg",
+        size: 1000,
+        meta: JSON.stringify(staleMeta),
+        uploaderProjectId: projectId,
+        contentHash: "f".repeat(64),
       },
-    };
+    });
     const patches: Patch[] = [
-      {
-        op: "replace",
-        path: ["entry", "name"],
-        value: sharedFile.name,
-      },
-      {
-        op: "replace",
-        path: ["entry", "meta"],
-        value: authoritativeMeta,
-      },
+      { op: "replace", path: ["entry", "name"], value: sharedFile.name },
+      { op: "replace", path: ["entry", "meta"], value: authoritativeMeta },
     ];
 
     await expect(
       patchAssets(
-        { projectId, assetStore },
+        { projectId, assetStore: unusedAssetStore },
         [
           patches[0]!,
-          {
-            op: "replace",
-            path: ["entry", "meta"],
-            value: forgedMeta,
-          },
+          { op: "replace", path: ["entry", "meta"], value: forgedMeta },
         ],
         createContext()
       )
     ).rejects.toThrow("Shared asset metadata does not match its file");
-    expect(restoredFiles).toEqual([]);
-    expect(directSwapInputs).toEqual([]);
-    expect(swapInputs).toEqual([]);
-    expect(persistedSharedMeta).toBe(sharedFile.meta);
-    expect(persistedFile).toEqual(currentFile);
+    expect((await readAssets(projectId))[0].name).toBe("current_clone.jpg");
+    expect((await readFile(sharedFile.name)).meta).toBe(sharedFile.meta);
 
-    await patchAssets({ projectId, assetStore }, patches, createContext());
-    await patchAssets({ projectId, assetStore }, patches, createContext());
+    await patchAssets(
+      { projectId, assetStore: unusedAssetStore },
+      patches,
+      createContext()
+    );
+    await patchAssets(
+      { projectId, assetStore: unusedAssetStore },
+      patches,
+      createContext()
+    );
 
-    expect(restoredFiles).toEqual([`eq.${sharedFile.name}`]);
-    expect(directSwapInputs).toEqual([
-      {
-        name: sharedFile.name,
-      },
-    ]);
-    expect(swapInputs).toEqual([]);
-    expect(persistedFile).toEqual(sharedFile);
-    expect(persistedSharedMeta).toBe(sharedFile.meta);
-    expect(fileMetadataUpdates).toBe(0);
+    expect((await readAssets(projectId))[0].name).toBe(sharedFile.name);
+    expect(await readFile(sharedFile.name)).toMatchObject({
+      meta: sharedFile.meta,
+      isDeleted: false,
+      uploaderProjectId: sourceProjectId,
+    });
   });
 
   test("persists moving an asset to root as null", async () => {
     const projectId = uid();
-    let localAssetRow = {
-      ...assetRow,
+    await seedOwnProject(projectId);
+    await seedFolders(projectId, [{ id: "folder", name: "folder" }]);
+    await seedAsset({
+      id: "asset-1",
       projectId,
       filename: "post",
-      folderId: "folder" as string | null,
+      folderId: "folder",
       file: {
-        ...assetRow.file,
+        ...photoFile,
         name: "stored.md",
         format: "md",
         size: 100,
         meta: "{}",
       },
-    };
-    let updatedFolderId: unknown = "not-updated";
-    server.use(
-      ownershipHandler,
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("id")) {
-          return json([{ ...localAssetRow, id: localAssetRow.assetId }]);
-        }
-        return json([localAssetRow]);
-      }),
-      db.patch("Asset", async ({ request }) => {
-        updatedFolderId = ((await request.json()) as { folderId: unknown })
-          .folderId;
-        localAssetRow = { ...localAssetRow, folderId: null };
-        return json({
-          id: localAssetRow.assetId,
-          filename: localAssetRow.filename,
-          description: localAssetRow.description,
-          folderId: null,
-        });
-      })
-    );
+    });
 
     await patchAssets(
       { projectId, assetStore: unusedAssetStore },
       [{ op: "remove", path: ["asset-1", "folderId"] }],
       createContext()
     );
-    expect(updatedFolderId).toBeNull();
+    expect((await readAssets(projectId))[0].folderId).toBeNull();
   });
 
   test("does not update metadata when adding an existing asset", async () => {
     const projectId = uid();
-    const localAssetRow = { ...assetRow, projectId };
-    let updateCount = 0;
+    await seedOwnProject(projectId);
+    await seedAsset({ id: "asset-1", projectId, file: photoFile });
+    const { counter, countingDb } = countingQueries("update", assetTable);
 
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([localAssetRow])),
-      db.patch("Asset", () => {
-        updateCount += 1;
-        return json({
-          filename: localAssetRow.filename,
-          description: localAssetRow.description,
-        });
-      })
-    );
-
-    const [asset] = await loadAssetsByProjectWithClient(
-      projectId,
-      testContext.postgrest.client
-    );
+    const [asset] = await loadAssetsByProjectWithClient(projectId, db);
     await patchAssets(
       { projectId, assetStore: unusedAssetStore },
       [{ op: "add", path: [asset.id], value: asset }],
-      createContext()
+      createContext(countingDb)
     );
 
-    expect(updateCount).toBe(0);
+    expect(counter.count).toBe(0);
   });
 
   test("throws when an asset metadata update matches no database row", async () => {
     const projectId = uid();
-    const localAssetRow = { ...assetRow, projectId };
-
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([localAssetRow])),
-      db.patch("Asset", () =>
-        json(
-          {
-            code: "PGRST116",
-            message: "The result contains 0 rows",
-          },
-          { status: 406 }
-        )
-      )
-    );
+    await seedOwnProject(projectId);
+    await seedAsset({ id: "asset-1", projectId, file: photoFile });
+    // The asset is deleted after the patch loaded it.
+    let deleted = false;
+    const racingDb = withQueryHook(db, async ({ kind, table }) => {
+      if (kind === "select" && table === assetTable && deleted === false) {
+        deleted = true;
+        await db.delete(assetTable).where(eq(assetTable.id, "asset-1"));
+      }
+    });
 
     await expect(
       patchAssets(
@@ -2158,145 +1540,95 @@ describe("patchAssets (msw)", () => {
             value: "renamed-photo.jpg",
           },
         ],
-        createContext()
+        createContext(racingDb)
       )
     ).rejects.toThrow();
   });
 
+  const newAssetPatch = (projectId: string): Patch[] => [
+    {
+      op: "add",
+      path: ["asset-new"],
+      value: {
+        id: "asset-new",
+        name: "new.jpg",
+        type: "image",
+        projectId,
+        format: "jpg",
+        size: 500,
+        description: null,
+        createdAt: "2024-01-01T00:00:00.000Z",
+        path: "",
+        meta: { width: 50, height: 50 },
+      },
+    },
+  ];
+
+  const newFile = (projectId: string) => ({
+    ...photoFile,
+    name: "new.jpg",
+    size: 500,
+    meta: JSON.stringify({ width: 50, height: 50 }),
+    updatedAt: "2024-01-01T00:00:00.000Z",
+    uploaderProjectId: projectId,
+    // Deleted by the change that is being undone.
+    isDeleted: true,
+  });
+
   test("adds new asset when patch inserts an entry", async () => {
     const projectId = uid();
-    let insertedAssets: unknown;
-
-    server.use(
-      ownershipHandler,
-      // loadAssetsByProject returns empty list — no existing assets
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.get("projectId")) {
-          return json([]);
-        }
-        return json([]);
-      }),
-      // File lookup for undo restore
-      db.get("File", () =>
-        json([
-          {
-            ...assetRow.file,
-            name: "new.jpg",
-            format: "jpg",
-            size: 500,
-            meta: JSON.stringify({ width: 50, height: 50 }),
-            updatedAt: "2024-01-01T00:00:00.000Z",
-          },
-        ])
-      ),
-      // restore isDeleted=false
-      db.patch("File", () => empty({ status: 204 })),
-      // asset insert
-      db.post("Asset", async ({ request }) => {
-        insertedAssets = await request.json();
-        return empty({ status: 201 });
-      })
-    );
-
-    const patches: Patch[] = [
-      {
-        op: "add",
-        path: ["asset-new"],
-        value: {
-          id: "asset-new",
-          name: "new.jpg",
-          type: "image",
-          projectId,
-          format: "jpg",
-          size: 500,
-          description: null,
-          createdAt: "2024-01-01T00:00:00.000Z",
-          path: "",
-          meta: { width: 50, height: 50 },
-        },
-      },
-    ];
+    await seedOwnProject(projectId);
+    await seed.file(db, newFile(projectId));
 
     await patchAssets(
       { projectId, assetStore: unusedAssetStore },
-      patches,
+      newAssetPatch(projectId),
       createContext()
     );
-    expect(insertedAssets).toBeDefined();
+    expect(await readAssets(projectId)).toEqual([
+      expect.objectContaining({ id: "asset-new", name: "new.jpg" }),
+    ]);
+    expect((await readFile("new.jpg")).isDeleted).toBe(false);
+  });
+
+  const missingAssetValue = (projectId: string, name: string, size = 1) => ({
+    id: name.replace(/\.jpg$/, ""),
+    name,
+    type: "image" as const,
+    projectId,
+    format: "jpg",
+    size,
+    description: null,
+    createdAt: "2024-01-01T00:00:00.000Z",
+    meta: { width: size, height: size },
   });
 
   test("rejects an added asset whose file is unavailable", async () => {
     const projectId = uid();
-    let restored = false;
-    let inserted = false;
-    server.use(
-      db.get("Asset", () => json([])),
-      db.get("File", () => json([])),
-      db.patch("File", () => {
-        restored = true;
-        return empty({ status: 204 });
-      }),
-      db.post("Asset", () => {
-        inserted = true;
-        return empty({ status: 201 });
-      })
-    );
+    await seedOwnProject(projectId);
 
     await expect(
-      patchAssetsWithClient(
-        { projectId, client: testContext.postgrest.client },
-        [
-          {
-            op: "add",
-            path: ["missing"],
-            value: {
-              id: "missing",
-              name: "missing.jpg",
-              type: "image",
-              projectId,
-              format: "jpg",
-              size: 1,
-              description: null,
-              createdAt: "2024-01-01T00:00:00.000Z",
-              meta: { width: 1, height: 1 },
-            },
-          },
-        ]
-      )
+      patchAssetsWithClient({ projectId, client: db }, [
+        {
+          op: "add",
+          path: ["missing"],
+          value: missingAssetValue(projectId, "missing.jpg"),
+        },
+      ])
     ).rejects.toThrow("Asset file not found for missing");
-    expect(restored).toBe(false);
-    expect(inserted).toBe(false);
+    expect(await readAssets(projectId)).toEqual([]);
   });
 
   test("rejects an added asset whose file is not fully uploaded", async () => {
     const projectId = uid();
-    let restored = false;
-    let inserted = false;
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([])),
-      db.get("File", ({ request }) => {
-        expect(new URL(request.url).searchParams.get("status")).toBe(
-          "eq.UPLOADED"
-        );
-        return json([
-          {
-            ...assetRow.file,
-            name: "uploading.jpg",
-            status: "UPLOADING",
-          },
-        ]);
-      }),
-      db.patch("File", () => {
-        restored = true;
-        return empty({ status: 204 });
-      }),
-      db.post("Asset", () => {
-        inserted = true;
-        return empty({ status: 201 });
-      })
-    );
+    await seedOwnProject(projectId);
+    await seed.file(db, {
+      ...photoFile,
+      name: "uploading.jpg",
+      status: "UPLOADING",
+      isDeleted: true,
+      uploaderProjectId: projectId,
+    });
 
     await expect(
       patchAssets(
@@ -2305,72 +1637,45 @@ describe("patchAssets (msw)", () => {
           {
             op: "add",
             path: ["uploading"],
-            value: {
-              id: "uploading",
-              name: "uploading.jpg",
-              type: "image",
-              projectId,
-              format: "jpg",
-              size: 1000,
-              description: null,
-              createdAt: "2024-01-01T00:00:00.000Z",
-              meta: { width: 100, height: 100 },
-            },
+            value: missingAssetValue(projectId, "uploading.jpg", 100),
           },
         ],
         createContext()
       )
     ).rejects.toThrow("Asset file not found");
-    expect(restored).toBe(false);
-    expect(inserted).toBe(false);
+    expect(await readAssets(projectId)).toEqual([]);
+    expect((await readFile("uploading.jpg")).isDeleted).toBe(true);
   });
 
   test("chunks uploaded file lookups and restores by bounded filter size", async () => {
     const projectId = uid();
+    await seedOwnProject(projectId);
     const fileNames = Array.from(
       { length: 12 },
       (_, index) => `${String(index).padStart(2, "0")}-${"a".repeat(490)}.jpg`
     );
-    const assetFileNames = [...fileNames, fileNames[0]!];
-    const fileByName = new Map(
-      fileNames.map((name) => [
+    for (const name of fileNames) {
+      await seed.file(db, {
+        ...photoFile,
         name,
-        {
-          ...assetRow.file,
-          name,
-          status: "UPLOADED",
-        },
-      ])
-    );
-    const readBatches: string[][] = [];
-    const restoreBatches: string[][] = [];
-    const getNames = (request: Request) => {
-      const url = new URL(request.url);
-      expect(url.search.length).toBeLessThan(4300);
-      expect(url.searchParams.get("status")).toBe("eq.UPLOADED");
-      const filter = url.searchParams.get("name");
-      expect(filter?.startsWith("in.(")).toBe(true);
-      return filter?.slice(4, -1).split(",") ?? [];
-    };
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json([])),
-      db.get("File", ({ request }) => {
-        const names = getNames(request);
-        readBatches.push(names);
-        return json(
-          names.flatMap((name) => {
-            const file = fileByName.get(name);
-            return file === undefined ? [] : [file];
-          })
-        );
-      }),
-      db.patch("File", ({ request }) => {
-        restoreBatches.push(getNames(request));
-        return empty({ status: 204 });
-      }),
-      db.post("Asset", () => empty({ status: 201 }))
-    );
+        isDeleted: true,
+        uploaderProjectId: projectId,
+      });
+    }
+    const assetFileNames = [...fileNames, fileNames[0]!];
+    let reads = 0;
+    let restores = 0;
+    const watchedDb = withQueryHook(db, ({ kind, table }) => {
+      if (table !== fileTable) {
+        return;
+      }
+      if (kind === "select") {
+        reads += 1;
+      }
+      if (kind === "update") {
+        restores += 1;
+      }
+    });
 
     await patchAssets(
       { projectId, assetStore: unusedAssetStore },
@@ -2389,218 +1694,84 @@ describe("patchAssets (msw)", () => {
           meta: { width: 100, height: 100 },
         },
       })),
-      createContext()
+      createContext(watchedDb)
     );
 
-    expect(readBatches.length).toBeGreaterThan(2);
-    expect(restoreBatches.length).toBeGreaterThan(1);
-    expect(readBatches.every((batch) => batch.length < fileNames.length)).toBe(
-      true
-    );
-    expect(
-      restoreBatches.every((batch) => batch.length < fileNames.length)
-    ).toBe(true);
-    expect(new Set(readBatches.flat())).toEqual(new Set(fileNames));
-    expect(new Set(restoreBatches.flat())).toEqual(new Set(fileNames));
-    expect(
-      [...readBatches, ...restoreBatches].every(
-        (batch) => new Set(batch).size === batch.length
-      )
-    ).toBe(true);
+    expect(reads).toBeGreaterThan(2);
+    expect(restores).toBeGreaterThan(1);
+    expect(await readAssets(projectId)).toHaveLength(assetFileNames.length);
+    for (const name of fileNames) {
+      expect((await readFile(name)).isDeleted).toBe(false);
+    }
   });
+
+  /** asset-1 (photo.jpg), also the project's preview image. */
+  const seedPreviewAsset = async (projectId: string) => {
+    await seedOwnProject(projectId);
+    await seedAsset({ id: "asset-1", projectId, file: photoFile });
+    await db
+      .update(projectTable)
+      .set({ previewImageAssetId: "asset-1" })
+      .where(eq(projectTable.id, projectId));
+  };
+
+  const removeAsset: Patch[] = [{ op: "remove", path: ["asset-1"] }];
 
   test("core helper deletes assets and marks unused files as deleted", async () => {
     const projectId = uid();
-    const localAssetRow = { ...assetRow, projectId };
-    let resetPreviewImage = false;
-    let deletedAsset = false;
-    let deletedFile = false;
+    await seedPreviewAsset(projectId);
 
-    server.use(
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("id")) {
-          return json([
-            {
-              id: "asset-1",
-              projectId,
-              name: "photo.jpg",
-              file: localAssetRow.file,
-            },
-          ]);
-        }
-        if (url.searchParams.has("name")) {
-          return json([]);
-        }
-        return json([localAssetRow]);
-      }),
-      db.patch("Project", async ({ request }) => {
-        const body = (await request.json()) as {
-          previewImageAssetId?: string | null;
-        };
-        resetPreviewImage = body.previewImageAssetId === null;
-        return empty({ status: 204 });
-      }),
-      db.delete("Asset", () => {
-        deletedAsset = true;
-        return empty({ status: 204 });
-      }),
-      db.patch("File", async ({ request }) => {
-        const body = (await request.json()) as { isDeleted?: boolean };
-        deletedFile = body.isDeleted === true;
-        return empty({ status: 204 });
-      })
-    );
+    await patchAssetsWithClient({ projectId, client: db }, removeAsset);
 
-    const patches: Patch[] = [
-      {
-        op: "remove",
-        path: ["asset-1"],
-      },
-    ];
-
-    await patchAssetsWithClient(
-      { projectId, client: testContext.postgrest.client },
-      patches
-    );
-
-    expect(resetPreviewImage).toBe(true);
-    expect(deletedAsset).toBe(true);
-    expect(deletedFile).toBe(true);
+    const [projectRow] = await db
+      .select()
+      .from(projectTable)
+      .where(eq(projectTable.id, projectId));
+    expect(projectRow.previewImageAssetId).toBeNull();
+    expect(await readAssets(projectId)).toEqual([]);
+    expect((await readFile("photo.jpg")).isDeleted).toBe(true);
   });
 
   test("core helper stops asset deletion when preview reset fails", async () => {
     const projectId = uid();
-    const localAssetRow = { ...assetRow, projectId };
-    let deletedAsset = false;
-
-    server.use(
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("id")) {
-          return json([
-            {
-              id: "asset-1",
-              projectId,
-              name: "photo.jpg",
-              file: localAssetRow.file,
-            },
-          ]);
-        }
-        return json([localAssetRow]);
-      }),
-      db.patch("Project", () => json({ message: "db error" }, { status: 500 })),
-      db.delete("Asset", () => {
-        deletedAsset = true;
-        return empty({ status: 204 });
-      })
-    );
-
-    const patches: Patch[] = [
-      {
-        op: "remove",
-        path: ["asset-1"],
-      },
-    ];
+    await seedPreviewAsset(projectId);
 
     await expect(
       patchAssetsWithClient(
-        { projectId, client: testContext.postgrest.client },
-        patches
+        { projectId, client: failingOn("update", projectTable) },
+        removeAsset
       )
     ).rejects.toThrow();
 
-    expect(deletedAsset).toBe(false);
+    expect(await readAssets(projectId)).toHaveLength(1);
   });
 
   test("core helper stops file cleanup when asset delete fails", async () => {
     const projectId = uid();
-    const localAssetRow = { ...assetRow, projectId };
-    let deletedFile = false;
-
-    server.use(
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("id")) {
-          return json([
-            {
-              id: "asset-1",
-              projectId,
-              name: "photo.jpg",
-              file: localAssetRow.file,
-            },
-          ]);
-        }
-        if (url.searchParams.has("name")) {
-          return json([]);
-        }
-        return json([localAssetRow]);
-      }),
-      db.patch("Project", () => empty({ status: 204 })),
-      db.delete("Asset", () => json({ message: "db error" }, { status: 500 })),
-      db.patch("File", () => {
-        deletedFile = true;
-        return empty({ status: 204 });
-      })
-    );
-
-    const patches: Patch[] = [
-      {
-        op: "remove",
-        path: ["asset-1"],
-      },
-    ];
+    await seedPreviewAsset(projectId);
 
     await expect(
       patchAssetsWithClient(
-        { projectId, client: testContext.postgrest.client },
-        patches
+        { projectId, client: failingOn("delete", assetTable) },
+        removeAsset
       )
     ).rejects.toThrow();
 
-    expect(deletedFile).toBe(false);
+    expect((await readFile("photo.jpg")).isDeleted).toBe(false);
   });
 
   test("core helper stops asset insert when file restore fails", async () => {
     const projectId = uid();
-    let insertedAssets = false;
-
-    server.use(
-      db.get("Asset", () => json([])),
-      db.get("File", () => json([{ name: "new.jpg" }])),
-      db.patch("File", () => json({ message: "db error" }, { status: 500 })),
-      db.post("Asset", () => {
-        insertedAssets = true;
-        return empty({ status: 201 });
-      })
-    );
-
-    const patches: Patch[] = [
-      {
-        op: "add",
-        path: ["asset-new"],
-        value: {
-          id: "asset-new",
-          name: "new.jpg",
-          type: "image",
-          projectId,
-          format: "jpg",
-          size: 500,
-          description: null,
-          createdAt: "2024-01-01T00:00:00.000Z",
-          path: "",
-          meta: { width: 50, height: 50 },
-        },
-      },
-    ];
+    await seedOwnProject(projectId);
+    await seed.file(db, newFile(projectId));
 
     await expect(
       patchAssetsWithClient(
-        { projectId, client: testContext.postgrest.client },
-        patches
+        { projectId, client: failingOn("update", fileTable) },
+        newAssetPatch(projectId)
       )
     ).rejects.toThrow();
 
-    expect(insertedAssets).toBe(false);
+    expect(await readAssets(projectId)).toEqual([]);
   });
 });

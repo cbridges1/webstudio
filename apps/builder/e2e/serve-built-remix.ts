@@ -3,8 +3,8 @@ import { createRequestHandler as createExpressRequestHandler } from "@remix-run/
 import type { ServerBuild } from "@remix-run/server-runtime";
 import express from "express";
 import { matchRoutes, type RouteObject } from "react-router-dom";
-import { readdirSync, readFileSync } from "node:fs";
-import https from "node:https";
+import { readdirSync } from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -75,16 +75,11 @@ const start = async () => {
     return handlers.get(routeId)!(request, response, next);
   });
 
-  const server = https.createServer(
-    {
-      cert: readFileSync(path.resolve("../../https/fullchain.pem")),
-      key: readFileSync(path.resolve("../../https/privkey.pem")),
-    },
-    app
-  );
+  // Plain HTTP on localhost; browsers treat it as a secure context.
+  const server = http.createServer(app);
 
   server.listen(port, host, () => {
-    console.info(`[builder-e2e] https://${host ?? "localhost"}:${port}`);
+    console.info(`[builder-e2e] http://${host ?? "localhost"}:${port}`);
   });
 
   for (const signal of ["SIGTERM", "SIGINT"] as const) {

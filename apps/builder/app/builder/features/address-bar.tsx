@@ -42,6 +42,7 @@ import {
 import { $currentSystem, updateCurrentSystem } from "~/shared/system";
 import { $project, $publisherHost } from "~/shared/sync/data-stores";
 import { getPublishUrl } from "./publish/publish-url";
+import { getPublishedDomain } from "~/shared/published-domain";
 
 const $selectedPageHistory = computed($selectedPage, (page): string[] =>
   page !== undefined && "history" in page && Array.isArray(page.history)
@@ -94,7 +95,7 @@ const usePublishedPageUrl = (pathname: string) => {
   }
 
   return getPublishUrl({
-    domain: `${project.domain}.${publisherHost}`,
+    domain: getPublishedDomain(project, publisherHost),
     pathname,
     username: stagingUsername,
     password: stagingPassword,

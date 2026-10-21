@@ -1,11 +1,6 @@
 import { describe, test, expect, vi } from "vitest";
-import {
-  createTestServer,
-  db,
-  json,
-  empty,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+import { and, build, eq, isNotNull, isNull, type Db } from "@webstudio-is/db";
+import { seed, setupTestDb, withQueryHook } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { AuthorizationError } from "@webstudio-is/trpc-interface/index.server";
 import {
@@ -19,34 +14,23 @@ import {
   __testing__,
 } from "./build";
 
-const server = createTestServer();
+const db = setupTestDb();
 const { canTokenPublishDeployment } = __testing__;
 
 const uid = () => `proj-${Math.random().toString(36).slice(2)}`;
 
-const createContext = (userId = "user-1"): AppContext =>
+const createContext = (userId = "user-1", contextDb: Db = db): AppContext =>
   ({
-    ...testContext,
+    db: contextDb,
     authorization: { type: "user", userId },
     getOwnerPlanFeatures: async () => ({}),
   }) as unknown as AppContext;
-
-/** hasProjectPermit: return the row when userId param is in the query */
-const ownershipHandler = db.get("Project", ({ request }) => {
-  const url = new URL(request.url);
-  if (url.searchParams.has("userId")) {
-    return json({ id: url.searchParams.get("id")?.replace("eq.", "") });
-  }
-  return json(null);
-});
 
 /** Minimal Build row that satisfies parseCompactBuild */
 const buildRow = {
   id: "build-1",
   projectId: "proj-1",
   version: 0,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
   pages: JSON.stringify({
     meta: {},
     homePage: {
@@ -75,30 +59,42 @@ const buildRow = {
   projectSettings: JSON.stringify({ meta: {}, compiler: {} }),
 };
 
+/** A project owned by `userId` with a development build. */
+const seedProjectWithBuild = async ({
+  projectId = "proj-1",
+  userId = "user-1",
+  domain = "project-domain",
+  build: overrides = {},
+}: {
+  projectId?: string;
+  userId?: string;
+  domain?: string;
+  build?: Partial<typeof buildRow>;
+} = {}) => {
+  await seed.project(db, { id: projectId, userId, domain });
+  await seed.build(db, { ...buildRow, projectId, ...overrides });
+};
+
+const productionBuilds = async (projectId = "proj-1") =>
+  await db
+    .select()
+    .from(build)
+    .where(and(eq(build.projectId, projectId), isNotNull(build.deployment)));
+
 // ---------------------------------------------------------------------------
 // loadRawBuildById
 // ---------------------------------------------------------------------------
 
-describe("loadRawBuildById (msw)", () => {
+describe("loadRawBuildById", () => {
   test("returns raw build row", async () => {
-    server.use(db.get("Build", () => json([buildRow])));
+    await seedProjectWithBuild();
     const result = await loadRawBuildById(createContext(), "build-1");
     expect(result.id).toBe("build-1");
   });
 
   test("throws when build not found", async () => {
-    server.use(db.get("Build", () => json([])));
     await expect(loadRawBuildById(createContext(), "missing")).rejects.toThrow(
       "0 row(s)"
-    );
-  });
-
-  test("throws when multiple rows returned", async () => {
-    server.use(
-      db.get("Build", () => json([buildRow, { ...buildRow, id: "build-2" }]))
-    );
-    await expect(loadRawBuildById(createContext(), "build-1")).rejects.toThrow(
-      "2 row(s)"
     );
   });
 });
@@ -107,9 +103,9 @@ describe("loadRawBuildById (msw)", () => {
 // loadBuildById (delegates to loadRawBuildById + parseCompactBuild)
 // ---------------------------------------------------------------------------
 
-describe("loadBuildById (msw)", () => {
+describe("loadBuildById", () => {
   test("returns parsed build with id and projectId", async () => {
-    server.use(db.get("Build", () => json([buildRow])));
+    await seedProjectWithBuild();
     const result = await loadBuildById(createContext(), "build-1");
     expect(result.id).toBe("build-1");
     expect(result.projectId).toBe("proj-1");
@@ -117,24 +113,19 @@ describe("loadBuildById (msw)", () => {
   });
 
   test("drops persisted response-header rules with a null value", async () => {
-    server.use(
-      db.get("Build", () =>
-        json([
-          {
-            ...buildRow,
-            projectSettings: JSON.stringify({
-              meta: {
-                customHeaders: [
-                  { name: "X-Frame-Options", value: null },
-                  { name: "Referrer-Policy", value: "no-referrer" },
-                ],
-              },
-              compiler: {},
-            }),
+    await seedProjectWithBuild({
+      build: {
+        projectSettings: JSON.stringify({
+          meta: {
+            customHeaders: [
+              { name: "X-Frame-Options", value: null },
+              { name: "Referrer-Policy", value: "no-referrer" },
+            ],
           },
-        ])
-      )
-    );
+          compiler: {},
+        }),
+      },
+    });
 
     const result = await loadBuildById(createContext(), "build-1");
     expect(result.projectSettings.meta.customHeaders).toEqual([
@@ -143,48 +134,38 @@ describe("loadBuildById (msw)", () => {
   });
 
   test("rejects invalid persisted data sources", async () => {
-    server.use(
-      db.get("Build", () =>
-        json([
+    await seedProjectWithBuild({
+      build: {
+        dataSources: JSON.stringify([
           {
-            ...buildRow,
-            dataSources: JSON.stringify([
-              {
-                id: "tags-variable",
-                type: "variable",
-                name: "tags",
-                value: { type: "string[]", value: ["news"] },
-              },
-            ]),
+            id: "tags-variable",
+            type: "variable",
+            name: "tags",
+            value: { type: "string[]", value: ["news"] },
           },
-        ])
-      )
-    );
+        ]),
+      },
+    });
 
     await expect(loadBuildById(createContext(), "build-1")).rejects.toThrow();
   });
 
   test("normalizes persisted Assets resources before publishing or syncing", async () => {
-    server.use(
-      db.get("Build", () =>
-        json([
+    await seedProjectWithBuild({
+      build: {
+        resources: JSON.stringify([
           {
-            ...buildRow,
-            resources: JSON.stringify([
-              {
-                id: "assets",
-                name: "Assets",
-                control: "system",
-                method: "get",
-                url: '"/$resources/assets"',
-                searchParams: [],
-                headers: [],
-              },
-            ]),
+            id: "assets",
+            name: "Assets",
+            control: "system",
+            method: "get",
+            url: '"/$resources/assets"',
+            searchParams: [],
+            headers: [],
           },
-        ])
-      )
-    );
+        ]),
+      },
+    });
 
     const result = await loadBuildById(createContext(), "build-1");
 
@@ -202,128 +183,86 @@ describe("loadBuildById (msw)", () => {
     ]);
     expect(result.resources[0].body).toContain("limit: 1000");
   });
-
-  test("migrates project settings from legacy pages", async () => {
-    server.use(
-      db.get("Build", () =>
-        json([
-          {
-            ...buildRow,
-            pages: JSON.stringify({
-              ...JSON.parse(buildRow.pages),
-              meta: { siteName: "Legacy site" },
-              compiler: { atomicStyles: false },
-            }),
-            projectSettings: undefined,
-          },
-        ])
-      )
-    );
-
-    const result = await loadBuildById(createContext(), "build-1");
-
-    expect(result.projectSettings).toEqual({
-      meta: { siteName: "Legacy site" },
-      compiler: { atomicStyles: false },
-    });
-    expect(result.pages.meta).toBeUndefined();
-    expect(result.pages.compiler).toBeUndefined();
-  });
 });
 
 // ---------------------------------------------------------------------------
 // loadDevBuildByProjectId
 // ---------------------------------------------------------------------------
 
-describe("loadDevBuildByProjectId (msw)", () => {
+describe("loadDevBuildByProjectId", () => {
   test("returns the dev build (no deployment)", async () => {
-    server.use(db.get("Build", () => json([buildRow])));
+    await seedProjectWithBuild();
+    await seed.build(db, {
+      ...buildRow,
+      id: "build-prod",
+      deployment: JSON.stringify({ destination: "saas", domains: ["x"] }),
+    });
     const result = await loadDevBuildByProjectId(createContext(), "proj-1");
-    expect(result.projectId).toBe("proj-1");
+    expect(result.id).toBe("build-1");
   });
 
   test("throws when no dev build found", async () => {
-    server.use(db.get("Build", () => json([])));
     await expect(
       loadDevBuildByProjectId(createContext(), "proj-1")
     ).rejects.toThrow("No dev build found");
   });
 
-  test("cancels the full Build request with the caller signal", async () => {
-    server.use(db.get("Build", () => json([buildRow])));
+  test("stops with the caller signal", async () => {
+    await seedProjectWithBuild();
     const controller = new AbortController();
     controller.abort();
 
     await expect(
       loadDevBuildByProjectId(createContext(), "proj-1", controller.signal)
-    ).rejects.toMatchObject({
-      message: expect.stringContaining("AbortError"),
-    });
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 });
 
-describe("loadDevBuildContentEngineDataByProjectId (msw)", () => {
-  test("selects only the Build fields used by the content engine", async () => {
-    let requestedUrl: URL | undefined;
-    server.use(
-      db.get("Build", ({ request }) => {
-        requestedUrl = new URL(request.url);
-        return json([
-          {
-            props: JSON.stringify([]),
-            dataSources: JSON.stringify([]),
-            resources: JSON.stringify([]),
-          },
-        ]);
-      })
-    );
+describe("loadDevBuildContentEngineDataByProjectId", () => {
+  test("returns the content engine fields of the dev build", async () => {
+    await seedProjectWithBuild();
 
     const result = await loadDevBuildContentEngineDataByProjectId(
       createContext(),
       "proj-1"
     );
 
-    expect(requestedUrl?.searchParams.get("select")).toBe(
-      "props,dataSources,resources"
-    );
-    expect(requestedUrl?.searchParams.get("projectId")).toBe("eq.proj-1");
-    expect(requestedUrl?.searchParams.get("deployment")).toBe("is.null");
     expect(result).toEqual({ props: [], dataSources: [], resources: [] });
   });
 
   test("parses the selected fields identically to the full dev Build loader", async () => {
-    const row = {
-      ...buildRow,
-      props: JSON.stringify([
-        {
-          id: "title-prop",
-          instanceId: "body-1",
-          name: "title",
-          type: "string",
-          value: "Blog",
-        },
-      ]),
-      dataSources: JSON.stringify([
-        {
-          type: "resource",
-          id: "posts-data-source",
-          name: "posts",
-          resourceId: "assets",
-        },
-      ]),
-      resources: JSON.stringify([
-        {
-          id: "assets",
-          name: "Assets",
-          control: "system",
-          method: "get",
-          url: '"/$resources/assets"',
-          searchParams: [],
-          headers: [],
-        },
-      ]),
-    };
-    server.use(db.get("Build", () => json([row])));
+    await seedProjectWithBuild({
+      build: {
+        props: JSON.stringify([
+          {
+            id: "title-prop",
+            instanceId: "body-1",
+            name: "title",
+            type: "string",
+            value: "Blog",
+          },
+        ]),
+        dataSources: JSON.stringify([
+          {
+            type: "resource",
+            id: "posts-data-source",
+            name: "posts",
+            resourceId: "assets",
+          },
+        ]),
+        resources: JSON.stringify([
+          {
+            id: "assets",
+            name: "Assets",
+            control: "system",
+            method: "get",
+            url: '"/$resources/assets"',
+            searchParams: [],
+            headers: [],
+          },
+        ]),
+      },
+    });
 
     const contentEngineData = await loadDevBuildContentEngineDataByProjectId(
       createContext(),
@@ -338,18 +277,8 @@ describe("loadDevBuildContentEngineDataByProjectId (msw)", () => {
     });
   });
 
-  test("cancels the partial Build request with the caller signal", async () => {
-    server.use(
-      db.get("Build", () =>
-        json([
-          {
-            props: JSON.stringify([]),
-            dataSources: JSON.stringify([]),
-            resources: JSON.stringify([]),
-          },
-        ])
-      )
-    );
+  test("stops with the caller signal", async () => {
+    await seedProjectWithBuild();
     const controller = new AbortController();
     controller.abort();
 
@@ -359,9 +288,7 @@ describe("loadDevBuildContentEngineDataByProjectId (msw)", () => {
         "proj-1",
         controller.signal
       )
-    ).rejects.toMatchObject({
-      message: expect.stringContaining("AbortError"),
-    });
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 });
 
@@ -369,27 +296,20 @@ describe("loadDevBuildContentEngineDataByProjectId (msw)", () => {
 // createBuild
 // ---------------------------------------------------------------------------
 
-describe("createBuild (msw)", () => {
+describe("createBuild", () => {
   test("inserts a new build row", async () => {
-    let insertedRow: unknown;
-    server.use(
-      db.post("Build", async ({ request }) => {
-        insertedRow = await request.json();
-        return empty({ status: 201 });
-      })
-    );
+    await seed.project(db, { id: "proj-1", userId: "user-1" });
 
     await createBuild({ projectId: "proj-1" }, createContext());
-    expect(insertedRow).toMatchObject({ projectId: "proj-1" });
+    expect(
+      await db
+        .select({ projectId: build.projectId, deployment: build.deployment })
+        .from(build)
+    ).toEqual([{ projectId: "proj-1", deployment: null }]);
   });
 
   test("throws when insert fails", async () => {
-    server.use(
-      db.post("Build", () =>
-        json({ message: "constraint violation" }, { status: 409 })
-      )
-    );
-
+    // No such project.
     await expect(
       createBuild({ projectId: "proj-1" }, createContext())
     ).rejects.toThrow();
@@ -400,63 +320,40 @@ describe("createBuild (msw)", () => {
 // createProductionBuild
 // ---------------------------------------------------------------------------
 
-describe("createProductionBuild (msw)", () => {
-  test.each([
-    { label: "without custom headers", headers: [], denied: false },
-    {
-      label: "with custom headers on a Free plan",
-      headers: [{ name: "X-Frame-Options", value: "DENY" }],
-      denied: true,
-    },
-  ])(
-    "reads legacy settings from the saved snapshot $label",
-    async ({ headers, denied }) => {
-      const removeBuild = vi.fn(() => empty({ status: 204 }));
-      server.use(
-        db.get("Project", () =>
-          json({
-            id: "proj-1",
-            userId: "project-owner",
-            domain: "project-domain",
-          })
-        ),
-        db.get("Build", ({ request }) => {
-          // Use the saved snapshot's legacy settings, even when the development
-          // build read before snapshot creation had different settings.
-          if (new URL(request.url).searchParams.get("id") === "eq.build-prod") {
-            return json([
-              {
-                projectSettings: null,
-                pages: JSON.stringify({
-                  ...JSON.parse(buildRow.pages),
-                  meta: { siteName: "Legacy site", customHeaders: headers },
-                }),
-              },
-            ]);
-          }
-          return json([buildRow]);
-        }),
-        db.post("rpc/create_production_build", () => json("build-prod")),
-        db.delete("Build", removeBuild)
-      );
-      const result = createProductionBuild(
-        {
-          projectId: "proj-1",
-          deployment: { destination: "saas", domains: ["example.com"] },
-        },
-        createContext()
-      );
-      if (denied) {
-        await expect(result).rejects.toThrow(
-          "Custom headers are a Pro feature"
-        );
-        expect(removeBuild).toHaveBeenCalledOnce();
-      } else {
-        await expect(result).resolves.toEqual({ id: "build-prod" });
-        expect(removeBuild).not.toHaveBeenCalled();
-      }
-    }
-  );
+const headerSettings = (headers: unknown[]) =>
+  JSON.stringify({ meta: { customHeaders: headers }, compiler: {} });
+
+describe("createProductionBuild", () => {
+  test("copies the development build into a production build", async () => {
+    await seedProjectWithBuild({
+      build: { props: JSON.stringify([]), version: 7 },
+    });
+    const deployment = {
+      destination: "saas" as const,
+      domains: ["project-domain"],
+    };
+
+    const { id } = await createProductionBuild(
+      { projectId: "proj-1", deployment },
+      createContext()
+    );
+
+    const [production] = await productionBuilds();
+    expect(production).toMatchObject({
+      id,
+      projectId: "proj-1",
+      version: 7,
+      pages: buildRow.pages,
+      deployment: JSON.stringify(deployment),
+    });
+    // The development build stays.
+    expect(
+      await db
+        .select({ id: build.id })
+        .from(build)
+        .where(isNull(build.deployment))
+    ).toEqual([{ id: "build-1" }]);
+  });
 
   test.each([
     {
@@ -535,8 +432,12 @@ describe("createProductionBuild (msw)", () => {
   ])(
     "enforces custom header publishing for $label",
     async ({ allowed, domains, headers, denied, checkPlan }) => {
-      const context = createContext();
-      // A collaborator's own plan must not determine the project's entitlement.
+      await seedProjectWithBuild({
+        userId: "project-owner",
+        build: { projectSettings: headerSettings(headers) },
+      });
+      const context = createContext("project-owner");
+      // The caller's own plan must not determine the project's entitlement.
       context.planFeatures = {
         ...context.planFeatures,
         allowDynamicData: !allowed,
@@ -546,30 +447,6 @@ describe("createProductionBuild (msw)", () => {
         allowDynamicData: allowed,
       }));
       context.getOwnerPlanFeatures = getOwnerPlanFeatures;
-      const createBuild = vi.fn(() => json("build-prod"));
-      const removeBuild = vi.fn(() => empty({ status: 204 }));
-      server.use(
-        db.get("Project", () =>
-          json({
-            id: "proj-1",
-            userId: "project-owner",
-            domain: "project-domain",
-          })
-        ),
-        db.get("Build", () =>
-          json([
-            {
-              ...buildRow,
-              projectSettings: JSON.stringify({
-                meta: { customHeaders: headers },
-                compiler: {},
-              }),
-            },
-          ])
-        ),
-        db.post("rpc/create_production_build", createBuild),
-        db.delete("Build", removeBuild)
-      );
       const result = createProductionBuild(
         {
           projectId: "proj-1",
@@ -587,12 +464,11 @@ describe("createProductionBuild (msw)", () => {
         await expect(result).rejects.toThrow(
           "Custom headers are a Pro feature"
         );
-        expect(removeBuild).toHaveBeenCalledOnce();
+        expect(await productionBuilds()).toEqual([]);
       } else {
-        await expect(result).resolves.toEqual({ id: "build-prod" });
-        expect(removeBuild).not.toHaveBeenCalled();
+        await expect(result).resolves.toEqual({ id: expect.any(String) });
+        expect(await productionBuilds()).toHaveLength(1);
       }
-      expect(createBuild).toHaveBeenCalledOnce();
       if (checkPlan) {
         expect(getOwnerPlanFeatures).toHaveBeenCalledExactlyOnceWith(
           "project-owner"
@@ -616,48 +492,28 @@ describe("createProductionBuild (msw)", () => {
   ])(
     "checks the published snapshot after a concurrent edit: $label",
     async ({ value, allowed, staging }) => {
-      const context = createContext();
+      await seedProjectWithBuild({ userId: "project-owner" });
+      // The development build changes right after the publish read it, before
+      // the production snapshot is taken.
+      let edited = false;
+      const editingDb = withQueryHook(db, async ({ kind, table }) => {
+        if (kind === "select" && table === build && edited === false) {
+          edited = true;
+          await db
+            .update(build)
+            .set({
+              projectSettings: headerSettings([
+                { name: "X-Frame-Options", value },
+              ]),
+            })
+            .where(eq(build.id, "build-1"));
+        }
+      });
+      const context = createContext("project-owner", editingDb);
       context.getOwnerPlanFeatures = vi.fn(async () => ({
         ...context.planFeatures,
         allowDynamicData: allowed,
       }));
-      const removeBuild = vi.fn(({ request }: { request: Request }) => {
-        expect(new URL(request.url).searchParams.get("id")).toBe(
-          "eq.build-prod"
-        );
-        return empty({ status: 204 });
-      });
-      const readSnapshot = vi.fn();
-      server.use(
-        db.get("Project", () =>
-          json({
-            id: "proj-1",
-            userId: "project-owner",
-            domain: "project-domain",
-          })
-        ),
-        db.get("Build", ({ request }) => {
-          const url = new URL(request.url);
-          if (url.searchParams.get("id") === "eq.build-prod") {
-            readSnapshot();
-            expect(url.searchParams.get("select")).toBe(
-              "projectSettings,pages"
-            );
-            return json([
-              {
-                projectSettings: JSON.stringify({
-                  meta: { customHeaders: [{ name: "X-Frame-Options", value }] },
-                  compiler: {},
-                }),
-              },
-            ]);
-          }
-          // Development settings change before the RPC snapshots them.
-          return json([buildRow]);
-        }),
-        db.post("rpc/create_production_build", () => json("build-prod")),
-        db.delete("Build", removeBuild)
-      );
       const result = createProductionBuild(
         {
           projectId: "proj-1",
@@ -668,67 +524,66 @@ describe("createProductionBuild (msw)", () => {
         },
         context
       );
-      if (!allowed && !staging && value !== "SAMEORIGIN" && value !== null) {
+      if (!allowed && !staging && value !== "SAMEORIGIN") {
         await expect(result).rejects.toThrow(
           "Custom headers are a Pro feature"
         );
-        expect(removeBuild).toHaveBeenCalledOnce();
+        expect(await productionBuilds()).toEqual([]);
       } else {
-        await expect(result).resolves.toEqual({ id: "build-prod" });
-        expect(removeBuild).not.toHaveBeenCalled();
+        await expect(result).resolves.toEqual({ id: expect.any(String) });
+        expect(await productionBuilds()).toHaveLength(1);
       }
-      expect(readSnapshot).toHaveBeenCalledOnce();
+      expect(edited).toBe(true);
     }
   );
 
   test("fails closed and removes the unpublished build when its settings cannot be verified", async () => {
-    const removeBuild = vi.fn(() => empty({ status: 204 }));
-    server.use(
-      ownershipHandler,
-      db.get("Build", ({ request }) =>
-        new URL(request.url).searchParams.has("id")
-          ? json([])
-          : json([buildRow])
-      ),
-      db.post("rpc/create_production_build", () => json("build-prod")),
-      db.delete("Build", removeBuild)
-    );
+    await seedProjectWithBuild();
+    // The new build disappears before its settings are read back.
+    const losingDb = withQueryHook(db, async ({ kind, table, rows }) => {
+      if (kind === "insert" && table === build) {
+        const [created] = rows as Array<{ id: string }>;
+        await db.delete(build).where(eq(build.id, created.id));
+      }
+    });
     await expect(
       createProductionBuild(
         {
           projectId: "proj-1",
           deployment: { destination: "saas", domains: ["example.com"] },
         },
-        createContext()
+        createContext("user-1", losingDb)
       )
     ).rejects.toThrow("Cannot verify published response headers");
-    expect(removeBuild).toHaveBeenCalledOnce();
+    expect(await productionBuilds()).toEqual([]);
+  });
+
+  test("throws when the project has no development build", async () => {
+    await seed.project(db, { id: "proj-1", userId: "user-1" });
+    await expect(
+      createProductionBuild(
+        {
+          projectId: "proj-1",
+          deployment: { destination: "saas", domains: ["project-domain"] },
+        },
+        createContext()
+      )
+    ).rejects.toThrow("No dev build found");
   });
 
   test("throws when dev build has orphan resource references", async () => {
-    let didCreateProductionBuild = false;
-    server.use(
-      ownershipHandler,
-      db.get("Build", () =>
-        json([
+    await seedProjectWithBuild({
+      build: {
+        dataSources: JSON.stringify([
           {
-            ...buildRow,
-            dataSources: JSON.stringify([
-              {
-                type: "resource",
-                id: "dataSourceId",
-                name: "pinnedAnnouncementData_1",
-                resourceId: "missingResourceId",
-              },
-            ]),
+            type: "resource",
+            id: "dataSourceId",
+            name: "pinnedAnnouncementData_1",
+            resourceId: "missingResourceId",
           },
-        ])
-      ),
-      db.post("rpc/create_production_build", () => {
-        didCreateProductionBuild = true;
-        return json("build-prod");
-      })
-    );
+        ]),
+      },
+    });
 
     await expect(
       createProductionBuild(
@@ -746,7 +601,7 @@ describe("createProductionBuild (msw)", () => {
     ).rejects.toThrow(
       `Cannot publish: resource variable "pinnedAnnouncementData_1" (dataSourceId) references missing resource "missingResourceId".`
     );
-    expect(didCreateProductionBuild).toBe(false);
+    expect(await productionBuilds()).toEqual([]);
   });
 });
 
@@ -827,13 +682,10 @@ describe("canTokenPublishDeployment", () => {
 // unpublishBuild
 // ---------------------------------------------------------------------------
 
-describe("unpublishBuild (msw)", () => {
+describe("unpublishBuild", () => {
   test("throws AuthorizationError when caller lacks edit access", async () => {
     const projectId = uid();
-    server.use(
-      db.get("Project", () => json(null)),
-      db.get("WorkspaceProjectAuthorization", () => json([]))
-    );
+    await seed.project(db, { id: projectId, userId: "owner-1" });
 
     await expect(
       unpublishBuild({ projectId, domain: "example.com" }, createContext())
@@ -842,11 +694,7 @@ describe("unpublishBuild (msw)", () => {
 
   test("throws when domain is not published", async () => {
     const projectId = uid();
-    server.use(
-      ownershipHandler,
-      // no builds with deployment containing example.com
-      db.get("Build", () => json([]))
-    );
+    await seedProjectWithBuild({ projectId, build: { id: uid() } });
 
     await expect(
       unpublishBuild({ projectId, domain: "example.com" }, createContext())
@@ -855,49 +703,40 @@ describe("unpublishBuild (msw)", () => {
 
   test("deletes build when it has only the one domain", async () => {
     const projectId = uid();
-    let buildDeleted = false;
-    const deployment = JSON.stringify({
-      destination: "saas",
-      domains: ["example.com"],
+    await seedProjectWithBuild({ projectId, build: { id: uid() } });
+    await seed.build(db, {
+      ...buildRow,
+      id: "build-prod",
+      projectId,
+      deployment: JSON.stringify({
+        destination: "saas",
+        domains: ["example.com"],
+      }),
     });
 
-    server.use(
-      ownershipHandler,
-      db.get("Build", () => json([{ id: "build-prod", deployment }])),
-      db.delete("Build", () => {
-        buildDeleted = true;
-        return empty({ status: 204 });
-      })
-    );
-
     await unpublishBuild({ projectId, domain: "example.com" }, createContext());
-    expect(buildDeleted).toBe(true);
+    expect(await productionBuilds(projectId)).toEqual([]);
   });
 
   test("updates build deployment when it has multiple domains", async () => {
     const projectId = uid();
-    let updatedDeployment: unknown;
-    const deployment = JSON.stringify({
-      destination: "saas",
-      domains: ["example.com", "other.com"],
+    await seedProjectWithBuild({ projectId, build: { id: uid() } });
+    await seed.build(db, {
+      ...buildRow,
+      id: "build-prod",
+      projectId,
+      deployment: JSON.stringify({
+        destination: "saas",
+        domains: ["example.com", "other.com"],
+      }),
     });
-
-    server.use(
-      ownershipHandler,
-      db.get("Build", () => json([{ id: "build-prod", deployment }])),
-      db.patch("Build", async ({ request }) => {
-        updatedDeployment = await request.json();
-        return json({ id: "build-prod" });
-      })
-    );
 
     await unpublishBuild({ projectId, domain: "example.com" }, createContext());
 
-    expect(updatedDeployment).toMatchObject({
-      deployment: expect.stringContaining("other.com"),
-    });
-    expect(updatedDeployment).toMatchObject({
-      deployment: expect.not.stringContaining("example.com"),
+    const [production] = await productionBuilds(projectId);
+    expect(JSON.parse(production.deployment ?? "")).toEqual({
+      destination: "saas",
+      domains: ["other.com"],
     });
   });
 });

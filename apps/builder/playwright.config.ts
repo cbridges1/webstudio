@@ -46,7 +46,6 @@ export default defineConfig({
             "pnpm exec tsx --conditions=webstudio ./e2e/serve-built-remix.ts",
           url: builderUrl,
           reuseExistingServer: false,
-          ignoreHTTPSErrors: true,
           timeout: 60_000,
           stdout: "pipe",
           stderr: "pipe",

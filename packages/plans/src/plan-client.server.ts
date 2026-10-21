@@ -1,4 +1,15 @@
-import type { Client } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  desc,
+  eq,
+  gt,
+  inArray,
+  maybeOne,
+  product,
+  transactionLog,
+  userProduct,
+  type Db,
+} from "@webstudio-is/db";
 import {
   type PlanFeatures,
   planFeatures,
@@ -8,8 +19,6 @@ import {
 } from "./plan-features";
 
 export { parsePlansEnv } from "./plan-features";
-
-type PostgrestContext = { client: Client };
 
 type AuthorizationContext =
   | { type: "token"; ownerId: string }
@@ -75,30 +84,27 @@ type Product = { id: string; name: string; meta: unknown };
 // The promise itself is cached to deduplicate concurrent cold-start requests.
 let productCachePromise: Promise<Map<string, Product>> | undefined;
 
-const fetchProducts = (
-  postgrest: PostgrestContext
-): Promise<Map<string, Product>> =>
-  Promise.resolve(
-    postgrest.client.from("Product").select("id, name, meta")
-  ).then((result) => {
-    if (result.error) {
-      console.error(result.error);
-      throw new Error("Failed to fetch products");
-    }
-    return new Map(result.data.map((p) => [p.id, p as Product]));
-  });
+const fetchProducts = (db: Db): Promise<Map<string, Product>> =>
+  db
+    .select({ id: product.id, name: product.name, meta: product.meta })
+    .from(product)
+    .then(
+      (rows) => new Map(rows.map((row) => [row.id, row])),
+      (error) => {
+        console.error(error);
+        throw new Error("Failed to fetch products");
+      }
+    );
 
-const getProductCache = (
-  postgrest: PostgrestContext
-): Promise<Map<string, Product>> => {
+const getProductCache = (db: Db): Promise<Map<string, Product>> => {
   // Skip caching in test environment so each test gets a fresh fetch.
   if (process.env.VITEST !== undefined) {
-    return fetchProducts(postgrest);
+    return fetchProducts(db);
   }
   if (productCachePromise !== undefined) {
     return productCachePromise;
   }
-  const promise = fetchProducts(postgrest);
+  const promise = fetchProducts(db);
   promise.catch(() => {
     productCachePromise = undefined;
   });
@@ -108,23 +114,26 @@ const getProductCache = (
 
 export const getPlanInfo = async (
   userIds: string[],
-  context: { postgrest: PostgrestContext }
+  context: { db: Db }
 ): Promise<Map<string, PlanInfo>> => {
-  const { postgrest } = context;
+  const { db } = context;
 
   if (userIds.length === 0) {
     return new Map();
   }
 
-  const userProductsResult = await postgrest.client
-    .from("UserProduct")
-    .select("userId, subscriptionId, productId")
-    .in("userId", userIds);
-
-  if (userProductsResult.error) {
-    console.error(userProductsResult.error);
-    throw new Error("Failed to fetch user products");
-  }
+  const userProductRows = await db
+    .select({
+      userId: userProduct.userId,
+      subscriptionId: userProduct.subscriptionId,
+      productId: userProduct.productId,
+    })
+    .from(userProduct)
+    .where(inArray(userProduct.userId, userIds))
+    .catch((error) => {
+      console.error(error);
+      throw new Error("Failed to fetch user products");
+    });
 
   const userProductsByUserId = new Map<
     string,
@@ -134,7 +143,7 @@ export const getPlanInfo = async (
     }>
   >();
 
-  for (const row of userProductsResult.data) {
+  for (const row of userProductRows) {
     if (row.userId === null) {
       continue;
     }
@@ -148,7 +157,7 @@ export const getPlanInfo = async (
 
   const productIds = [
     ...new Set(
-      userProductsResult.data.flatMap(({ productId }) =>
+      userProductRows.flatMap(({ productId }) =>
         productId === null || productId === undefined ? [] : [productId]
       )
     ),
@@ -163,7 +172,7 @@ export const getPlanInfo = async (
     );
   }
 
-  const allProducts = await getProductCache(postgrest);
+  const allProducts = await getProductCache(db);
   const productById = new Map(
     productIds.flatMap((id) => {
       const product = allProducts.get(id);
@@ -214,64 +223,68 @@ export const getPlanInfo = async (
  */
 export const getExtraPaidSeats = async (
   userId: string,
-  context: { postgrest: PostgrestContext }
+  context: { db: Db }
 ): Promise<number | null> => {
-  const productResult = await context.postgrest.client
-    .from("Product")
-    .select("id")
-    .eq("name", "Seats");
-
-  if (productResult.error) {
-    throw productResult.error;
-  }
-
-  const seatProductIds = (productResult.data ?? []).map((p) => p.id);
+  const { db } = context;
+  const seatProductIds = (
+    await db
+      .select({ id: product.id })
+      .from(product)
+      .where(eq(product.name, "Seats"))
+  ).map((p) => p.id);
   if (seatProductIds.length === 0) {
     return null;
   }
 
-  const result = await context.postgrest.client
-    .from("TransactionLog")
-    .select("eventData,subscriptionId,eventCreated")
-    .eq("userId", userId)
-    .in("eventType", [
-      "customer.subscription.updated",
-      "customer.subscription.created",
-    ])
-    .in("productId", seatProductIds)
-    .order("eventCreated", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const latest = maybeOne(
+    await db
+      .select({
+        eventData: transactionLog.eventData,
+        subscriptionId: transactionLog.subscriptionId,
+        eventCreated: transactionLog.eventCreated,
+      })
+      .from(transactionLog)
+      .where(
+        and(
+          eq(transactionLog.userId, userId),
+          inArray(transactionLog.eventType, [
+            "customer.subscription.updated",
+            "customer.subscription.created",
+          ]),
+          inArray(transactionLog.productId, seatProductIds)
+        )
+      )
+      .orderBy(desc(transactionLog.eventCreated))
+      .limit(1)
+  );
 
-  if (result.error) {
-    throw result.error;
-  }
-
-  if (!result.data) {
+  if (latest === null) {
     return null;
   }
 
   // Check if the subscription was cancelled after this event.
-  if (result.data.subscriptionId) {
-    const deleted = await context.postgrest.client
-      .from("TransactionLog")
-      .select("eventId")
-      .eq("subscriptionId", result.data.subscriptionId)
-      .eq("eventType", "customer.subscription.deleted")
-      .eq("status", "canceled")
-      .gt("eventCreated", result.data.eventCreated)
-      .limit(1)
-      .maybeSingle();
+  if (latest.subscriptionId) {
+    const deleted = await db
+      .select({ eventId: transactionLog.eventId })
+      .from(transactionLog)
+      .where(
+        and(
+          eq(transactionLog.subscriptionId, latest.subscriptionId),
+          eq(transactionLog.eventType, "customer.subscription.deleted"),
+          eq(transactionLog.status, "canceled"),
+          latest.eventCreated === null
+            ? undefined
+            : gt(transactionLog.eventCreated, latest.eventCreated)
+        )
+      )
+      .limit(1);
 
-    if (deleted.error) {
-      throw deleted.error;
-    }
-    if (deleted.data) {
+    if (deleted.length > 0) {
       return null;
     }
   }
 
-  const eventData = result.data.eventData as
+  const eventData = latest.eventData as
     | {
         data?: {
           object?: {

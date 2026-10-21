@@ -1,3 +1,4 @@
+import { eq, file as fileTable } from "@webstudio-is/db";
 import {
   assetQuery,
   AssetResourceHydrationError,
@@ -567,18 +568,19 @@ export class PostgresAssetRepository implements AssetRepository {
     context: AppContext;
     assetStore: AssetObjectStore;
   }) {
-    const file = await context.postgrest.client
-      .from("File")
-      .select("uploaderProjectId")
-      .eq("name", name)
-      .single();
-    if (file.error || typeof file.data?.uploaderProjectId !== "string") {
-      throw new Error(
-        file.error?.message ?? "File uploader project is missing"
-      );
+    const files = await context.db
+      .select({ uploaderProjectId: fileTable.uploaderProjectId })
+      .from(fileTable)
+      .where(eq(fileTable.name, name));
+    if (files.length !== 1) {
+      throw new Error("File not found");
+    }
+    const { uploaderProjectId } = files[0];
+    if (typeof uploaderProjectId !== "string") {
+      throw new Error("File uploader project is missing");
     }
     return new PostgresAssetRepository({
-      projectId: file.data.uploaderProjectId,
+      projectId: uploaderProjectId,
       context,
       assetStore,
     });
@@ -640,7 +642,7 @@ export class PostgresAssetRepository implements AssetRepository {
       try {
         await this.dependencies.deleteAssetUploadReservationWithClient(
           { projectId: this.projectId, assetId, name },
-          this.context.postgrest.client
+          this.context.db
         );
       } catch {
         // Cleanup is best effort. Keep the original upload/validation error so
@@ -654,7 +656,7 @@ export class PostgresAssetRepository implements AssetRepository {
     await this.assertCanView();
     return await this.dependencies.loadAssetsByProjectWithClient(
       this.projectId,
-      this.context.postgrest.client
+      this.context.db
     );
   }
 
@@ -662,7 +664,7 @@ export class PostgresAssetRepository implements AssetRepository {
     await this.assertCanView();
     const [asset] = await this.dependencies.loadAssetsByProjectWithClient(
       this.projectId,
-      this.context.postgrest.client,
+      this.context.db,
       [assetId]
     );
     if (asset === undefined) {
@@ -730,7 +732,7 @@ export class PostgresAssetRepository implements AssetRepository {
     if (input.folderId !== undefined) {
       const assets = await this.dependencies.loadAssetsByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client
+        this.context.db
       );
       const configAsset = assets.find(
         (asset) =>
@@ -818,7 +820,7 @@ export class PostgresAssetRepository implements AssetRepository {
       assets ??
       (await this.dependencies.loadAssetsByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client
+        this.context.db
       ));
     const currentAssets = projectAssets.some(
       (candidate) => candidate.id === asset.id
@@ -876,7 +878,7 @@ export class PostgresAssetRepository implements AssetRepository {
         try {
           await this.dependencies.deleteAssetsWithClient(
             { projectId: this.projectId, ids: [asset.id] },
-            this.context.postgrest.client
+            this.context.db
           );
         } catch {
           console.error("Failed to clean up an invalid uploaded asset");
@@ -904,7 +906,7 @@ export class PostgresAssetRepository implements AssetRepository {
     const reservations =
       await this.dependencies.loadAssetUploadReservationsByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client
+        this.context.db
       );
     const reservation = reservations.find(
       (candidate) =>
@@ -941,7 +943,7 @@ export class PostgresAssetRepository implements AssetRepository {
     }
     const assets = await this.dependencies.loadAssetsByProjectWithClient(
       this.projectId,
-      this.context.postgrest.client
+      this.context.db
     );
     await this.validateCompletedCollectionUpload({
       asset,
@@ -978,7 +980,7 @@ export class PostgresAssetRepository implements AssetRepository {
       assets ??
       (await this.dependencies.loadAssetsByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client
+        this.context.db
       ));
     const configAsset = projectAssets.find(
       (candidate) =>
@@ -1061,7 +1063,7 @@ export class PostgresAssetRepository implements AssetRepository {
     }
     const assets = await this.dependencies.loadAssetsByProjectWithClient(
       this.projectId,
-      this.context.postgrest.client
+      this.context.db
     );
     const siblings = assets.filter(
       (asset) => asset.folderId === currentAsset.folderId
@@ -1235,7 +1237,7 @@ export class PostgresAssetRepository implements AssetRepository {
     await this.assertCanEdit();
     const assets = await this.dependencies.loadAssetsByProjectWithClient(
       this.projectId,
-      this.context.postgrest.client
+      this.context.db
     );
     const currentAsset = assets.find((asset) => asset.id === assetId);
     const reservedAssetIds = await getCollectionReservedAssetIds({
@@ -1374,7 +1376,7 @@ export class PostgresAssetRepository implements AssetRepository {
     }
     const asset = await this.dependencies.updateAssetMetadataWithClient(
       { projectId: this.projectId, assetId, values },
-      this.context.postgrest.client
+      this.context.db
     );
 
     return asset;
@@ -1384,7 +1386,7 @@ export class PostgresAssetRepository implements AssetRepository {
     await this.assertCanEdit();
     const assets = await this.dependencies.loadAssetsByProjectWithClient(
       this.projectId,
-      this.context.postgrest.client
+      this.context.db
     );
     const reservedAssetIds = await getCollectionReservedAssetIds({
       assets,
@@ -1429,7 +1431,7 @@ export class PostgresAssetRepository implements AssetRepository {
     }
     await this.dependencies.deleteAssetsWithClient(
       { projectId: this.projectId, ids },
-      this.context.postgrest.client
+      this.context.db
     );
   }
 
@@ -1437,7 +1439,7 @@ export class PostgresAssetRepository implements AssetRepository {
     await this.assertCanView();
     return await this.dependencies.loadAssetFoldersByProjectWithClient(
       this.projectId,
-      this.context.postgrest.client
+      this.context.db
     );
   }
 
@@ -1446,7 +1448,7 @@ export class PostgresAssetRepository implements AssetRepository {
     const [folder] =
       await this.dependencies.loadAssetFoldersByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client,
+        this.context.db,
         [folderId]
       );
     if (folder === undefined) {
@@ -1468,7 +1470,7 @@ export class PostgresAssetRepository implements AssetRepository {
           createdAt: this.dependencies.now().toISOString(),
         },
       },
-      this.context.postgrest.client
+      this.context.db
     );
   }
 
@@ -1485,7 +1487,7 @@ export class PostgresAssetRepository implements AssetRepository {
     const [existingFolder] =
       await this.dependencies.loadAssetFoldersByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client,
+        this.context.db,
         [id]
       );
     let folder = existingFolder;
@@ -1501,7 +1503,7 @@ export class PostgresAssetRepository implements AssetRepository {
             createdAt: this.dependencies.now().toISOString(),
           },
         },
-        this.context.postgrest.client
+        this.context.db
       );
     } else if (folder.name !== name || folder.parentId !== parentId) {
       throw new AssetRepositoryConflictError(
@@ -1519,7 +1521,7 @@ export class PostgresAssetRepository implements AssetRepository {
     const existingAssets =
       await this.dependencies.loadAssetsByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client
+        this.context.db
       );
     const siblings = existingAssets.filter((asset) => asset.folderId === id);
     const reusableSeeds = new Map<string, Asset>();
@@ -1615,7 +1617,7 @@ export class PostgresAssetRepository implements AssetRepository {
     );
     const assets = await this.dependencies.loadAssetsByProjectWithClient(
       this.projectId,
-      this.context.postgrest.client
+      this.context.db
     );
     await validateCollectionFolder({
       assets,
@@ -1639,12 +1641,12 @@ export class PostgresAssetRepository implements AssetRepository {
     const [folders, assets] = await Promise.all([
       this.dependencies.loadAssetFoldersByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client,
+        this.context.db,
         [folderId]
       ),
       this.dependencies.loadAssetsByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client
+        this.context.db
       ),
     ]);
     if (folders.length === 0) {
@@ -1766,7 +1768,7 @@ export class PostgresAssetRepository implements AssetRepository {
       reservations =
         await this.dependencies.loadAssetUploadReservationsByProjectWithClient(
           this.projectId,
-          this.context.postgrest.client
+          this.context.db
         );
     } catch (error) {
       await this.getUploadErrorCleanup(ticket.assetId)?.(ticket.name);
@@ -1835,7 +1837,7 @@ export class PostgresAssetRepository implements AssetRepository {
     }
     const assets = await this.dependencies.loadAssetsByProjectWithClient(
       this.projectId,
-      this.context.postgrest.client
+      this.context.db
     );
     const configAsset = assets.find(
       (asset) =>
@@ -1953,7 +1955,7 @@ export class PostgresAssetRepository implements AssetRepository {
             expectedFilename: expectedTemplateFilename,
             filename: templateFilename,
           },
-          this.context.postgrest.client
+          this.context.db
         );
       if (updatedTemplate === undefined) {
         throw new AssetRepositoryConflictError(
@@ -1979,7 +1981,7 @@ export class PostgresAssetRepository implements AssetRepository {
       const currentAssets =
         await this.dependencies.loadAssetsByProjectWithClient(
           this.projectId,
-          this.context.postgrest.client
+          this.context.db
         );
       const currentConfigAsset = currentAssets.find(
         (asset) => asset.id === configAsset.id && asset.folderId === folderId
@@ -2035,7 +2037,7 @@ export class PostgresAssetRepository implements AssetRepository {
             expectedFilename: templateFilename,
             filename: templateAsset.filename,
           },
-          this.context.postgrest.client
+          this.context.db
         );
       if (restoredTemplate === undefined) {
         throw new Error(
@@ -2052,7 +2054,7 @@ export class PostgresAssetRepository implements AssetRepository {
     const folder = (
       await this.dependencies.loadAssetFoldersByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client
+        this.context.db
       )
     ).find(({ id }) => id === folderId);
     if (folder === undefined) {
@@ -2070,7 +2072,7 @@ export class PostgresAssetRepository implements AssetRepository {
               : (values.parentId ?? folder.parentId),
         },
       },
-      this.context.postgrest.client
+      this.context.db
     );
     return updated;
   }
@@ -2080,11 +2082,11 @@ export class PostgresAssetRepository implements AssetRepository {
     const [folders, assets] = await Promise.all([
       this.dependencies.loadAssetFoldersByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client
+        this.context.db
       ),
       this.dependencies.loadAssetsByProjectWithClient(
         this.projectId,
-        this.context.postgrest.client
+        this.context.db
       ),
     ]);
     if (folders.some(({ id }) => id === folderId) === false) {
@@ -2100,7 +2102,7 @@ export class PostgresAssetRepository implements AssetRepository {
     }
     await this.dependencies.deleteAssetFoldersWithClient(
       { projectId: this.projectId, ids: [folderId] },
-      this.context.postgrest.client
+      this.context.db
     );
   }
 
@@ -2129,7 +2131,7 @@ export class PostgresAssetRepository implements AssetRepository {
     assetIds?: string[]
   ) {
     return await this.dependencies.synchronizeCanonicalAssets({
-      client: this.context.postgrest.client,
+      client: this.context.db,
       assetClient: this.assetStore,
       projectId: this.projectId,
       assetIds,
@@ -2338,7 +2340,7 @@ export class PostgresAssetRepository implements AssetRepository {
     const performanceNow = this.dependencies.performanceNow;
     const loadBaseEntries = () =>
       this.dependencies.loadCanonicalAssetBaseEntries({
-        client: this.context.postgrest.client,
+        client: this.context.db,
         projectId: this.projectId,
       });
     const excludeCollectionFiles = async (
@@ -2534,7 +2536,7 @@ export class PostgresAssetRepository implements AssetRepository {
         async () => {
           const current =
             await this.dependencies.loadCanonicalAssetFileEntriesForRecovery({
-              client: this.context.postgrest.client,
+              client: this.context.db,
               projectId: this.projectId,
               assetIds: candidateAssetIds,
             });
@@ -2569,7 +2571,7 @@ export class PostgresAssetRepository implements AssetRepository {
             });
           }
           return await this.dependencies.loadCanonicalAssetFileEntries({
-            client: this.context.postgrest.client,
+            client: this.context.db,
             projectId: this.projectId,
             assetIds: candidateAssetIds,
           });
@@ -2751,7 +2753,7 @@ export class PostgresAssetRepository implements AssetRepository {
       (
         await this.dependencies.loadAssetsByProjectWithClient(
           this.projectId,
-          this.context.postgrest.client,
+          this.context.db,
           runtimeAssetIds
         )
       ).map((asset) => [

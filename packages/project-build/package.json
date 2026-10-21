@@ -74,7 +74,7 @@
     "@webstudio-is/expression": "workspace:*",
     "@webstudio-is/fonts": "workspace:*",
     "@webstudio-is/html-data": "workspace:*",
-    "@webstudio-is/postgrest": "workspace:*",
+    "@webstudio-is/db": "workspace:*",
     "@webstudio-is/project": "workspace:*",
     "@webstudio-is/project-migrations": "workspace:*",
     "@webstudio-is/query-builder": "workspace:*",

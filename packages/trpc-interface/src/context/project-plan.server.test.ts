@@ -1,10 +1,6 @@
 import { describe, expect, test } from "vitest";
-import {
-  createTestServer,
-  db,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+import { eq, project, user } from "@webstudio-is/db";
+import { setupTestDb } from "@webstudio-is/db/testing";
 import { defaultPlanFeatures } from "@webstudio-is/plans";
 import type { AppContext } from "./context.server";
 import {
@@ -13,42 +9,49 @@ import {
   getProjectPlanFeatures,
 } from "./project-plan.server";
 
-const server = createTestServer();
+const db = setupTestDb();
 
 const createContext = (
   getOwnerPlanFeatures: AppContext["getOwnerPlanFeatures"] = async () =>
     defaultPlanFeatures
 ): AppContext =>
   ({
-    ...testContext,
+    db,
     getOwnerPlanFeatures,
   }) as unknown as AppContext;
 
+const seedProject = async (id: string, userId: string | null) => {
+  await db.insert(user).values([{ id: "owner-1" }, { id: "owner-2" }]);
+  await db
+    .insert(project)
+    .values({ id, title: "Project", domain: `domain-${id}`, userId });
+};
+
 describe("project plan helpers", () => {
   test("resolves project owner id from Project.userId and caches it per context", async () => {
-    let projectQueries = 0;
-    server.use(
-      db.get("Project", () => {
-        projectQueries += 1;
-        return json({ userId: "owner-1" });
-      })
-    );
-
+    await seedProject("project-1", "owner-1");
     const context = createContext();
 
     await expect(getProjectOwnerId("project-1", context)).resolves.toBe(
       "owner-1"
     );
+    // A cached lookup doesn't see the change.
+    await db
+      .update(project)
+      .set({ userId: "owner-2" })
+      .where(eq(project.id, "project-1"));
     await expect(getProjectOwnerId("project-1", context)).resolves.toBe(
       "owner-1"
     );
-
-    expect(projectQueries).toBe(1);
+    // A new context does.
+    await expect(getProjectOwnerId("project-1", createContext())).resolves.toBe(
+      "owner-2"
+    );
   });
 
   test("resolves project plan features from the project owner and caches owner plan", async () => {
+    await seedProject("project-1", "owner-1");
     const ownerPlanCalls: string[] = [];
-    server.use(db.get("Project", () => json({ userId: "owner-1" })));
 
     const context = createContext(async (ownerId) => {
       ownerPlanCalls.push(ownerId);
@@ -73,25 +76,25 @@ describe("project plan helpers", () => {
   });
 
   test("rejects projects without an owner and retries after the failed cache entry is cleared", async () => {
-    let projectQueries = 0;
-    server.use(
-      db.get("Project", () => {
-        projectQueries += 1;
-        return json({
-          userId: projectQueries === 1 ? null : "owner-2",
-        });
-      })
-    );
-
+    await seedProject("project-2", null);
     const context = createContext();
 
     await expect(getProjectOwnerId("project-2", context)).rejects.toThrow(
       "Project must have project userId defined"
     );
+    await db
+      .update(project)
+      .set({ userId: "owner-2" })
+      .where(eq(project.id, "project-2"));
     await expect(getProjectOwnerId("project-2", context)).resolves.toBe(
       "owner-2"
     );
-    expect(projectQueries).toBe(2);
+  });
+
+  test("rejects unknown projects", async () => {
+    await expect(getProjectOwnerId("missing", createContext())).rejects.toThrow(
+      "Project not found"
+    );
   });
 
   test("clears failed owner-plan cache entries before retrying", async () => {

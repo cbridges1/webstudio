@@ -1,4 +1,12 @@
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  asc,
+  authorizationToken,
+  eq,
+  maybeOne,
+  one,
+  type Database,
+} from "@webstudio-is/db";
 import { createId } from "@webstudio-is/sdk";
 import {
   type AppContext,
@@ -78,18 +86,14 @@ export const findMany = async (
     );
   }
 
-  const dbTokens = await context.postgrest.client
-    .from("AuthorizationToken")
+  const dbTokens = await context.db
     .select()
-    .eq("projectId", props.projectId)
+    .from(authorizationToken)
+    .where(eq(authorizationToken.projectId, props.projectId))
     // Stable order
-    .order("createdAt", { ascending: true })
-    .order("token", { ascending: true });
-  if (dbTokens.error) {
-    throw dbTokens.error;
-  }
+    .orderBy(asc(authorizationToken.createdAt), asc(authorizationToken.token));
 
-  return dbTokens.data.map(applyTokenPermissions);
+  return dbTokens.map(applyTokenPermissions);
 };
 
 export const tokenDefaultPermissions = {
@@ -136,21 +140,18 @@ export const getTokenInfo = async (
   token: AuthorizationToken["token"],
   context: AppContext
 ) => {
-  const dbToken = await context.postgrest.client
-    .from("AuthorizationToken")
-    .select()
-    .eq("token", token)
-    .maybeSingle();
+  const dbToken = maybeOne(
+    await context.db
+      .select()
+      .from(authorizationToken)
+      .where(eq(authorizationToken.token, token))
+  );
 
-  if (dbToken.error) {
-    throw dbToken.error;
-  }
-
-  if (dbToken.data === null) {
+  if (dbToken === null) {
     throw new AuthorizationError("Authorization token not found");
   }
 
-  return applyTokenPermissions(dbToken.data);
+  return applyTokenPermissions(dbToken);
 };
 
 export const getTokenPermissions = async (
@@ -190,21 +191,16 @@ export const create = async (
   }
   assertCanEnableApi(props.canUseApi, context);
 
-  const dbToken = await context.postgrest.client
-    .from("AuthorizationToken")
-    .insert({
+  return await context.db
+    .insert(authorizationToken)
+    .values({
       projectId: props.projectId,
       relation: props.relation,
       token: tokenId,
       name: props.name,
       canUseApi: props.canUseApi,
     })
-    .select();
-  if (dbToken.error) {
-    throw dbToken.error;
-  }
-
-  return dbToken.data;
+    .returning();
 };
 
 export const update = async (
@@ -225,41 +221,35 @@ export const update = async (
     );
   }
 
-  const previousToken = await context.postgrest.client
-    .from("AuthorizationToken")
-    .select()
-    .eq("projectId", projectId)
-    .eq("token", props.token)
-    .maybeSingle();
-  if (previousToken.error) {
-    throw previousToken.error;
-  }
-  if (previousToken.data === null) {
+  const tokenFilter = and(
+    eq(authorizationToken.projectId, projectId),
+    eq(authorizationToken.token, props.token)
+  );
+  const previousToken = maybeOne(
+    await context.db.select().from(authorizationToken).where(tokenFilter)
+  );
+  if (previousToken === null) {
     throw new AuthorizationError("Authorization token not found");
   }
-  if (previousToken.data.canUseApi !== true) {
+  if (previousToken.canUseApi !== true) {
     assertCanEnableApi(props.canUseApi, context);
   }
 
-  const dbToken = await context.postgrest.client
-    .from("AuthorizationToken")
-    .update({
-      name: props.name,
-      relation: props.relation,
-      canClone: props.canClone,
-      canCopy: props.canCopy,
-      canPublish: props.canPublish,
-      canUseApi: props.canUseApi,
-    })
-    .eq("projectId", projectId)
-    .eq("token", props.token)
-    .select()
-    .single();
-  if (dbToken.error) {
-    throw dbToken.error;
-  }
-
-  return dbToken.data;
+  return one(
+    await context.db
+      .update(authorizationToken)
+      .set({
+        name: props.name,
+        relation: props.relation,
+        canClone: props.canClone,
+        canCopy: props.canCopy,
+        canPublish: props.canPublish,
+        canUseApi: props.canUseApi,
+      })
+      .where(tokenFilter)
+      .returning(),
+    "Authorization token"
+  );
 };
 
 export const remove = async (
@@ -281,18 +271,18 @@ export const remove = async (
     );
   }
 
-  const dbToken = await context.postgrest.client
-    .from("AuthorizationToken")
-    .delete()
-    .eq("projectId", props.projectId)
-    .eq("token", props.token)
-    .select()
-    .single();
-  if (dbToken.error) {
-    throw dbToken.error;
-  }
-
-  return dbToken.data;
+  return one(
+    await context.db
+      .delete(authorizationToken)
+      .where(
+        and(
+          eq(authorizationToken.projectId, props.projectId),
+          eq(authorizationToken.token, props.token)
+        )
+      )
+      .returning(),
+    "Authorization token"
+  );
 };
 
 export const __testing__ = { applyTokenPermissions };

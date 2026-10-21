@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { DrizzleQueryError } from "@webstudio-is/db";
 import {
   AuthorizationError,
   PlanRequiredError,
@@ -21,5 +22,17 @@ test("creates serializable error responses", () => {
   expect(createErrorResponse("Nope")).toEqual({
     success: false,
     error: "Nope",
+  });
+});
+
+test("reports the database message of a wrapped query error", () => {
+  const error = new DrizzleQueryError(
+    "select 1",
+    [],
+    new Error('duplicate key value violates unique constraint "x"')
+  );
+  expect(createErrorResponse(error)).toEqual({
+    success: false,
+    error: 'duplicate key value violates unique constraint "x"',
   });
 });

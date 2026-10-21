@@ -1,12 +1,6 @@
 import { expect, test, vi } from "vitest";
-import {
-  createTestServer,
-  db,
-  empty,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
-import { http } from "msw";
+import { and, build, eq, isNotNull } from "@webstudio-is/db";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import {
   getProjectPublishJob,
@@ -16,17 +10,8 @@ import {
   unpublishProjectDomains,
 } from "./project-domain-api.server";
 
-const server = createTestServer();
-const context = testContext as unknown as AppContext;
-const postgrestUrl = "http://test-postgrest";
-
-const ownershipHandler = db.get("Project", ({ request }) => {
-  const url = new URL(request.url);
-  if (url.searchParams.has("userId")) {
-    return json({ id: url.searchParams.get("id")?.replace("eq.", "") });
-  }
-  return json(null);
-});
+const db = setupTestDb();
+const context = { db } as unknown as AppContext;
 
 const loadedProject = {
   id: "project-1",
@@ -61,19 +46,6 @@ const loadedProject = {
   ],
 };
 
-const projectResponse = {
-  ...loadedProject,
-  latestStaticBuild: [],
-};
-
-const projectHandler = db.get("Project", ({ request }) => {
-  const url = new URL(request.url);
-  if (url.searchParams.has("userId")) {
-    return json({ id: "project-1" });
-  }
-  return json(projectResponse);
-});
-
 const devBuildRow = {
   id: "build-dev",
   projectId: "project-1",
@@ -107,14 +79,41 @@ const devBuildRow = {
   projectSettings: JSON.stringify({ meta: {}, compiler: {} }),
 };
 
-const devBuildHandler = (row: typeof devBuildRow = devBuildRow) =>
-  db.get("Build", () => json([row]));
+/** project-1, owned by user-1, with a development build. */
+const seedProject = async (row: typeof devBuildRow = devBuildRow) => {
+  await seed.project(db, {
+    id: "project-1",
+    userId: "user-1",
+    title: "Project One",
+    domain: "project.wstd.io",
+  });
+  await seed.build(db, row);
+};
+
+const productionBuilds = async () =>
+  await db
+    .select()
+    .from(build)
+    .where(and(eq(build.projectId, "project-1"), isNotNull(build.deployment)));
+
+/** A publish record of project-1. */
+const seedPublish = async (
+  row: Partial<Omit<typeof devBuildRow, "deployment">> & {
+    id: string;
+    deployment: string | null;
+    createdAt?: string;
+    updatedAt?: string;
+    publishStatus?: "PENDING" | "PUBLISHED" | "FAILED";
+  }
+) => {
+  await seed.build(db, { ...devBuildRow, ...row });
+};
 
 const createPublishContext = (
   publish = vi.fn().mockResolvedValue({ success: true })
 ) =>
   ({
-    ...testContext,
+    db,
     authorization: { type: "user", userId: "user-1" },
     deployment: {
       deploymentTrpc: {
@@ -134,48 +133,23 @@ const createPublishContext = (
     },
   }) as unknown as AppContext;
 
-const productionBuildHandler = (
-  onRequest: (body: { project_id: string; deployment: string }) => void
-) =>
-  http.post(
-    `${postgrestUrl}/rpc/create_production_build`,
-    async ({ request }) => {
-      onRequest(
-        (await request.json()) as { project_id: string; deployment: string }
-      );
-      return json("build-prod");
-    }
-  );
-
 test("publishes saas project through shared domain service", async () => {
+  await seedProject();
   const publish = vi.fn().mockResolvedValue({ success: true });
-  let productionBuildRequest:
-    | { project_id: string; deployment: string }
-    | undefined;
-  server.use(
-    projectHandler,
-    devBuildHandler(),
-    productionBuildHandler((body) => {
-      productionBuildRequest = body;
-    })
+
+  const result = await publishProject(
+    {
+      project: loadedProject,
+      domains: ["project.wstd.io", "example.com"],
+      target: "production",
+    },
+    createPublishContext(publish)
   );
+  expect(result).toMatchObject({ deploymentNotImplemented: false });
 
-  await expect(
-    publishProject(
-      {
-        project: loadedProject,
-        domains: ["project.wstd.io", "example.com"],
-        target: "production",
-      },
-      createPublishContext(publish)
-    )
-  ).resolves.toMatchObject({
-    build: { id: "build-prod" },
-    deploymentNotImplemented: false,
-  });
-
-  expect(productionBuildRequest?.project_id).toBe("project-1");
-  expect(JSON.parse(productionBuildRequest?.deployment ?? "")).toEqual({
+  const [production] = await productionBuilds();
+  expect(result.build.id).toBe(production.id);
+  expect(JSON.parse(production.deployment ?? "")).toEqual({
     destination: "saas",
     target: "production",
     domains: ["project.wstd.io", "example.com"],
@@ -185,7 +159,7 @@ test("publishes saas project through shared domain service", async () => {
   expect(publish).toHaveBeenCalledWith({
     builderOrigin: "https://apps.webstudio.is",
     githubSha: "sha-1",
-    buildId: "build-prod",
+    buildId: production.id,
     branchName: "main",
     destination: "saas",
     logProjectName: "Project One - project-1",
@@ -193,11 +167,7 @@ test("publishes saas project through shared domain service", async () => {
 });
 
 test("reports local-dev publish when deployment publisher is unavailable", async () => {
-  server.use(
-    projectHandler,
-    devBuildHandler(),
-    productionBuildHandler(() => {})
-  );
+  await seedProject();
 
   await expect(
     publishProject(
@@ -211,40 +181,27 @@ test("reports local-dev publish when deployment publisher is unavailable", async
       )
     )
   ).resolves.toMatchObject({
-    build: { id: "build-prod" },
+    build: { id: expect.any(String) },
     deploymentNotImplemented: true,
   });
 });
 
 test("publishes static project through shared domain service", async () => {
+  await seedProject();
   const publish = vi.fn().mockResolvedValue({ success: true });
-  let productionBuildRequest:
-    | { project_id: string; deployment: string }
-    | undefined;
-  server.use(
-    projectHandler,
-    devBuildHandler(),
-    productionBuildHandler((body) => {
-      productionBuildRequest = body;
-    })
+
+  const result = await publishStaticProject(
+    {
+      projectId: "project-1",
+      name: "project.zip",
+      templates: [],
+    },
+    createPublishContext(publish)
   );
+  expect(result).toMatchObject({ success: true, name: "project.zip" });
 
-  await expect(
-    publishStaticProject(
-      {
-        projectId: "project-1",
-        name: "project.zip",
-        templates: [],
-      },
-      createPublishContext(publish)
-    )
-  ).resolves.toMatchObject({
-    success: true,
-    name: "project.zip",
-    build: { id: "build-prod" },
-  });
-
-  expect(JSON.parse(productionBuildRequest?.deployment ?? "")).toEqual({
+  const [production] = await productionBuilds();
+  expect(JSON.parse(production.deployment ?? "")).toEqual({
     destination: "static",
     name: "project.zip",
     assetsDomain: "project.wstd.io",
@@ -253,7 +210,7 @@ test("publishes static project through shared domain service", async () => {
   expect(publish).toHaveBeenCalledWith({
     builderOrigin: "https://apps.webstudio.is",
     githubSha: "sha-1",
-    buildId: "build-prod",
+    buildId: production.id,
     branchName: "main",
     destination: "static",
     logProjectName: "Project One - project-1",
@@ -261,25 +218,18 @@ test("publishes static project through shared domain service", async () => {
 });
 
 test("rejects publishing when dev build has orphan resource references", async () => {
+  await seedProject({
+    ...devBuildRow,
+    dataSources: JSON.stringify([
+      {
+        type: "resource",
+        id: "dataSourceId",
+        name: "pinnedAnnouncementData_1",
+        resourceId: "missingResourceId",
+      },
+    ]),
+  });
   const publish = vi.fn().mockResolvedValue({ success: true });
-  let didCreateProductionBuild = false;
-  server.use(
-    projectHandler,
-    devBuildHandler({
-      ...devBuildRow,
-      dataSources: JSON.stringify([
-        {
-          type: "resource",
-          id: "dataSourceId",
-          name: "pinnedAnnouncementData_1",
-          resourceId: "missingResourceId",
-        },
-      ]),
-    }),
-    productionBuildHandler(() => {
-      didCreateProductionBuild = true;
-    })
-  );
 
   await expect(
     publishProject(
@@ -294,33 +244,18 @@ test("rejects publishing when dev build has orphan resource references", async (
     `Cannot publish: resource variable "pinnedAnnouncementData_1" (dataSourceId) references missing resource "missingResourceId".`
   );
 
-  expect(didCreateProductionBuild).toBe(false);
+  expect(await productionBuilds()).toEqual([]);
   expect(publish).not.toHaveBeenCalled();
 });
 
 test("clears publish records even when deployment unpublish fails", async () => {
-  let deletedBuildId: string | undefined;
-  server.use(
-    ownershipHandler,
-    db.get("Build", () =>
-      json([
-        {
-          id: "build-prod",
-          deployment: JSON.stringify({
-            destination: "saas",
-            domains: ["example"],
-          }),
-        },
-      ])
-    ),
-    db.delete("Build", ({ request }) => {
-      const url = new URL(request.url);
-      deletedBuildId = url.searchParams.get("id")?.replace("eq.", "");
-      return empty({ status: 204 });
-    })
-  );
-  const context = {
-    ...testContext,
+  await seedProject();
+  await seedPublish({
+    id: "build-prod",
+    deployment: JSON.stringify({ destination: "saas", domains: ["example"] }),
+  });
+  const failingContext = {
+    db,
     authorization: { type: "user", userId: "user-1" },
     deployment: {
       deploymentTrpc: {
@@ -340,44 +275,33 @@ test("clears publish records even when deployment unpublish fails", async () => 
         projectId: "project-1",
         domains: ["example.wstd.io"],
       },
-      context
+      failingContext
     )
   ).rejects.toThrow("Failed to unpublish example.wstd.io: Cloudflare failed");
 
-  expect(deletedBuildId).toBe("build-prod");
+  expect(await productionBuilds()).toEqual([]);
 });
 
 test("lists non-static project publishes", async () => {
-  server.use(
-    db.get("Build", () =>
-      json([
-        {
-          id: "build-prod",
-          version: 3,
-          createdAt: "2024-01-03T00:00:00.000Z",
-          deployment: JSON.stringify({
-            destination: "saas",
-            domains: ["example.com", "www.example.com"],
-          }),
-        },
-        {
-          id: "build-static",
-          version: 2,
-          createdAt: "2024-01-02T00:00:00.000Z",
-          deployment: JSON.stringify({
-            destination: "static",
-            name: "project.zip",
-          }),
-        },
-        {
-          id: "build-removed",
-          version: 1,
-          createdAt: "2024-01-01T00:00:00.000Z",
-          deployment: null,
-        },
-      ])
-    )
-  );
+  await seedProject();
+  await seedPublish({
+    id: "build-prod",
+    version: 3,
+    createdAt: "2024-01-03T00:00:00.000Z",
+    deployment: JSON.stringify({
+      destination: "saas",
+      domains: ["example.com", "www.example.com"],
+    }),
+  });
+  await seedPublish({
+    id: "build-static",
+    version: 2,
+    createdAt: "2024-01-02T00:00:00.000Z",
+    deployment: JSON.stringify({
+      destination: "static",
+      name: "project.zip",
+    }),
+  });
 
   await expect(listProjectPublishes("project-1", context)).resolves.toEqual({
     publishes: [
@@ -394,32 +318,27 @@ test("lists non-static project publishes", async () => {
 });
 
 test("infers targets for publish records created before targets were stored", async () => {
-  server.use(
-    db.get("Build", () =>
-      json([
-        {
-          id: "build-production",
-          version: 2,
-          createdAt: "2024-01-02T00:00:00.000Z",
-          deployment: JSON.stringify({
-            destination: "saas",
-            domains: ["example.com"],
-            assetsDomain: "project.wstd.io",
-          }),
-        },
-        {
-          id: "build-staging",
-          version: 1,
-          createdAt: "2024-01-01T00:00:00.000Z",
-          deployment: JSON.stringify({
-            destination: "saas",
-            domains: ["project.wstd.io"],
-            assetsDomain: "project.wstd.io",
-          }),
-        },
-      ])
-    )
-  );
+  await seedProject();
+  await seedPublish({
+    id: "build-production",
+    version: 2,
+    createdAt: "2024-01-02T00:00:00.000Z",
+    deployment: JSON.stringify({
+      destination: "saas",
+      domains: ["example.com"],
+      assetsDomain: "project.wstd.io",
+    }),
+  });
+  await seedPublish({
+    id: "build-staging",
+    version: 1,
+    createdAt: "2024-01-01T00:00:00.000Z",
+    deployment: JSON.stringify({
+      destination: "saas",
+      domains: ["project.wstd.io"],
+      assetsDomain: "project.wstd.io",
+    }),
+  });
 
   const result = await listProjectPublishes("project-1", context);
 
@@ -430,14 +349,7 @@ test("infers targets for publish records created before targets were stored", as
 });
 
 test("preserves a production target with one explicit custom domain", async () => {
-  let storedDeployment: string | undefined;
-  server.use(
-    projectHandler,
-    devBuildHandler(),
-    productionBuildHandler(({ deployment }) => {
-      storedDeployment = deployment;
-    })
-  );
+  await seedProject();
 
   const published = await publishProject(
     {
@@ -447,62 +359,43 @@ test("preserves a production target with one explicit custom domain", async () =
     },
     createPublishContext()
   );
-  expect(published.build.id).toBe("build-prod");
-  expect(storedDeployment).toBeDefined();
+  const buildId = published.build.id;
 
-  const publishRecord = {
-    id: "build-prod",
-    version: 3,
-    createdAt: "2024-01-03T00:00:00.000Z",
-    updatedAt: "2024-01-03T00:01:00.000Z",
-    publishStatus: "PUBLISHED",
-    deployment: storedDeployment,
-  };
-  server.use(db.get("Build", () => json([publishRecord])));
+  const { publishes } = await listProjectPublishes("project-1", context);
+  expect(publishes).toEqual([
+    {
+      id: buildId,
+      jobId: buildId,
+      version: 1,
+      target: "production",
+      domains: ["example.com"],
+      createdAt: expect.any(String),
+    },
+  ]);
 
-  await expect(listProjectPublishes("project-1", context)).resolves.toEqual({
-    publishes: [
-      {
-        id: "build-prod",
-        jobId: "build-prod",
-        version: 3,
-        target: "production",
-        domains: ["example.com"],
-        createdAt: "2024-01-03T00:00:00.000Z",
-      },
-    ],
-  });
-
-  server.use(db.get("Build", () => json(publishRecord)));
   await expect(
-    getProjectPublishJob(
-      { projectId: "project-1", jobId: "build-prod" },
-      context
-    )
+    getProjectPublishJob({ projectId: "project-1", jobId: buildId }, context)
   ).resolves.toMatchObject({
-    id: "build-prod",
+    id: buildId,
     target: "production",
     domains: ["example.com"],
   });
 });
 
 test("returns publish job status from deployment record", async () => {
-  server.use(
-    db.get("Build", () =>
-      json({
-        id: "build-prod",
-        version: 3,
-        createdAt: "2024-01-03T00:00:00.000Z",
-        updatedAt: "2024-01-03T00:01:00.000Z",
-        publishStatus: "PUBLISHED",
-        deployment: JSON.stringify({
-          destination: "saas",
-          target: "production",
-          domains: ["example.com"],
-        }),
-      })
-    )
-  );
+  await seedProject();
+  await seedPublish({
+    id: "build-prod",
+    version: 3,
+    createdAt: "2024-01-03T00:00:00.000Z",
+    updatedAt: "2024-01-03T00:01:00.000Z",
+    publishStatus: "PUBLISHED",
+    deployment: JSON.stringify({
+      destination: "saas",
+      target: "production",
+      domains: ["example.com"],
+    }),
+  });
 
   await expect(
     getProjectPublishJob(
@@ -526,21 +419,18 @@ test.each([
 ] as const)(
   "maps %s publisher state without claiming success",
   async (publishStatus, status, completedAt) => {
-    server.use(
-      db.get("Build", () =>
-        json({
-          id: "build-prod",
-          version: 3,
-          createdAt: "2024-01-03T00:00:00.000Z",
-          updatedAt: "2024-01-03T00:01:00.000Z",
-          publishStatus,
-          deployment: JSON.stringify({
-            destination: "saas",
-            domains: ["example.com"],
-          }),
-        })
-      )
-    );
+    await seedProject();
+    await seedPublish({
+      id: "build-prod",
+      version: 3,
+      createdAt: "2024-01-03T00:00:00.000Z",
+      updatedAt: "2024-01-03T00:01:00.000Z",
+      publishStatus,
+      deployment: JSON.stringify({
+        destination: "saas",
+        domains: ["example.com"],
+      }),
+    });
 
     await expect(
       getProjectPublishJob(
@@ -552,8 +442,6 @@ test.each([
 );
 
 test("returns undefined when publish job is missing", async () => {
-  server.use(db.get("Build", () => empty({ status: 204 })));
-
   await expect(
     getProjectPublishJob({ projectId: "project-1", jobId: "missing" }, context)
   ).resolves.toBeUndefined();

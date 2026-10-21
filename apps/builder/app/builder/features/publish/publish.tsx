@@ -130,6 +130,7 @@ import {
 import { flushExternalContentProject } from "~/shared/external-content-roots";
 import { getPublishValidationErrorMessage } from "./publish-error";
 import { runPublishAfterBestEffortChecks } from "./publish-preflight";
+import { getPublishedDomain } from "~/shared/published-domain";
 
 const PrePublishAuditMessage = ({
   finding,
@@ -346,7 +347,7 @@ const ChangeProjectDomain = ({
   const [isUnpublishing, setIsUnpublishing] = useOptimistic(false);
 
   const pageUrl = getPublishUrl({
-    domain: `${project.domain}.${publisherHost}`,
+    domain: getPublishedDomain(project, publisherHost),
     pathname: currentSystem.pathname,
     username: stagingUsername,
     password: stagingPassword,

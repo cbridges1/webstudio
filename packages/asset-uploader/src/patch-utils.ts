@@ -5,12 +5,6 @@ enablePatches();
 
 export type { Patch };
 
-export const assertPostgrestSuccess = (result: { error: unknown }) => {
-  if (result.error) {
-    throw result.error;
-  }
-};
-
 export const applyValidatedMapPatches = <Key, Value>(
   current: Map<Key, Value>,
   patches: Patch[],

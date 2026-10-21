@@ -20,10 +20,17 @@ import {
   getMimeTypeByFilename,
 } from "@webstudio-is/sdk";
 import { assetResourceLimits } from "@webstudio-is/sdk/asset-resource-limits";
-import type { Client } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  asc,
+  asset as assetTable,
+  eq,
+  file as fileTable,
+  inArray,
+  type Db,
+} from "@webstudio-is/db";
 import type { AssetObjectStore } from "./client";
 import { loadAssetFoldersByProjectWithClient } from "./folder-persistence";
-import { assertPostgrestSuccess } from "./patch-utils";
 import {
   deleteCanonicalAssetFileEntryIfMatches,
   deleteInvalidCanonicalAssetFileEntryIfMatches,
@@ -63,25 +70,38 @@ type UploadedAssetRow = {
 
 const loadUploadedAssets = async (
   projectId: string,
-  client: Client,
+  client: Db,
   assetIds?: string[]
 ) => {
-  let query = client
-    .from("Asset")
-    .select(
-      "id, projectId, filename, description, folderId, file:File!inner(name, size, createdAt, updatedAt, contentHash, status)"
-    )
-    .eq("projectId", projectId)
-    .eq("file.status", "UPLOADED");
-  if (assetIds !== undefined) {
-    if (assetIds.length === 0) {
-      return [];
-    }
-    query = query.in("id", assetIds);
+  if (assetIds?.length === 0) {
+    return [];
   }
-  const result = await query.order("id");
-  assertPostgrestSuccess(result);
-  return (result.data ?? []) as UploadedAssetRow[];
+  const rows: UploadedAssetRow[] = await client
+    .select({
+      id: assetTable.id,
+      projectId: assetTable.projectId,
+      filename: assetTable.filename,
+      description: assetTable.description,
+      folderId: assetTable.folderId,
+      file: {
+        name: fileTable.name,
+        size: fileTable.size,
+        createdAt: fileTable.createdAt,
+        updatedAt: fileTable.updatedAt,
+        contentHash: fileTable.contentHash,
+      },
+    })
+    .from(assetTable)
+    .innerJoin(fileTable, eq(fileTable.name, assetTable.name))
+    .where(
+      and(
+        eq(assetTable.projectId, projectId),
+        eq(fileTable.status, "UPLOADED"),
+        assetIds === undefined ? undefined : inArray(assetTable.id, assetIds)
+      )
+    )
+    .orderBy(asc(assetTable.id));
+  return rows;
 };
 
 type AssetFolderHierarchy = ReturnType<typeof createAssetFolderHierarchy>;
@@ -176,7 +196,7 @@ export const loadCanonicalAssetBaseEntries = async ({
   client,
 }: {
   projectId: string;
-  client: Client;
+  client: Db;
 }) => {
   const [assets, folders] = await Promise.all([
     loadUploadedAssets(projectId, client),
@@ -261,7 +281,7 @@ const indexCanonicalAsset = async ({
   current,
 }: {
   asset: UploadedAssetRow;
-  client: Client;
+  client: Db;
   assetClient: CanonicalAssetClient;
   requirements: CanonicalAssetMetadataRequirements;
   base: CanonicalAssetFileEntry;
@@ -299,7 +319,7 @@ const deleteObsoleteCanonicalAssetMetadata = async ({
 }: {
   projectId: string;
   assetId: string;
-  client: Client;
+  client: Db;
 }) => {
   const [assets, entries] = await Promise.all([
     loadUploadedAssets(projectId, client, [assetId]),
@@ -335,7 +355,7 @@ export const synchronizeCanonicalAssets = async ({
   assetIds,
 }: {
   projectId: string;
-  client: Client;
+  client: Db;
   assetClient: CanonicalAssetClient;
   concurrency?: number;
   requirements?: CanonicalAssetMetadataRequirements;

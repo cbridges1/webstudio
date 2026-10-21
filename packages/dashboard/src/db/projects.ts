@@ -2,6 +2,24 @@ import {
   AuthorizationError,
   type AppContext,
 } from "@webstudio-is/trpc-interface/index.server";
+import {
+  and,
+  dashboardProject,
+  desc,
+  domain,
+  eq,
+  inArray,
+  isNull,
+  loadLatestBuildVirtual,
+  loadPreviewImageAssets,
+  maybeOne,
+  or,
+  project,
+  projectDomain,
+  workspace,
+  workspaceMember,
+  type SQL,
+} from "@webstudio-is/db";
 
 type DomainVirtual = {
   domain: string;
@@ -35,36 +53,34 @@ const fetchAndMapDomains = async <
   }
 
   // Query ProjectDomain and Domain tables
-  const domainsData = await context.postgrest.client
-    .from("ProjectDomain")
-    .select("projectId, Domain!inner(domain, status, txtRecord), txtRecord")
-    .in("projectId", projectIds);
-
-  if (domainsData.error) {
-    console.error("Error fetching domains:", domainsData.error);
-    // Continue without domains rather than failing
-  }
+  const domainsData = await context.db
+    .select({
+      projectId: projectDomain.projectId,
+      txtRecord: projectDomain.txtRecord,
+      domain: domain.domain,
+      status: domain.status,
+      domainTxtRecord: domain.txtRecord,
+    })
+    .from(projectDomain)
+    .innerJoin(domain, eq(domain.id, projectDomain.domainId))
+    .where(inArray(projectDomain.projectId, projectIds))
+    .catch((error) => {
+      console.error("Error fetching domains:", error);
+      // Continue without domains rather than failing
+      return [];
+    });
 
   // Map domains to projects
   const domainsByProject = new Map<string, DomainVirtual[]>();
-  if (domainsData.data) {
-    for (const projectDomain of domainsData.data) {
-      if (!domainsByProject.has(projectDomain.projectId)) {
-        domainsByProject.set(projectDomain.projectId, []);
-      }
-      // Type assertion needed for joined data
-      const domainData = projectDomain.Domain as unknown as {
-        domain: string;
-        status: string;
-        txtRecord: string;
-      };
-      const verified = domainData.txtRecord === projectDomain.txtRecord;
-      domainsByProject.get(projectDomain.projectId)?.push({
-        domain: domainData.domain,
-        status: domainData.status,
-        verified,
-      });
+  for (const row of domainsData) {
+    if (!domainsByProject.has(row.projectId)) {
+      domainsByProject.set(row.projectId, []);
     }
+    domainsByProject.get(row.projectId)?.push({
+      domain: row.domain,
+      status: row.status,
+      verified: row.domainTxtRecord === row.txtRecord,
+    });
   }
 
   // Add domains to projects
@@ -72,6 +88,35 @@ const fetchAndMapDomains = async <
     ...project,
     domainsVirtual: project.id ? domainsByProject.get(project.id) || [] : [],
   })) as ProjectWithDomains[];
+};
+
+/**
+ * DashboardProject rows with the relations upstream embedded through PostgREST:
+ * the preview image asset and the latest production build.
+ */
+const loadDashboardProjects = async (
+  where: SQL | undefined,
+  context: AppContext
+) => {
+  const rows = await context.db
+    .select()
+    .from(dashboardProject)
+    .where(where)
+    .orderBy(desc(dashboardProject.createdAt), desc(dashboardProject.id));
+  const [previewImageAssets, latestBuilds] = await Promise.all([
+    loadPreviewImageAssets(context.db, rows),
+    loadLatestBuildVirtual(
+      context.db,
+      rows.map((row) => row.id)
+    ),
+  ]);
+  return rows.map(({ publishedUrl, ...row }) => ({
+    ...row,
+    // selfhost: optional so fixtures without it still typecheck
+    ...(publishedUrl === null ? {} : { publishedUrl }),
+    previewImageAsset: previewImageAssets.get(row.id) ?? null,
+    latestBuildVirtual: latestBuilds.get(row.id) ?? null,
+  }));
 };
 
 export type DashboardProject = Awaited<ReturnType<typeof findMany>>[number];
@@ -102,85 +147,67 @@ export const findMany = async ({
   // When filtering by workspace, verify the caller is a member or owner
   // to prevent unauthorized access via direct tRPC calls.
   if (workspaceId !== undefined) {
-    const workspace = await context.postgrest.client
-      .from("Workspace")
-      .select("userId")
-      .eq("id", workspaceId)
-      .eq("isDeleted", false)
-      .maybeSingle();
+    const workspaceRow = maybeOne(
+      await context.db
+        .select({ userId: workspace.userId })
+        .from(workspace)
+        .where(
+          and(eq(workspace.id, workspaceId), eq(workspace.isDeleted, false))
+        )
+    );
 
-    if (workspace.error) {
-      throw workspace.error;
-    }
-
-    if (workspace.data === null) {
+    if (workspaceRow === null) {
       throw new AuthorizationError("Workspace not found");
     }
 
-    const isOwner = workspace.data.userId === userId;
+    const isOwner = workspaceRow.userId === userId;
 
     if (isOwner === false) {
-      const membership = await context.postgrest.client
-        .from("WorkspaceMember")
-        .select("userId")
-        .eq("workspaceId", workspaceId)
-        .eq("userId", userId)
-        .is("removedAt", null)
-        .maybeSingle();
+      const membership = maybeOne(
+        await context.db
+          .select({ userId: workspaceMember.userId })
+          .from(workspaceMember)
+          .where(
+            and(
+              eq(workspaceMember.workspaceId, workspaceId),
+              eq(workspaceMember.userId, userId),
+              isNull(workspaceMember.removedAt)
+            )
+          )
+      );
 
-      if (membership.error) {
-        throw membership.error;
-      }
-
-      if (membership.data === null) {
+      if (membership === null) {
         throw new AuthorizationError("You don't have access to this workspace");
       }
     }
   }
 
-  let query = context.postgrest.client
-    .from("DashboardProject")
-    .select("*, previewImageAsset:Asset (*), latestBuildVirtual (*)");
-
   // When filtering by workspace, show all workspace projects
   // (members can see all projects in the workspace)
+  let scope: SQL | undefined;
   if (workspaceId !== undefined) {
-    if (includeUnassigned) {
-      // For the default workspace, also include pre-workspace projects that
-      // have NULL workspaceId — these belong to the user but haven't been
-      // assigned to a workspace yet.
-      query = query.or(
-        `workspaceId.eq.${workspaceId},and(workspaceId.is.null,userId.eq.${userId})`
-      );
-    } else {
-      query = query.eq("workspaceId", workspaceId);
-    }
+    scope = includeUnassigned
+      ? // For the default workspace, also include pre-workspace projects that
+        // have NULL workspaceId — these belong to the user but haven't been
+        // assigned to a workspace yet.
+        or(
+          eq(dashboardProject.workspaceId, workspaceId),
+          and(
+            isNull(dashboardProject.workspaceId),
+            eq(dashboardProject.userId, userId)
+          )
+        )
+      : eq(dashboardProject.workspaceId, workspaceId);
   } else {
-    query = query.eq("userId", userId);
+    scope = eq(dashboardProject.userId, userId);
   }
 
-  query = query.eq("isDeleted", false);
-
-  const data = await query
-    .order("createdAt", { ascending: false })
-    .order("id", { ascending: false });
-
-  if (data.error) {
-    throw data.error;
-  }
-
-  // Type assertion: These fields are never null in practice (come from Project table which has them as required)
-  return await fetchAndMapDomains(
-    data.data as Array<
-      (typeof data.data)[number] & {
-        id: string;
-        title: string;
-        domain: string;
-        createdAt: string;
-      }
-    >,
+  const projects = await loadDashboardProjects(
+    and(scope, eq(dashboardProject.isDeleted, false)),
     context
   );
+
+  return await fetchAndMapDomains(projects, context);
 };
 
 export const countByUserId = async ({
@@ -200,15 +227,10 @@ export const countByUserId = async ({
       "Only the project owner can view the project count"
     );
   }
-  const result = await context.postgrest.client
-    .from("Project")
-    .select("id", { count: "exact", head: true })
-    .eq("userId", userId)
-    .eq("isDeleted", false);
-  if (result.error) {
-    throw result.error;
-  }
-  return result.count ?? 0;
+  return await context.db.$count(
+    project,
+    and(eq(project.userId, userId), eq(project.isDeleted, false))
+  );
 };
 
 export const findManyByIds = async (
@@ -224,37 +246,17 @@ export const findManyByIds = async (
       ? context.authorization.userId
       : undefined;
 
-  let query = context.postgrest.client
-    .from("DashboardProject")
-    .select("*, previewImageAsset:Asset (*), latestBuildVirtual (*)")
-    .in("id", projectIds)
-    .eq("isDeleted", false);
-
-  if (userId !== undefined) {
-    query = query.or(
-      `userId.eq.${userId},marketplaceApprovalStatus.eq.APPROVED`
-    );
-  } else {
-    query = query.eq("marketplaceApprovalStatus", "APPROVED");
-  }
-
-  const data = await query
-    .order("createdAt", { ascending: false })
-    .order("id", { ascending: false });
-  if (data.error) {
-    throw data.error;
-  }
-
-  // Type assertion: These fields are never null in practice (come from Project table which has them as required)
-  return await fetchAndMapDomains(
-    data.data as Array<
-      (typeof data.data)[number] & {
-        id: string;
-        title: string;
-        domain: string;
-        createdAt: string;
-      }
-    >,
+  const isApproved = eq(dashboardProject.marketplaceApprovalStatus, "APPROVED");
+  const projects = await loadDashboardProjects(
+    and(
+      inArray(dashboardProject.id, projectIds),
+      eq(dashboardProject.isDeleted, false),
+      userId === undefined
+        ? isApproved
+        : or(eq(dashboardProject.userId, userId), isApproved)
+    ),
     context
   );
+
+  return await fetchAndMapDomains(projects, context);
 };

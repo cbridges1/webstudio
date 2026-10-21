@@ -4,6 +4,7 @@ import { getStaticSiteMapXml } from "@webstudio-is/sdk";
 import { parseBuilderUrl } from "@webstudio-is/protocol";
 import { isBuilder } from "../router-utils";
 import { createContext } from "../context.server";
+import { and, build, eq, isNull } from "@webstudio-is/db";
 
 /**
  * This should be a route in SvelteKit, as it can be fetched server-side without an actual HTTP request.
@@ -24,22 +25,20 @@ export const loader = async ({ request }: { request: Request }) => {
 
   const context = await createContext(request);
 
-  const buildResult = await context.postgrest.client
-    .from("Build")
-    .select("pages, updatedAt")
-    .eq("projectId", projectId)
-    .is("deployment", null)
-    .single();
+  const builds = await context.db
+    .select({ pages: build.pages, updatedAt: build.updatedAt })
+    .from(build)
+    .where(and(eq(build.projectId, projectId), isNull(build.deployment)));
 
-  if (buildResult.error) {
-    throw json({ message: buildResult.error.message }, { status: 404 });
+  if (builds.length !== 1) {
+    throw json({ message: "Build not found" }, { status: 404 });
   }
 
-  const build = buildResult.data;
+  const [devBuild] = builds;
 
-  const pages = parsePages(build.pages);
+  const pages = parsePages(devBuild.pages);
 
-  const siteMap = getStaticSiteMapXml(pages, build.updatedAt);
+  const siteMap = getStaticSiteMapXml(pages, devBuild.updatedAt);
 
   return json(siteMap);
 };

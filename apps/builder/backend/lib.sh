@@ -33,10 +33,7 @@ builder_backend_schema_fingerprint() {
   (
     cd "$ROOT_DIR"
     {
-      find packages/prisma-client/prisma/migrations \
-        -mindepth 1 -maxdepth 1 -type d -print
-      find packages/prisma-client/prisma/migrations \
-        -type f \( -name migration.sql -o -name migration.ts \) -print
+      find packages/db/drizzle -type f -print
       find apps/builder/backend -type f ! -name '*.test.*' -print
     } | LC_ALL=C sort | while IFS= read -r file; do
       if [ -f "$file" ]; then
@@ -69,31 +66,6 @@ builder_backend_start_db() {
   builder_compose up -d db
 }
 
-builder_backend_start_postgrest() {
-  builder_compose up -d postgrest
-}
-
-builder_backend_wait_for_postgrest() {
-  local timeout_seconds="${1:-60}"
-  local port
-  port="$(builder_compose port postgrest 3000)"
-  local url="http://127.0.0.1:${port##*:}/UserProduct?select=userId&limit=0"
-  local timeout_at
-  timeout_at="$(($(date +%s) + timeout_seconds))"
-
-  until {
-    local status
-    status="$(curl -s -o /dev/null -w "%{http_code}" "$url" || true)"
-    [ "$status" -ge 200 ] && [ "$status" -lt 300 ]
-  }; do
-    if [ "$(date +%s)" -ge "$timeout_at" ]; then
-      echo "Timed out waiting for PostgREST" >&2
-      return 1
-    fi
-    sleep 0.2
-  done
-}
-
 builder_backend_wait_for_db() {
   local timeout_seconds="${1:-60}"
   local timeout_at
@@ -101,8 +73,8 @@ builder_backend_wait_for_db() {
 
   # Connect over TCP, not the unix socket: the postgres image's entrypoint
   # runs a temporary socket-only server (listen_addresses='') during init,
-  # which lets a socket probe pass while host clients (prisma migrate,
-  # postgrest) still get connection refused.
+  # which lets a socket probe pass while host clients (drizzle-kit migrate)
+  # still get connection refused.
   until builder_compose exec -T db \
     sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -q -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "SELECT 1"' \
     >/dev/null 2>&1; do
@@ -132,7 +104,7 @@ builder_backend_bootstrap_schema_snapshot() {
 }
 
 builder_backend_migrate() {
-  pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/prisma-client migrations migrate --dev --cwd ../../apps/builder
+  pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/db migrate
   if ! builder_backend_schema_exists; then
     echo "Migrations completed without creating the Builder schema" >&2
     return 1
@@ -175,10 +147,10 @@ builder_backend_bootstrap_if_empty() {
 builder_backend_write_schema_snapshot() {
   mkdir -p "$(dirname "$SCHEMA_SNAPSHOT")"
   local temporary_snapshot="${SCHEMA_SNAPSHOT}.tmp.$$"
-  # Dump only the application-owned public schema so the snapshot can be
-  # restored without replacing database-owned schemas.
+  # Dump the application schema and drizzle-kit's migration journal, so later
+  # migrations apply on top of a restored snapshot.
   if builder_compose exec -T db \
-    sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --schema=public --schema-only --clean --if-exists --no-owner --no-privileges' \
+    sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --schema=public --schema=drizzle --clean --if-exists --no-owner --no-privileges' \
     >"$temporary_snapshot"; then
     mv "$temporary_snapshot" "$SCHEMA_SNAPSHOT"
   else
@@ -186,30 +158,4 @@ builder_backend_write_schema_snapshot() {
     return 1
   fi
   echo "Wrote $SCHEMA_SNAPSHOT"
-}
-
-builder_prisma_client_exists() {
-  [ -f "$ROOT_DIR/packages/prisma-client/src/__generated__/index.js" ]
-}
-
-builder_generate_prisma_client() {
-  case "${1:-auto}" in
-    true)
-      pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/prisma-client generate
-      ;;
-    false)
-      echo "Skipping Prisma client generation"
-      ;;
-    auto)
-      if builder_prisma_client_exists; then
-        echo "Skipping Prisma client generation; generated client already exists"
-      else
-        pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/prisma-client generate
-      fi
-      ;;
-    *)
-      echo "Unknown Prisma generation mode: $1" >&2
-      exit 1
-      ;;
-  esac
 }

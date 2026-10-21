@@ -26,6 +26,7 @@ import { Card, CardContent, CardFooter } from "../shared/card";
 import type { User } from "~/shared/db/user.server";
 import { ProjectMenu } from "./project-menu";
 import { formatDate } from "./utils";
+import { getPublishedDomain } from "~/shared/published-domain";
 
 const infoIconStyle = css({
   flexShrink: 0,
@@ -75,6 +76,7 @@ export const ProjectCard = ({
     previewImageAsset,
     tags,
     domainsVirtual,
+    publishedUrl,
   },
   publisherHost,
   projectsTags,
@@ -85,7 +87,11 @@ export const ProjectCard = ({
     (d: { domain: string; status: string; verified: boolean }) =>
       d.status === "ACTIVE" && d.verified
   )?.domain;
-  const displayDomain = customDomain ?? `${domain}.${publisherHost}`;
+  // selfhost: the deployed site's address wins over the custom-domain lookup
+  const displayDomain =
+    publishedUrl != null
+      ? getPublishedDomain({ domain, publishedUrl }, publisherHost)
+      : (customDomain ?? `${domain}.${publisherHost}`);
   const [openDialog, setOpenDialog] = useState<DialogType | undefined>();
   const [isHidden, setIsHidden] = useState(false);
   const [isTransitioning, setIsTransitioning] = useState(false);

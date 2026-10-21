@@ -17,25 +17,27 @@ import { assertApiProjectPermit } from "./api-permits.server";
 import { assertCliApiContractVersion } from "./api-compatibility.server";
 import { throwApiError } from "./api-errors.server";
 import { createAssetClient } from "~/shared/asset-client";
+import { and, build as buildTable, desc, eq, isNull } from "@webstudio-is/db";
 
 export const loadBuildByProjectVersion = async (
   ctx: AppContext,
   projectId: string,
   version: number
 ) => {
-  const build = await ctx.postgrest.client
-    .from("Build")
-    .select("id")
-    .eq("projectId", projectId)
-    .eq("version", version)
-    .is("deployment", null)
-    .order("createdAt", { ascending: false })
+  const builds = await ctx.db
+    .select({ id: buildTable.id })
+    .from(buildTable)
+    .where(
+      and(
+        eq(buildTable.projectId, projectId),
+        eq(buildTable.version, version),
+        isNull(buildTable.deployment)
+      )
+    )
+    .orderBy(desc(buildTable.createdAt))
     .limit(1);
 
-  if (build.error) {
-    throw build.error;
-  }
-  const buildId = build.data.at(0)?.id;
+  const buildId = builds.at(0)?.id;
   if (buildId === undefined) {
     return throwApiError("NOT_FOUND", "Build version not found for project");
   }

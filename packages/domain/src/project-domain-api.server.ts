@@ -14,6 +14,15 @@ import {
   type PublishTarget,
 } from "@webstudio-is/sdk";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
+import {
+  and,
+  build,
+  desc,
+  domain as domainTable,
+  eq,
+  isNotNull,
+  maybeOne,
+} from "@webstudio-is/db";
 import { db } from "./db";
 import { validateDomain } from "./db/validate";
 
@@ -102,19 +111,19 @@ export const listProjectPublishes = async (
   projectId: string,
   context: AppContext
 ) => {
-  const result = await context.postgrest.client
-    .from("Build")
-    .select("id, version, createdAt, deployment")
-    .eq("projectId", projectId)
-    .not("deployment", "is", null)
-    .order("createdAt", { ascending: false });
-
-  if (result.error) {
-    throw result.error;
-  }
+  const builds = await context.db
+    .select({
+      id: build.id,
+      version: build.version,
+      createdAt: build.createdAt,
+      deployment: build.deployment,
+    })
+    .from(build)
+    .where(and(eq(build.projectId, projectId), isNotNull(build.deployment)))
+    .orderBy(desc(build.createdAt));
 
   return {
-    publishes: result.data.flatMap((build) => {
+    publishes: builds.flatMap((build) => {
       const deployment = parseDeployment(build.deployment);
       if (deployment === undefined || deployment.destination === "static") {
         return [];
@@ -137,17 +146,21 @@ export const getProjectPublishJob = async (
   input: { projectId: string; jobId: string },
   context: AppContext
 ) => {
-  const result = await context.postgrest.client
-    .from("Build")
-    .select("id, version, createdAt, updatedAt, deployment, publishStatus")
-    .eq("projectId", input.projectId)
-    .eq("id", input.jobId)
-    .maybeSingle();
-
-  if (result.error) {
-    throw result.error;
-  }
-  const publishJob = result.data;
+  const publishJob = maybeOne(
+    await context.db
+      .select({
+        id: build.id,
+        version: build.version,
+        createdAt: build.createdAt,
+        updatedAt: build.updatedAt,
+        deployment: build.deployment,
+        publishStatus: build.publishStatus,
+      })
+      .from(build)
+      .where(
+        and(eq(build.projectId, input.projectId), eq(build.id, input.jobId))
+      )
+  );
   if (publishJob === null) {
     return undefined;
   }
@@ -374,18 +387,15 @@ export const updateProjectDomain = async (
     if (validation.success === false) {
       throw new Error(validation.error);
     }
-    const result = await context.postgrest.client
-      .from("Domain")
-      .update({
+    await context.db
+      .update(domainTable)
+      .set({
         domain: validation.domain,
         status: "INITIALIZING",
         error: null,
         txtRecord: null,
       })
-      .eq("id", input.domainId);
-    if (result.error) {
-      throw result.error;
-    }
+      .where(eq(domainTable.id, input.domainId));
   }
 
   const updatedProject = await projectApi.loadById(input.projectId, context);

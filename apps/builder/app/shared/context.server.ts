@@ -10,7 +10,13 @@ import {
   getAuthorizationOwnerId,
 } from "@webstudio-is/plans/index.server";
 import { staticEnv } from "~/env/env.static.server";
-import { createClient } from "@webstudio-is/postgrest/index.server";
+import {
+  authorizationToken,
+  eq,
+  getDb,
+  project,
+  type Db,
+} from "@webstudio-is/db";
 import { builderAuthenticator } from "~/services/builder-auth.server";
 import { readLoginSessionBloomFilter } from "~/services/session.server";
 import type { BloomFilter } from "~/services/bloom-filter.server";
@@ -64,25 +70,20 @@ export const isServiceAuthorization = (authorizationHeader: string | null) => {
   );
 };
 
-const createTokenAuthorizationContext = async (
-  authToken: string,
-  postgrest: AppContext["postgrest"]
-) => {
-  const projectOwnerIdByToken = await postgrest.client
-    .from("AuthorizationToken")
-    .select("project:Project(id, userId)")
-    .eq("token", authToken)
-    .single();
+const createTokenAuthorizationContext = async (authToken: string, db: Db) => {
+  const rows = await db
+    .select({ projectId: project.id, userId: project.userId })
+    .from(authorizationToken)
+    .innerJoin(project, eq(project.id, authorizationToken.projectId))
+    .where(eq(authorizationToken.token, authToken));
 
-  if (projectOwnerIdByToken.error) {
+  if (rows.length !== 1) {
     throw new Error(`Project owner can't be found for token ${authToken}`);
   }
 
-  const ownerId = projectOwnerIdByToken.data.project?.userId ?? null;
+  const ownerId = rows[0].userId;
   if (ownerId === null) {
-    throw new Error(
-      `Project ${projectOwnerIdByToken.data.project?.id} has null userId`
-    );
+    throw new Error(`Project ${rows[0].projectId} has null userId`);
   }
 
   return {
@@ -94,7 +95,7 @@ const createTokenAuthorizationContext = async (
 
 const createAuthorizationContext = async (
   request: Request,
-  postgrest: AppContext["postgrest"]
+  db: Db
 ): Promise<AppContext["authorization"]> => {
   const { authToken, isServiceCall, sessionData } =
     await extractAuthFromRequest(request);
@@ -107,7 +108,7 @@ const createAuthorizationContext = async (
   }
 
   if (authToken != null) {
-    return await createTokenAuthorizationContext(authToken, postgrest);
+    return await createTokenAuthorizationContext(authToken, db);
   }
 
   if (sessionData?.userId != null) {
@@ -210,16 +211,15 @@ const createApiClientContext = (request: Request): AppContext["apiClient"] => {
   };
 };
 
-export const createPostgrestContext = () => {
-  return { client: createClient(env.POSTGREST_URL, env.POSTGREST_API_KEY) };
-};
+/** The process-wide database connection pool. */
+export const createDbContext = (): Db => getDb(env.DATABASE_URL);
 
 /**
  * argument buildEnv==="prod" only if we are loading project with production build
  */
 export const createContext = async (request: Request): Promise<AppContext> => {
-  const postgrest = createPostgrestContext();
-  const authorization = await createAuthorizationContext(request, postgrest);
+  const db = createDbContext();
+  const authorization = await createAuthorizationContext(request, db);
 
   const resolvePlanInfo = async (auth: AppContext["authorization"]) => {
     const ownerId = getAuthorizationOwnerId(auth);
@@ -230,7 +230,7 @@ export const createContext = async (request: Request): Promise<AppContext> => {
       };
     }
     return (
-      (await getPlanInfo([ownerId], { postgrest })).get(ownerId) ?? {
+      (await getPlanInfo([ownerId], { db })).get(ownerId) ?? {
         planFeatures: defaultPlanFeatures,
         purchases: [] as AppContext["purchases"],
       }
@@ -245,15 +245,12 @@ export const createContext = async (request: Request): Promise<AppContext> => {
   const apiClient = createApiClientContext(request);
 
   const getOwnerPlanFeatures = async (userId: string) => {
-    const results = await getPlanInfo([userId], { postgrest });
+    const results = await getPlanInfo([userId], { db });
     return results.get(userId)?.planFeatures ?? defaultPlanFeatures;
   };
 
   const createTokenContext = async (authToken: string) => {
-    const authorization = await createTokenAuthorizationContext(
-      authToken,
-      postgrest
-    );
+    const authorization = await createTokenAuthorizationContext(authToken, db);
 
     const { planFeatures, purchases } = await resolvePlanInfo(authorization);
 
@@ -266,7 +263,7 @@ export const createContext = async (request: Request): Promise<AppContext> => {
       purchases,
       apiClient,
       trpcCache,
-      postgrest,
+      db,
       createTokenContext,
       getOwnerPlanFeatures,
     };
@@ -281,7 +278,7 @@ export const createContext = async (request: Request): Promise<AppContext> => {
     purchases,
     apiClient,
     trpcCache,
-    postgrest,
+    db,
     createTokenContext,
     getOwnerPlanFeatures,
   };

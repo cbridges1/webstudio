@@ -9,13 +9,20 @@ import {
   AuthorizationError,
   type AppContext,
 } from "@webstudio-is/trpc-interface/index.server";
-import type { Client } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  asset as assetTable,
+  eq,
+  file as fileTable,
+  notExists,
+  one,
+  type Db,
+} from "@webstudio-is/db";
 import type { AssetObjectStore } from "./client";
 import { uploadFileData } from "./upload";
 import { createUniqueAssetFilename } from "./utils/get-unique-filename";
 import { sanitizeS3Key } from "./utils/sanitize-s3-key";
 import { formatAsset } from "./utils/format-asset";
-import { assertPostgrestSuccess } from "./patch-utils";
 import { AssetRevisionConflictError } from "@webstudio-is/content-engine/asset-content-repository";
 export { AssetRevisionConflictError } from "@webstudio-is/content-engine/asset-content-repository";
 
@@ -48,16 +55,12 @@ export const swapAssetFileWithClient = async (
     expectedName: string;
     replacementName: string;
   },
-  client: Client
+  client: Db
 ) => {
-  const result = await client.rpc("swap_asset_file", {
-    project_id: projectId,
-    asset_id: assetId,
-    expected_name: expectedName,
-    replacement_name: replacementName,
-  });
-  assertPostgrestSuccess(result);
-  const { data } = result;
+  const data = await swapAssetFile(
+    { projectId, assetId, expectedName, replacementName },
+    client
+  );
   if (data === "conflict") {
     throw new AssetRevisionConflictError(
       "This file changed since it was opened. Reload it before saving again."
@@ -74,6 +77,85 @@ export const swapAssetFileWithClient = async (
   }
 };
 
+/**
+ * Points an asset at a new File revision if it still has `expectedName`, restores
+ * the revision and marks the old file deleted when nothing else uses it. One
+ * transaction, with the asset row locked.
+ */
+const swapAssetFile = async (
+  {
+    projectId,
+    assetId,
+    expectedName,
+    replacementName,
+  }: {
+    projectId: string;
+    assetId: string;
+    expectedName: string;
+    replacementName: string;
+  },
+  client: Db
+): Promise<"not_found" | "conflict" | "invalid_revision" | "updated"> =>
+  await client.transaction(async (tx) => {
+    const [current] = await tx
+      .select({ name: assetTable.name })
+      .from(assetTable)
+      .where(
+        and(eq(assetTable.projectId, projectId), eq(assetTable.id, assetId))
+      )
+      .for("update");
+
+    if (current === undefined) {
+      return "not_found";
+    }
+    if (current.name !== expectedName) {
+      return "conflict";
+    }
+
+    const replacement = await tx
+      .select({ name: fileTable.name })
+      .from(fileTable)
+      .where(
+        and(
+          eq(fileTable.name, replacementName),
+          eq(fileTable.status, "UPLOADED"),
+          eq(fileTable.uploaderProjectId, projectId)
+        )
+      );
+    if (replacement.length === 0) {
+      return "invalid_revision";
+    }
+
+    await tx
+      .update(fileTable)
+      .set({ isDeleted: false })
+      .where(eq(fileTable.name, replacementName));
+
+    await tx
+      .update(assetTable)
+      .set({ name: replacementName })
+      .where(
+        and(eq(assetTable.projectId, projectId), eq(assetTable.id, assetId))
+      );
+
+    await tx
+      .update(fileTable)
+      .set({ isDeleted: true })
+      .where(
+        and(
+          eq(fileTable.name, expectedName),
+          notExists(
+            tx
+              .select({ name: assetTable.name })
+              .from(assetTable)
+              .where(eq(assetTable.name, expectedName))
+          )
+        )
+      );
+
+    return "updated";
+  });
+
 const loadAsset = async ({
   assetId,
   projectId,
@@ -81,22 +163,27 @@ const loadAsset = async ({
 }: {
   assetId: string;
   projectId: string;
-  client: Client;
+  client: Db;
 }) => {
-  const result = await client
-    .from("Asset")
-    .select(
-      "id, projectId, name, filename, description, folderId, file:File!inner(*)"
-    )
-    .eq("id", assetId)
-    .eq("projectId", projectId)
-    .single();
-  assertPostgrestSuccess(result);
-  const { data } = result;
-  if (data === null || data.file === null) {
+  const rows = await client
+    .select({
+      id: assetTable.id,
+      projectId: assetTable.projectId,
+      name: assetTable.name,
+      filename: assetTable.filename,
+      description: assetTable.description,
+      folderId: assetTable.folderId,
+      file: fileTable,
+    })
+    .from(assetTable)
+    .innerJoin(fileTable, eq(fileTable.name, assetTable.name))
+    .where(
+      and(eq(assetTable.id, assetId), eq(assetTable.projectId, projectId))
+    );
+  if (rows.length !== 1) {
     throw new Error("Asset not found");
   }
-  return data;
+  return one(rows);
 };
 
 export const updateAssetContent = async (
@@ -134,7 +221,7 @@ export const updateAssetContent = async (
   const currentAsset = await loadAsset({
     assetId,
     projectId,
-    client: context.postgrest.client,
+    client: context.db,
   });
   if (currentAsset.name !== expectedName) {
     throw new AssetRevisionConflictError(
@@ -169,7 +256,7 @@ export const updateAssetContent = async (
       extension: extension?.toLowerCase(),
     })
   );
-  const insertedFile = await context.postgrest.client.from("File").insert({
+  await context.db.insert(fileTable).values({
     name: revisionName,
     status: "UPLOADING",
     format: "file",
@@ -177,7 +264,6 @@ export const updateAssetContent = async (
     uploaderProjectId: projectId,
     createdAt: currentAsset.file.createdAt,
   });
-  assertPostgrestSuccess(insertedFile);
 
   const file = await uploadFileData(
     revisionName,
@@ -186,12 +272,8 @@ export const updateAssetContent = async (
     context,
     undefined,
     undefined,
-    async (name, { postgrest }) => {
-      const deletedFile = await postgrest.client
-        .from("File")
-        .delete()
-        .eq("name", name);
-      assertPostgrestSuccess(deletedFile);
+    async (name, { db }) => {
+      await db.delete(fileTable).where(eq(fileTable.name, name));
     }
   );
   const revision = formatAsset({
@@ -211,7 +293,7 @@ export const updateAssetContent = async (
         expectedName,
         replacementName: revisionName,
       },
-      context.postgrest.client
+      context.db
     );
   } catch (error) {
     let swapCommitted = false;
@@ -219,16 +301,15 @@ export const updateAssetContent = async (
       const current = await loadAsset({
         assetId,
         projectId,
-        client: context.postgrest.client,
+        client: context.db,
       });
       if (current.name === revisionName) {
         swapCommitted = true;
       } else {
-        const discardedRevision = await context.postgrest.client
-          .from("File")
-          .update({ isDeleted: true })
-          .eq("name", revisionName);
-        assertPostgrestSuccess(discardedRevision);
+        await context.db
+          .update(fileTable)
+          .set({ isDeleted: true })
+          .where(eq(fileTable.name, revisionName));
       }
     } catch (cleanupError) {
       console.error("Unable to discard an asset revision", cleanupError);

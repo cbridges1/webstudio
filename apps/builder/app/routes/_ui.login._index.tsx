@@ -99,6 +99,7 @@ export const loader = async ({
       isGoogleEnabled: Boolean(
         env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
       ),
+      isUsernameLoginEnabled: env.AUTH_USERNAME_LOGIN === "true",
     },
     { headers }
   );

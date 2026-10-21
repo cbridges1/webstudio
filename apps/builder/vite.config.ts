@@ -9,7 +9,7 @@ import {
   getAuthorizationServerOrigin,
   isBuilderUrl,
 } from "./app/shared/router-utils/origins";
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import fg from "fast-glob";
 
 const rootDir = ["..", "../..", "../../.."]
@@ -26,12 +26,6 @@ const conditions = hasPrivateFolders
   : ["webstudio"];
 
 export default defineConfig(({ mode }) => {
-  if (mode === "development") {
-    // Enable self-signed certificates for development service 2 service fetch calls.
-    // This is particularly important for secure communication with the oauth.ws.token endpoint.
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-  }
-
   const env = loadEnv(mode, __dirname, "");
   const multiplayerRelayProxyTarget =
     process.env.COLLAB_RELAY_PROXY_TARGET ??
@@ -106,12 +100,6 @@ export default defineConfig(({ mode }) => {
           replacement: resolve("app"),
         },
 
-        // before 2,899.74 kB, after 2,145.98 kB
-        {
-          find: "@supabase/node-fetch",
-          replacement: resolve("./app/shared/empty.ts"),
-        },
-
         // rolldown resolves tslib to its CJS build (our resolve.conditions
         // omit "module") and the generated interop leaves `default`
         // undefined, crashing the server bundle at boot. Point it at the
@@ -136,17 +124,13 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
-      // Service-to-service OAuth token call requires a specified host for the wstd.dev domain
-      host: "wstd.dev",
+      // Plain HTTP on localhost; domains and HTTPS belong to the deployment.
+      host: "localhost",
       proxy: {
         "/collab-relay": {
           target: multiplayerRelayProxyTarget,
           ws: true,
         },
-      },
-      https: {
-        key: readFileSync("../../https/privkey.pem"),
-        cert: readFileSync("../../https/fullchain.pem"),
       },
       cors: ((
         req: IncomingMessage,
@@ -155,7 +139,7 @@ export default defineConfig(({ mode }) => {
         // Handle CORS preflight requests in development to mimic Remix production behavior
         if (req.method === "OPTIONS" || req.method === "POST") {
           if (req.headers.origin != null && req.url != null) {
-            const url = new URL(req.url, `https://${req.headers.host}`);
+            const url = new URL(req.url, `http://${req.headers.host}`);
 
             // Allow CORS for /builder-logout path when requested from the authorization server
             if (url.pathname === "/builder-logout" && isBuilderUrl(url.href)) {

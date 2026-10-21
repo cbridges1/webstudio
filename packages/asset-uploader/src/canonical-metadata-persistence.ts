@@ -7,8 +7,18 @@ import {
   getCanonicalAssetMetadataTier,
   type CanonicalAssetFileEntry,
 } from "@webstudio-is/content-engine/compiler";
-import type { Client, Database } from "@webstudio-is/postgrest/index.server";
-import { assertPostgrestSuccess } from "./patch-utils";
+import {
+  and,
+  asc,
+  asset,
+  assetFileMetadata,
+  eq,
+  file,
+  inArray,
+  sql,
+  type Database,
+  type Db,
+} from "@webstudio-is/db";
 
 type MetadataRow = Database["public"]["Tables"]["AssetFileMetadata"]["Row"];
 
@@ -76,12 +86,42 @@ const parseMetadataRow = (row: MetadataRow): CanonicalAssetFileEntry => {
   return entry;
 };
 
+/**
+ * Serializes metadata writes for one asset until the transaction ends, across
+ * every process sharing the database.
+ */
+const lockAssetMetadata = async (
+  tx: Db,
+  projectId: string,
+  assetId: string
+) => {
+  await tx.execute(
+    sql`SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(pg_catalog.jsonb_build_array(${projectId}::text, ${assetId}::text)::text, 0))`
+  );
+};
+
+/** The asset still points at an uploaded file. */
+const hasUploadedFile = (projectId: string, assetId: string) =>
+  and(
+    eq(asset.projectId, projectId),
+    eq(asset.id, assetId),
+    eq(file.status, "UPLOADED")
+  );
+
+const isNotDistinctFrom = (
+  column:
+    | typeof asset.filename
+    | typeof asset.description
+    | typeof asset.folderId,
+  value: string | null
+) => sql`${column} IS NOT DISTINCT FROM ${value}`;
+
 export const replaceCanonicalAssetFileEntry = async ({
   client,
   entry,
   source,
 }: {
-  client: Client;
+  client: Db;
   entry: CanonicalAssetFileEntry;
   source: CanonicalAssetMetadataSource;
 }): Promise<CanonicalAssetFileEntry> => {
@@ -91,23 +131,51 @@ export const replaceCanonicalAssetFileEntry = async ({
   ) {
     throw new Error("Canonical asset metadata identity is inconsistent");
   }
-  const result = await client.rpc("replace_asset_file_metadata", {
-    p_project_id: entry.projectId,
-    p_asset_id: entry.assetId,
-    p_revision: entry.revision,
-    p_document: serializeMetadataDocument(entry),
-    p_source: {
-      storageName: source.storageName,
-      fileUpdatedAt: source.fileUpdatedAt,
-      fileSize: source.fileSize,
-      contentHash: source.contentHash ?? null,
-      filename: source.filename ?? null,
-      description: source.description ?? null,
-      folderId: source.folderId ?? null,
-    },
+  const document = serializeMetadataDocument(entry);
+  // Store the metadata only while the asset still has the file and fields it was
+  // extracted from.
+  const replaced = await client.transaction(async (tx) => {
+    await lockAssetMetadata(tx, entry.projectId, entry.assetId);
+    const current = await tx
+      .select({ id: asset.id })
+      .from(asset)
+      .innerJoin(file, eq(file.name, asset.name))
+      .where(
+        and(
+          hasUploadedFile(entry.projectId, entry.assetId),
+          isNotDistinctFrom(asset.filename, source.filename ?? null),
+          isNotDistinctFrom(asset.description, source.description ?? null),
+          isNotDistinctFrom(asset.folderId, source.folderId ?? null),
+          eq(file.name, source.storageName),
+          sql`${file.updatedAt} = ${source.fileUpdatedAt}::timestamptz`,
+          eq(file.size, source.fileSize)
+        )
+      )
+      .for("update", { of: [asset, file] });
+    if (current.length === 0) {
+      return false;
+    }
+    await tx
+      .insert(assetFileMetadata)
+      .values({
+        projectId: entry.projectId,
+        assetId: entry.assetId,
+        revision: entry.revision,
+        document,
+        updatedAt: sql`CURRENT_TIMESTAMP`,
+      })
+      .onConflictDoUpdate({
+        target: [assetFileMetadata.projectId, assetFileMetadata.assetId],
+        set: {
+          revision: sql`excluded.revision`,
+          document: sql`excluded.document`,
+          updatedAt: sql`excluded."updatedAt"`,
+        },
+        setWhere: sql`${assetFileMetadata.revision} IS DISTINCT FROM excluded.revision OR ${assetFileMetadata.document} IS DISTINCT FROM excluded.document`,
+      });
+    return true;
   });
-  assertPostgrestSuccess(result);
-  if (result.data !== true) {
+  if (replaced !== true) {
     throw new Error("Canonical asset metadata source changed during update");
   }
   return entry;
@@ -118,43 +186,72 @@ export const deleteStaleCanonicalAssetFileEntries = async ({
   projectId,
   assetIds,
 }: {
-  client: Client;
+  client: Db;
   projectId: string;
   assetIds: string[];
 }) => {
   if (assetIds.length === 0) {
     return 0;
   }
-  const result = await client.rpc("delete_stale_asset_file_metadata", {
-    p_project_id: projectId,
-    p_asset_ids: assetIds,
+  // Lock in a stable order so concurrent calls can't deadlock.
+  const sortedAssetIds = [...new Set(assetIds)].sort();
+  return await client.transaction(async (tx) => {
+    let deleted = 0;
+    for (const assetId of sortedAssetIds) {
+      await lockAssetMetadata(tx, projectId, assetId);
+      const current = await tx
+        .select({ id: asset.id })
+        .from(asset)
+        .innerJoin(file, eq(file.name, asset.name))
+        .where(hasUploadedFile(projectId, assetId))
+        .limit(1);
+      if (current.length > 0) {
+        continue;
+      }
+      const rows = await tx
+        .delete(assetFileMetadata)
+        .where(
+          and(
+            eq(assetFileMetadata.projectId, projectId),
+            eq(assetFileMetadata.assetId, assetId)
+          )
+        )
+        .returning({ assetId: assetFileMetadata.assetId });
+      deleted += rows.length;
+    }
+    return deleted;
   });
-  assertPostgrestSuccess(result);
-  return result.data ?? 0;
 };
 
 export const deleteInvalidCanonicalAssetFileEntryIfMatches = async ({
   client,
   row,
 }: {
-  client: Client;
+  client: Db;
   row: Pick<MetadataRow, "projectId" | "assetId" | "revision" | "document">;
 }) => {
-  const result = await client.rpc("delete_asset_file_metadata_if_matches", {
-    p_project_id: row.projectId,
-    p_asset_id: row.assetId,
-    p_revision: row.revision,
-    p_document: row.document,
+  return await client.transaction(async (tx) => {
+    await lockAssetMetadata(tx, row.projectId, row.assetId);
+    const deleted = await tx
+      .delete(assetFileMetadata)
+      .where(
+        and(
+          eq(assetFileMetadata.projectId, row.projectId),
+          eq(assetFileMetadata.assetId, row.assetId),
+          eq(assetFileMetadata.revision, row.revision),
+          sql`${assetFileMetadata.document} = ${JSON.stringify(row.document)}::jsonb`
+        )
+      )
+      .returning({ assetId: assetFileMetadata.assetId });
+    return deleted.length;
   });
-  assertPostgrestSuccess(result);
-  return result.data ?? 0;
 };
 
 export const deleteCanonicalAssetFileEntryIfMatches = async ({
   client,
   entry,
 }: {
-  client: Client;
+  client: Db;
   entry: CanonicalAssetFileEntry;
 }) =>
   await deleteInvalidCanonicalAssetFileEntryIfMatches({
@@ -167,23 +264,25 @@ const loadCanonicalAssetFileMetadataRows = async ({
   projectId,
   assetIds,
 }: {
-  client: Client;
+  client: Db;
   projectId: string;
   assetIds?: string[];
 }): Promise<MetadataRow[]> => {
-  let query = client
-    .from("AssetFileMetadata")
-    .select()
-    .eq("projectId", projectId);
-  if (assetIds !== undefined) {
-    if (assetIds.length === 0) {
-      return [];
-    }
-    query = query.in("assetId", assetIds);
+  if (assetIds?.length === 0) {
+    return [];
   }
-  const result = await query.order("assetId");
-  assertPostgrestSuccess(result);
-  return result.data ?? [];
+  return await client
+    .select()
+    .from(assetFileMetadata)
+    .where(
+      and(
+        eq(assetFileMetadata.projectId, projectId),
+        assetIds === undefined
+          ? undefined
+          : inArray(assetFileMetadata.assetId, assetIds)
+      )
+    )
+    .orderBy(asc(assetFileMetadata.assetId));
 };
 
 export const loadCanonicalAssetFileEntries = async ({
@@ -191,7 +290,7 @@ export const loadCanonicalAssetFileEntries = async ({
   projectId,
   assetIds,
 }: {
-  client: Client;
+  client: Db;
   projectId: string;
   assetIds?: string[];
 }): Promise<CanonicalAssetFileEntry[]> => {
@@ -208,7 +307,7 @@ export const loadCanonicalAssetFileEntriesForRecovery = async ({
   projectId,
   assetIds,
 }: {
-  client: Client;
+  client: Db;
   projectId: string;
   assetIds?: string[];
 }) => {

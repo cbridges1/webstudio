@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
-import { http, HttpResponse } from "msw";
 import {
-  createTestServer,
-  db,
-  empty,
-  json,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+  asset as assetTable,
+  assetFileMetadata,
+  eq,
+  file as fileTable,
+  type Db,
+} from "@webstudio-is/db";
+import { seed, setupTestDb, withQueryHook } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import {
   __testing__,
@@ -16,7 +16,7 @@ import {
 import { PostgresAssetRepository } from "./asset-repository";
 
 const { getRevisionFilename } = __testing__;
-const server = createTestServer();
+const db = setupTestDb();
 
 const readEmptyFile = async () => ({
   data: {
@@ -24,43 +24,46 @@ const readEmptyFile = async () => ({
   },
 });
 
-const createContext = (): AppContext =>
+const createContext = (contextDb: Db = db): AppContext =>
   ({
-    ...testContext,
+    db: contextDb,
     authorization: { type: "user", userId: "user-1" },
     getOwnerPlanFeatures: async () => ({}),
   }) as unknown as AppContext;
-
-const ownershipHandler = db.get("Project", ({ request }) => {
-  const url = new URL(request.url);
-  if (url.searchParams.has("userId")) {
-    return json({ id: url.searchParams.get("id")?.replace("eq.", "") });
-  }
-  return json(null);
-});
 
 const oldFile = {
   name: "settings_old-revision.json",
   format: "json",
   size: 2,
-  description: null,
-  status: "UPLOADED",
-  isDeleted: false,
   uploaderProjectId: "project",
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   meta: "{}",
 };
 
-const assetRow = {
-  id: "asset",
-  projectId: "project",
-  name: oldFile.name,
-  filename: null,
-  description: "Settings",
-  folderId: "data",
-  file: oldFile,
+/** "project" (owned by user-1) with one asset in folder "data". */
+const seedAsset = async (overrides: Partial<typeof oldFile> = {}) => {
+  const fileRow = { ...oldFile, ...overrides };
+  await seed.project(db, { id: "project", userId: "user-1" });
+  await seed.assetFolder(db, { id: "data", projectId: "project" });
+  await seed.asset(
+    db,
+    {
+      id: "asset",
+      projectId: "project",
+      name: fileRow.name,
+      description: "Settings",
+      folderId: "data",
+    },
+    fileRow
+  );
 };
+
+const readAsset = async () =>
+  (await db.select().from(assetTable).where(eq(assetTable.id, "asset")))[0];
+
+const readFile = async (name: string) =>
+  (await db.select().from(fileTable).where(eq(fileTable.name, name)))[0];
 
 describe("asset content revisions", () => {
   test("keeps the display basename when generating revision keys", () => {
@@ -92,68 +95,8 @@ describe("asset content revisions", () => {
   });
 
   test("uploads an immutable revision and keeps the asset id", async () => {
+    await seedAsset();
     let revisionName = "";
-    let swapInput: unknown;
-    server.use(
-      ownershipHandler,
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("file.status")) {
-          return json([
-            {
-              ...assetRow,
-              name: revisionName,
-              file: {
-                ...oldFile,
-                name: revisionName,
-                size: 7,
-                updatedAt: "2026-07-18T00:00:01.000Z",
-              },
-            },
-          ]);
-        }
-        return json(assetRow);
-      }),
-      db.post("File", async ({ request }) => {
-        const input = (await request.json()) as { name: string };
-        revisionName = input.name;
-        expect(input).toMatchObject({
-          name: expect.stringMatching(/^settings_.+\.json$/),
-          status: "UPLOADING",
-          uploaderProjectId: "project",
-          createdAt: oldFile.createdAt,
-        });
-        return empty({ status: 201 });
-      }),
-      db.get("File", ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.has("updatedAt")).toBe(true);
-        expect(url.searchParams.has("createdAt")).toBe(false);
-        return json({
-          ...oldFile,
-          name: revisionName,
-          format: "file",
-          status: "UPLOADING",
-        });
-      }),
-      db.patch("File", () =>
-        json({
-          ...oldFile,
-          name: revisionName,
-          size: 7,
-          updatedAt: "2026-07-18T00:00:01.000Z",
-        })
-      ),
-      http.post(
-        "http://test-postgrest/rpc/swap_asset_file",
-        async ({ request }) => {
-          swapInput = await request.json();
-          return HttpResponse.json("updated");
-        }
-      ),
-      db.get("AssetFolder", () => json([])),
-      db.post("rpc/replace_asset_file_metadata", () => json(true))
-    );
 
     const asset = await updateAssetContent(
       {
@@ -164,7 +107,8 @@ describe("asset content revisions", () => {
       },
       {
         uploadFile: async (name, type, data) => {
-          expect(name).toBe(revisionName);
+          revisionName = name;
+          expect(name).toMatch(/^settings_.+\.json$/);
           expect(type).toBe("file");
           expect(await new Response(data as ReadableStream).text()).toBe(
             '{"a":1}'
@@ -184,97 +128,46 @@ describe("asset content revisions", () => {
       folderId: "data",
       format: "json",
       createdAt: oldFile.createdAt,
-      updatedAt: "2026-07-18T00:00:01.000Z",
     });
-    expect(swapInput).toEqual({
-      project_id: "project",
-      asset_id: "asset",
-      expected_name: oldFile.name,
-      replacement_name: revisionName,
+    expect(await readAsset()).toMatchObject({ name: revisionName });
+    expect(await readFile(revisionName)).toMatchObject({
+      status: "UPLOADED",
+      size: 7,
+      uploaderProjectId: "project",
+      createdAt: oldFile.createdAt,
+      isDeleted: false,
     });
+    // The previous revision is no longer used.
+    expect((await readFile(oldFile.name)).isDeleted).toBe(true);
   });
 
   test("reindexes replaced Markdown content only at a query synchronization boundary", async () => {
     const source = "---\ntitle: Updated post\n---\n\nUpdated body";
     const sourceBytes = new TextEncoder().encode(source);
-    const markdownFile = {
-      ...oldFile,
-      name: "post_old-revision.md",
-      format: "md",
-      size: 3,
-    };
-    const markdownAsset = {
-      ...assetRow,
-      name: markdownFile.name,
-      filename: "post",
-      file: markdownFile,
-    };
-    let revisionName = "";
-    let canonicalDocument: Record<string, unknown> | undefined;
-    server.use(
-      ownershipHandler,
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("file.status")) {
-          return json([
-            {
-              ...markdownAsset,
-              name: revisionName,
-              file: {
-                ...markdownFile,
-                name: revisionName,
-                size: sourceBytes.byteLength,
-                updatedAt: "2026-07-18T00:00:01.000Z",
-              },
-            },
-          ]);
-        }
-        return json(markdownAsset);
-      }),
-      db.post("File", async ({ request }) => {
-        revisionName = ((await request.json()) as { name: string }).name;
-        return empty({ status: 201 });
-      }),
-      db.get("File", () =>
-        json({
-          ...markdownFile,
-          name: revisionName,
-          format: "file",
-          status: "UPLOADING",
-        })
-      ),
-      db.patch("File", () =>
-        json({
-          ...markdownFile,
-          name: revisionName,
-          size: sourceBytes.byteLength,
-          updatedAt: "2026-07-18T00:00:01.000Z",
-        })
-      ),
-      http.post("http://test-postgrest/rpc/swap_asset_file", () =>
-        HttpResponse.json("updated")
-      ),
-      db.get("AssetFolder", () => json([])),
-      db.get("AssetFileMetadata", () => json([])),
-      db.post("rpc/replace_asset_file_metadata", async ({ request }) => {
-        canonicalDocument = (
-          (await request.json()) as {
-            p_document: Record<string, unknown>;
-          }
-        ).p_document;
-        return json(true);
-      })
+    await seed.project(db, { id: "project", userId: "user-1" });
+    await seed.assetFolder(db, { id: "data", projectId: "project" });
+    await seed.asset(
+      db,
+      {
+        id: "asset",
+        projectId: "project",
+        name: "post_old-revision.md",
+        filename: "post",
+        description: "Settings",
+        folderId: "data",
+      },
+      { ...oldFile, name: "post_old-revision.md", format: "md", size: 3 }
     );
+    let revisionName = "";
 
     const repository = new PostgresAssetRepository({
       projectId: "project",
       context: createContext(),
       assetStore: {
-        uploadFile: async () => ({
-          format: "md",
-          size: sourceBytes.byteLength,
-          meta: {},
-        }),
+        uploadFile: async (name) => {
+          revisionName = name;
+          return { format: "md", size: sourceBytes.byteLength, meta: {} };
+        },
         readFile: async (name) => {
           expect(name).toBe(revisionName);
           return { data: new Blob([source]).stream() };
@@ -283,13 +176,14 @@ describe("asset content revisions", () => {
     });
     await repository.updateContent({
       assetId: "asset",
-      expectedName: markdownFile.name,
+      expectedName: "post_old-revision.md",
       data: new Blob([source]).stream(),
     });
 
-    expect(canonicalDocument).toBeUndefined();
+    expect(await db.select().from(assetFileMetadata)).toEqual([]);
     await repository.synchronize();
-    expect(canonicalDocument).toMatchObject({
+    const [stored] = await db.select().from(assetFileMetadata);
+    expect(stored?.document).toMatchObject({
       _id: "asset",
       name: "post.md",
       contentRef: revisionName,
@@ -299,10 +193,7 @@ describe("asset content revisions", () => {
   });
 
   test("rejects a stale revision before uploading", async () => {
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => json({ ...assetRow, name: "settings_newer.json" }))
-    );
+    await seedAsset({ name: "settings_newer.json" });
 
     await expect(
       updateAssetContent(
@@ -324,55 +215,31 @@ describe("asset content revisions", () => {
   });
 
   test("discards an uploaded revision when the atomic swap conflicts", async () => {
-    let assetLoadCount = 0;
+    await seedAsset();
+    await seed.file(db, {
+      name: "settings_concurrent.json",
+      uploaderProjectId: "project",
+    });
     let revisionName = "";
-    let discardedRevision = false;
-    server.use(
-      ownershipHandler,
-      db.get("Asset", () => {
-        assetLoadCount += 1;
-        return json(
-          assetLoadCount === 1
-            ? assetRow
-            : { ...assetRow, name: "settings_concurrent.json" }
-        );
-      }),
-      db.post("File", async ({ request }) => {
-        revisionName = ((await request.json()) as { name: string }).name;
-        return empty({ status: 201 });
-      }),
-      db.get("File", () =>
-        json({
-          ...oldFile,
-          name: revisionName,
-          format: "file",
-          status: "UPLOADING",
-        })
-      ),
-      db.patch("File", async ({ request }) => {
-        const input = (await request.json()) as { isDeleted?: boolean };
-        if (input.isDeleted === true) {
-          discardedRevision = true;
-          return empty({ status: 204 });
-        }
-        return json({
-          ...oldFile,
-          name: revisionName,
-          size: 7,
-          createdAt: "2026-07-18T00:00:00.000Z",
-        });
-      }),
-      http.post("http://test-postgrest/rpc/swap_asset_file", () =>
-        HttpResponse.json("conflict")
-      )
-    );
+    // Another save replaces the file while this upload is finishing.
+    const racingDb = withQueryHook(db, async ({ kind, table }) => {
+      if (kind === "update" && table === fileTable && revisionName !== "") {
+        await db
+          .update(assetTable)
+          .set({ name: "settings_concurrent.json" })
+          .where(eq(assetTable.id, "asset"));
+      }
+    });
 
     await expect(
       new PostgresAssetRepository({
         projectId: "project",
-        context: createContext(),
+        context: createContext(racingDb),
         assetStore: {
-          uploadFile: async () => ({ format: "json", size: 7, meta: {} }),
+          uploadFile: async (name) => {
+            revisionName = name;
+            return { format: "json", size: 7, meta: {} };
+          },
           readFile: readEmptyFile,
         },
       }).updateContent({
@@ -381,65 +248,26 @@ describe("asset content revisions", () => {
         data: new Blob(["updated"]).stream(),
       })
     ).rejects.toBeInstanceOf(AssetRevisionConflictError);
-    expect(discardedRevision).toBe(true);
+    expect((await readFile(revisionName)).isDeleted).toBe(true);
+    expect((await readAsset()).name).toBe("settings_concurrent.json");
   });
 
   test("accepts a committed revision when the swap response fails", async () => {
-    let assetLoadCount = 0;
-    let revisionName = "";
-    server.use(
-      ownershipHandler,
-      db.get("Asset", ({ request }) => {
-        const url = new URL(request.url);
-        if (url.searchParams.has("file.status")) {
-          return json([
-            {
-              ...assetRow,
-              name: revisionName,
-              file: {
-                ...oldFile,
-                name: revisionName,
-                format: "json",
-                size: 7,
-                updatedAt: "2026-07-18T00:00:00.000Z",
-              },
-            },
-          ]);
+    await seedAsset();
+    // The swap commits, but its response is lost.
+    const flakyDb = new Proxy(db, {
+      get(target, property, receiver) {
+        if (property === "transaction") {
+          return async (...args: Parameters<Db["transaction"]>) => {
+            await target.transaction(...args);
+            throw new Error("Connection lost");
+          };
         }
-        assetLoadCount += 1;
-        return json(
-          assetLoadCount === 1 ? assetRow : { ...assetRow, name: revisionName }
-        );
-      }),
-      db.post("File", async ({ request }) => {
-        revisionName = ((await request.json()) as { name: string }).name;
-        return empty({ status: 201 });
-      }),
-      db.get("File", () =>
-        json({
-          ...oldFile,
-          name: revisionName,
-          format: "file",
-          status: "UPLOADING",
-        })
-      ),
-      db.patch("File", () =>
-        json({
-          ...oldFile,
-          name: revisionName,
-          format: "json",
-          size: 7,
-          createdAt: "2026-07-18T00:00:00.000Z",
-        })
-      ),
-      http.post("http://test-postgrest/rpc/swap_asset_file", () =>
-        HttpResponse.error()
-      ),
-      db.get("AssetFolder", () => json([])),
-      db.post("rpc/replace_asset_file_metadata", () =>
-        json({ message: "index database unavailable" }, { status: 500 })
-      )
-    );
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
     await expect(
       updateAssetContent(
         {
@@ -452,7 +280,7 @@ describe("asset content revisions", () => {
           uploadFile: async () => ({ format: "json", size: 7, meta: {} }),
           readFile: readEmptyFile,
         },
-        createContext()
+        createContext(flakyDb)
       )
     ).resolves.toMatchObject({
       id: "asset",

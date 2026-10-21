@@ -1,4 +1,16 @@
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  build as buildTable,
+  desc,
+  eq,
+  isNotNull,
+  isNull,
+  loadLatestBuildVirtual,
+  one,
+  project as projectTable,
+  sql,
+  type Database,
+} from "@webstudio-is/db";
 import {
   AuthorizationError,
   authorizeProject,
@@ -146,23 +158,16 @@ export const loadRawBuildById = async (
   context: AppContext,
   id: Build["id"]
 ) => {
-  const build = await context.postgrest.client
-    .from("Build")
-    .select("*")
-    .eq("id", id);
-  // .single(); Note: Single response is not compressed. Uncomment the following line once the issue is resolved: https://github.com/orgs/supabase/discussions/28757
+  const builds = await context.db
+    .select()
+    .from(buildTable)
+    .where(eq(buildTable.id, id));
 
-  if (build.error) {
-    throw build.error;
+  if (builds.length !== 1) {
+    throw new Error(`Results contain ${builds.length} row(s) requires 1 row`);
   }
 
-  if (build.data.length !== 1) {
-    throw new Error(
-      `Results contain ${build.data.length} row(s) requires 1 row`
-    );
-  }
-
-  return build.data[0];
+  return builds[0];
 };
 
 export const loadBuildById = async (context: AppContext, id: Build["id"]) => {
@@ -176,28 +181,22 @@ export const loadDevBuildByProjectId = async (
   projectId: Build["projectId"],
   signal?: AbortSignal
 ) => {
-  const query = context.postgrest.client
-    .from("Build")
-    .select("*")
-    .eq("projectId", projectId)
-    .is("deployment", null)
-    .order("createdAt", { ascending: false })
+  signal?.throwIfAborted();
+  const builds = await context.db
+    .select()
+    .from(buildTable)
+    .where(
+      and(eq(buildTable.projectId, projectId), isNull(buildTable.deployment))
+    )
+    .orderBy(desc(buildTable.createdAt))
     .limit(1);
-  const build = await (signal === undefined
-    ? query
-    : query.abortSignal(signal));
-  // .single(); Note: Single response is not compressed. Uncomment the following line once the issue is resolved: https://github.com/orgs/supabase/discussions/28757
 
-  if (build.error) {
-    throw build.error;
-  }
-
-  if (build.data.length === 0) {
+  if (builds.length === 0) {
     throw new Error("No dev build found");
   }
 
   signal?.throwIfAborted();
-  return parseCompactBuild(build.data[0]);
+  return parseCompactBuild(builds[0]);
 };
 
 export const loadDevBuildContentEngineDataByProjectId = async (
@@ -205,66 +204,53 @@ export const loadDevBuildContentEngineDataByProjectId = async (
   projectId: Build["projectId"],
   signal?: AbortSignal
 ) => {
-  const query = context.postgrest.client
-    .from("Build")
-    .select("props,dataSources,resources")
-    .eq("projectId", projectId)
-    .is("deployment", null)
-    .order("createdAt", { ascending: false })
+  signal?.throwIfAborted();
+  const builds = await context.db
+    .select({
+      props: buildTable.props,
+      dataSources: buildTable.dataSources,
+      resources: buildTable.resources,
+    })
+    .from(buildTable)
+    .where(
+      and(eq(buildTable.projectId, projectId), isNull(buildTable.deployment))
+    )
+    .orderBy(desc(buildTable.createdAt))
     .limit(1);
-  const build = await (signal === undefined
-    ? query
-    : query.abortSignal(signal));
-  if (build.error) {
-    throw build.error;
-  }
-  if (build.data.length === 0) {
+  if (builds.length === 0) {
     throw new Error("No dev build found");
   }
   signal?.throwIfAborted();
-  return parseCompactContentEngineData(build.data[0]);
+  return parseCompactContentEngineData(builds[0]);
 };
 
 export const loadApprovedProdBuildByProjectId = async (
   context: AppContext,
   projectId: Build["projectId"]
 ) => {
-  const project = await context.postgrest.client
-    .from("Project")
-    .select(
-      `
-        id,
-        latestBuildVirtual(buildId)
-      `
-    )
-    .eq("id", projectId)
-    .eq("isDeleted", false)
-    .eq("marketplaceApprovalStatus", "APPROVED")
-    .single();
-  if (project.error) {
-    throw project.error;
-  }
-  if (project.data.latestBuildVirtual === null) {
+  const project = one(
+    await context.db
+      .select({ id: projectTable.id })
+      .from(projectTable)
+      .where(
+        and(
+          eq(projectTable.id, projectId),
+          eq(projectTable.isDeleted, false),
+          eq(projectTable.marketplaceApprovalStatus, "APPROVED")
+        )
+      ),
+    "Project"
+  );
+  const latestBuild = (
+    await loadLatestBuildVirtual(context.db, [project.id])
+  ).get(project.id);
+  if (latestBuild === undefined) {
     throw Error("Build not found");
   }
 
-  const build = await context.postgrest.client
-    .from("Build")
-    .select()
-    .eq("id", project.data.latestBuildVirtual.buildId);
-  // .single(); Note: Single response is not compressed. Uncomment the following line once the issue is resolved: https://github.com/orgs/supabase/discussions/28757
-
-  if (build.error) {
-    throw build.error;
-  }
-
-  if (build.data.length !== 1) {
-    throw new Error(
-      `Results contain ${build.data.length} row(s) requires 1 row`
-    );
-  }
-
-  return parseCompactBuild(build.data[0]);
+  return parseCompactBuild(
+    await loadRawBuildById(context, latestBuild.buildId)
+  );
 };
 
 /*
@@ -281,7 +267,7 @@ export const createBuild = async (
 ): Promise<void> => {
   const data = createPages();
   const pages = removeLegacyProjectSettingsFromPages(data.pages);
-  const newBuild = await context.postgrest.client.from("Build").insert({
+  await context.db.insert(buildTable).values({
     id: createId(),
     projectId: props.projectId,
     pages: JSON.stringify(serializePages(pages)),
@@ -297,9 +283,6 @@ export const createBuild = async (
     resources: serializeData<Resource>(data.resources),
     instances: serializeData<Instance>(data.instances),
   });
-  if (newBuild.error) {
-    throw newBuild.error;
-  }
 };
 
 export const unpublishBuild = async (
@@ -321,19 +304,19 @@ export const unpublishBuild = async (
   }
 
   // Find all builds that have this domain in their deployment
-  const buildsResult = await context.postgrest.client
-    .from("Build")
-    .select("id, deployment")
-    .eq("projectId", props.projectId)
-    .not("deployment", "is", null)
-    .order("createdAt", { ascending: false });
-
-  if (buildsResult.error) {
-    throw buildsResult.error;
-  }
+  const builds = await context.db
+    .select({ id: buildTable.id, deployment: buildTable.deployment })
+    .from(buildTable)
+    .where(
+      and(
+        eq(buildTable.projectId, props.projectId),
+        isNotNull(buildTable.deployment)
+      )
+    )
+    .orderBy(desc(buildTable.createdAt));
 
   // Find all builds with this specific domain in deployment.domains
-  const targetBuilds = buildsResult.data.filter((build) => {
+  const targetBuilds = builds.filter((build) => {
     const deployment = parseDeployment(build.deployment);
     if (deployment === undefined) {
       return false;
@@ -364,14 +347,9 @@ export const unpublishBuild = async (
     if (remainingDomains.length === 0) {
       // Delete the production build entirely when no domains remain
       // Don't set deployment=null as that would create a duplicate "dev build"
-      const result = await context.postgrest.client
-        .from("Build")
-        .delete()
-        .eq("id", targetBuild.id);
-
-      if (result.error) {
-        throw result.error;
-      }
+      await context.db
+        .delete(buildTable)
+        .where(eq(buildTable.id, targetBuild.id));
     } else {
       // Update with remaining domains
       const newDeployment = JSON.stringify({
@@ -379,14 +357,10 @@ export const unpublishBuild = async (
         domains: remainingDomains,
       });
 
-      const result = await context.postgrest.client
-        .from("Build")
-        .update({ deployment: newDeployment })
-        .eq("id", targetBuild.id);
-
-      if (result.error) {
-        throw result.error;
-      }
+      await context.db
+        .update(buildTable)
+        .set({ deployment: newDeployment })
+        .where(eq(buildTable.id, targetBuild.id));
     }
   }
 };
@@ -426,17 +400,49 @@ export const createProductionBuild = async (
   const devBuild = await loadDevBuildByProjectId(context, props.projectId);
   assertBuildIntegrity(devBuild, { messagePrefix: "Cannot publish" });
 
-  const build = await context.postgrest.client.rpc("create_production_build", {
-    project_id: props.projectId,
-    deployment: JSON.stringify(props.deployment),
-  });
-  const buildId = build.data;
-  if (build.error) {
-    throw build.error;
-  }
-  if (buildId === null) {
+  // Copy the development build into a new production build in one statement.
+  // Drizzle's insert-select takes every column in table order.
+  const [createdBuild] = await context.db
+    .insert(buildTable)
+    .select(
+      context.db
+        .select({
+          id: sql<string>`gen_random_uuid()::text`.as("id"),
+          createdAt: sql<string>`CURRENT_TIMESTAMP`.as("createdAt"),
+          pages: buildTable.pages,
+          projectId: buildTable.projectId,
+          styleSources: buildTable.styleSources,
+          styles: buildTable.styles,
+          breakpoints: buildTable.breakpoints,
+          styleSourceSelections: buildTable.styleSourceSelections,
+          props: buildTable.props,
+          instances: buildTable.instances,
+          updatedAt: sql<string>`CURRENT_TIMESTAMP`.as("updatedAt"),
+          version: buildTable.version,
+          deployment: sql<string>`${JSON.stringify(props.deployment)}`.as(
+            "deployment"
+          ),
+          publishStatus: buildTable.publishStatus,
+          dataSources: buildTable.dataSources,
+          lastTransactionId: buildTable.lastTransactionId,
+          resources: buildTable.resources,
+          marketplaceProduct: buildTable.marketplaceProduct,
+          isCleaned: sql<boolean>`false`.as("isCleaned"),
+          projectSettings: buildTable.projectSettings,
+        })
+        .from(buildTable)
+        .where(
+          and(
+            eq(buildTable.projectId, props.projectId),
+            isNull(buildTable.deployment)
+          )
+        )
+    )
+    .returning({ id: buildTable.id });
+  if (createdBuild === undefined) {
     throw Error(`Project ${props.projectId} not found`);
   }
+  const buildId = createdBuild.id;
 
   if (props.deployment.destination === "static") {
     return { id: buildId };
@@ -445,17 +451,17 @@ export const createProductionBuild = async (
   try {
     // Check the saved snapshot so concurrent development edits cannot bypass
     // the Pro requirement. The caller publishes only after this check passes.
-    const snapshot = await context.postgrest.client
-      .from("Build")
-      .select("projectSettings,pages")
-      .eq("id", buildId);
-    if (snapshot.error) {
-      throw snapshot.error;
-    }
-    if (snapshot.data.length !== 1) {
+    const snapshot = await context.db
+      .select({
+        projectSettings: buildTable.projectSettings,
+        pages: buildTable.pages,
+      })
+      .from(buildTable)
+      .where(eq(buildTable.id, buildId));
+    if (snapshot.length !== 1) {
       throw new Error("Cannot verify published response headers");
     }
-    const savedBuild = snapshot.data[0];
+    const savedBuild = snapshot[0];
     const settings =
       savedBuild.projectSettings === undefined ||
       savedBuild.projectSettings === null
@@ -469,17 +475,14 @@ export const createProductionBuild = async (
       return { id: buildId };
     }
     // Use the saved staging domain, not caller-supplied deployment metadata.
-    const project = await context.postgrest.client
-      .from("Project")
-      .select("domain")
-      .eq("id", props.projectId)
-      .single();
-    if (project.error) {
-      throw project.error;
-    }
-    if (
-      props.deployment.domains.every((domain) => domain === project.data.domain)
-    ) {
+    const project = one(
+      await context.db
+        .select({ domain: projectTable.domain })
+        .from(projectTable)
+        .where(eq(projectTable.id, props.projectId)),
+      "Project"
+    );
+    if (props.deployment.domains.every((domain) => domain === project.domain)) {
       return { id: buildId };
     }
     const plan = await getProjectPlanFeatures(props.projectId, context);
@@ -489,13 +492,11 @@ export const createProductionBuild = async (
       );
     }
   } catch (error) {
-    const cleanup = await context.postgrest.client
-      .from("Build")
-      .delete()
-      .eq("id", buildId);
-    if (cleanup.error) {
+    try {
+      await context.db.delete(buildTable).where(eq(buildTable.id, buildId));
+    } catch (cleanupError) {
       throw new AggregateError(
-        [error, cleanup.error],
+        [error, cleanupError],
         "Could not verify response headers or remove the unpublished build"
       );
     }

@@ -12,6 +12,12 @@ import { builderAuthenticator } from "./builder-auth.server";
 import { staticEnv } from "~/env/env.static.server";
 import type { SessionData } from "./auth.server.utils";
 import { createContext } from "~/shared/context.server";
+import { signInWithUsername } from "./better-auth.server";
+import {
+  getBetterAuth,
+  INVALID_CREDENTIALS,
+  TOO_MANY_ATTEMPTS,
+} from "./username-auth.server";
 
 const transformRefToAlias = (input: string) => {
   const rawAlias = input.endsWith(".staging") ? input.slice(0, -8) : input;
@@ -84,6 +90,32 @@ if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
     strategyCallback
   );
   authenticator.use(google, "google");
+}
+
+// selfhost: username/password sign-in, checked by Better Auth
+if (env.AUTH_USERNAME_LOGIN === "true") {
+  authenticator.use(
+    new FormStrategy(async ({ form, request }) => {
+      const username = form.get("username");
+      const password = form.get("password");
+      if (typeof username !== "string" || typeof password !== "string") {
+        throw new Error(INVALID_CREDENTIALS);
+      }
+      const result = await signInWithUsername(getBetterAuth(), {
+        username,
+        password,
+        request,
+      });
+      if (result.status === "rate-limited") {
+        throw new Error(TOO_MANY_ATTEMPTS);
+      }
+      if (result.status === "invalid") {
+        throw new Error(INVALID_CREDENTIALS);
+      }
+      return { userId: result.userId, createdAt: Date.now() };
+    }),
+    "password"
+  );
 }
 
 if (env.DEV_LOGIN === "true") {

@@ -1,9 +1,7 @@
 services:
   db:
     volumes:
-      # Do not mount the previous PostgreSQL 16 volume into Supabase PostgreSQL
-      # 15. Keep the old volume recoverable while initializing compatible data.
-      - supabase-db:/var/lib/postgresql/data
+      - builder-db:/var/lib/postgresql/data
 
 volumes:
-  supabase-db:
+  builder-db:

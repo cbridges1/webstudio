@@ -1,3 +1,13 @@
+import {
+  and,
+  authorizationToken,
+  eq,
+  inArray,
+  maybeOne,
+  project,
+  workspaceProjectAuthorization,
+  type Db,
+} from "@webstudio-is/db";
 import type { AppContext } from "../context/context.server";
 import type { AuthPermit, ProjectPermit } from "./project-permits";
 import type { Role } from "./role";
@@ -42,43 +52,35 @@ const isRolePermitted = (relations: string[], permit: AuthPermit): boolean => {
   return relations.some((r) => permitted.includes(r as Relation));
 };
 
-const check = async (
-  postgrestClient: AppContext["postgrest"]["client"],
-  input: CheckInput
-) => {
+const check = async (db: Db, input: CheckInput) => {
   const { subjectSet } = input;
 
   if (subjectSet.namespace === "User") {
     // Check if the user is the direct owner of the project
-    const row = await postgrestClient
-      .from("Project")
-      .select("id")
-      .eq("id", input.id)
-      .eq("userId", subjectSet.id)
-      .maybeSingle();
-    if (row.error) {
-      throw row.error;
-    }
+    const row = maybeOne(
+      await db
+        .select({ id: project.id })
+        .from(project)
+        .where(and(eq(project.id, input.id), eq(project.userId, subjectSet.id)))
+    );
 
-    if (row.data !== null) {
+    if (row !== null) {
       return { allowed: true };
     }
 
     // Workspace-based authorization
-    const wpaRows = await postgrestClient
-      .from("WorkspaceProjectAuthorization")
-      .select("relation")
-      .eq("userId", subjectSet.id)
-      .eq("projectId", input.id);
-
-    if (wpaRows.error) {
-      throw wpaRows.error;
-    }
-
-    if (wpaRows.data.length > 0) {
-      const relations = wpaRows.data.flatMap((r) =>
-        r.relation !== null ? [r.relation] : []
+    const wpaRows = await db
+      .select({ relation: workspaceProjectAuthorization.relation })
+      .from(workspaceProjectAuthorization)
+      .where(
+        and(
+          eq(workspaceProjectAuthorization.userId, subjectSet.id),
+          eq(workspaceProjectAuthorization.projectId, input.id)
+        )
       );
+
+    if (wpaRows.length > 0) {
+      const relations = wpaRows.map((r) => r.relation);
       return { allowed: isRolePermitted(relations, input.permit) };
     }
 
@@ -93,19 +95,22 @@ const check = async (
     return { allowed: false };
   }
 
-  const row = await postgrestClient
-    .from("AuthorizationToken")
-    .select("token")
-    .eq("token", subjectSet.id)
-    .eq("projectId", input.id)
-    .in("relation", [...permitToRelationRewrite[input.permit]])
-    .maybeSingle();
+  const row = maybeOne(
+    await db
+      .select({ token: authorizationToken.token })
+      .from(authorizationToken)
+      .where(
+        and(
+          eq(authorizationToken.token, subjectSet.id),
+          eq(authorizationToken.projectId, input.id),
+          inArray(authorizationToken.relation, [
+            ...permitToRelationRewrite[input.permit],
+          ])
+        )
+      )
+  );
 
-  if (row.error) {
-    throw row.error;
-  }
-
-  return { allowed: row.data !== null };
+  return { allowed: row !== null };
 };
 
 // doesn't work in cloudflare workers
@@ -133,12 +138,12 @@ export const checkProjectPermit = async ({
   projectId,
   permit,
   authInfo,
-  postgrestClient,
+  db,
 }: {
   projectId: string;
   permit: AuthPermit;
   authInfo: AuthInfo;
-  postgrestClient: AppContext["postgrest"]["client"];
+  db: Db;
 }) => {
   const checks = [];
   const namespace = "Project";
@@ -154,7 +159,7 @@ export const checkProjectPermit = async ({
     }
 
     checks.push(
-      memoizedCheck(postgrestClient, {
+      memoizedCheck(db, {
         namespace,
         id: projectId,
         subjectSet: {
@@ -169,7 +174,7 @@ export const checkProjectPermit = async ({
   // Check if the user is allowed to access the project
   if (authInfo.type === "user") {
     checks.push(
-      memoizedCheck(postgrestClient, {
+      memoizedCheck(db, {
         subjectSet: {
           namespace: "User",
           id: authInfo.userId,
@@ -224,7 +229,7 @@ export const hasProjectPermit = async (
     projectId: props.projectId,
     permit: props.permit,
     authInfo,
-    postgrestClient: context.postgrest.client,
+    db: context.db,
   });
 
   if (allowed === false) {
@@ -241,7 +246,7 @@ export const hasProjectPermit = async (
       projectId: props.projectId,
       permit: "own",
       authInfo,
-      postgrestClient: context.postgrest.client,
+      db: context.db,
     });
 
     if (isOwner === false) {

@@ -50,7 +50,7 @@ import type {
   BuilderPatchTransaction,
 } from "@webstudio-is/project-build/contracts";
 import { applyBuilderNamespacePatches } from "@webstudio-is/project-build/state";
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import type { Database } from "@webstudio-is/db";
 
 type TouchedKeys = {
   keys: Set<string>;

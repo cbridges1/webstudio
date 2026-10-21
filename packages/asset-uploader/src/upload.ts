@@ -11,13 +11,25 @@ import {
   getFileNameParts,
   type Asset,
 } from "@webstudio-is/sdk";
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  asc,
+  asset as assetTable,
+  eq,
+  file as fileTable,
+  gt,
+  isNull,
+  isUniqueViolation,
+  maybeOne,
+  sql,
+  unwrapDbError,
+  type Database,
+} from "@webstudio-is/db";
 import type { AssetInfoFallback, AssetObjectWriter } from "./client";
 import type { AssetDataOverride } from "./utils/get-asset-data";
 import { createUniqueAssetFilename } from "./utils/get-unique-filename";
 import { sanitizeS3Key } from "./utils/sanitize-s3-key";
 import { formatAsset, formatAssetForRead } from "./utils/format-asset";
-import { assertPostgrestSuccess } from "./patch-utils";
 import type { UploadTicket } from "./types";
 
 export type CreateUploadTicketInput = {
@@ -67,27 +79,37 @@ const getDeduplicatedAssetId = (
     .digest("base64url")
     .slice(0, 21);
 
+/** The database's message for a failed query, without the SQL. */
+const toDbError = (error: unknown) => {
+  const cause = unwrapDbError(error);
+  return new Error(cause instanceof Error ? cause.message : String(cause));
+};
+
 const assertAssetCapacity = async (projectId: string, context: AppContext) => {
   const { maxAssetsPerProject } = await getProjectPlanFeatures(
     projectId,
     context
   );
-  const assetCount = await context.postgrest.client
-    .from("Asset")
-    .select("id, file:File!inner(status)", { count: "exact", head: true })
-    .eq("projectId", projectId)
-    .eq("file.status", "UPLOADED");
-  const uploadingCount = await context.postgrest.client
-    .from("File")
-    .select("*", { count: "exact", head: true })
-    .eq("isDeleted", false)
-    .eq("uploaderProjectId", projectId)
-    .eq("status", "UPLOADING")
-    .gt(
-      "createdAt",
-      new Date(Date.now() - UPLOADING_STALE_TIMEOUT).toISOString()
+  const [{ count: assetCount }] = await context.db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(assetTable)
+    .innerJoin(fileTable, eq(fileTable.name, assetTable.name))
+    .where(
+      and(eq(assetTable.projectId, projectId), eq(fileTable.status, "UPLOADED"))
     );
-  const count = (assetCount.count ?? 0) + (uploadingCount.count ?? 0);
+  const uploadingCount = await context.db.$count(
+    fileTable,
+    and(
+      eq(fileTable.isDeleted, false),
+      eq(fileTable.uploaderProjectId, projectId),
+      eq(fileTable.status, "UPLOADING"),
+      gt(
+        fileTable.createdAt,
+        new Date(Date.now() - UPLOADING_STALE_TIMEOUT).toISOString()
+      )
+    )
+  );
+  const count = assetCount + uploadingCount;
   if (count >= maxAssetsPerProject) {
     throw new AssetUploadCountLimitError(maxAssetsPerProject);
   }
@@ -104,27 +126,38 @@ const findAsset = async ({
   identity?: AssetIdentity;
   context: AppContext;
 }) => {
-  let query = context.postgrest.client
-    .from("Asset")
-    .select("id, projectId, filename, description, folderId")
-    .eq("projectId", projectId)
-    .eq("name", name);
-  if (identity !== undefined) {
-    query = query.eq("filename", identity.filename);
-    query =
-      identity.description === null
-        ? query.is("description", null)
-        : query.eq("description", identity.description);
-    query =
-      identity.folderId === null
-        ? query.is("folderId", null)
-        : query.eq("folderId", identity.folderId);
-  }
-  const result = await query.order("id").limit(1).maybeSingle();
-  if (result.error) {
-    throw new Error(result.error.message);
-  }
-  return result.data ?? undefined;
+  const rows = await context.db
+    .select({
+      id: assetTable.id,
+      projectId: assetTable.projectId,
+      filename: assetTable.filename,
+      description: assetTable.description,
+      folderId: assetTable.folderId,
+    })
+    .from(assetTable)
+    .where(
+      and(
+        eq(assetTable.projectId, projectId),
+        eq(assetTable.name, name),
+        ...(identity === undefined
+          ? []
+          : [
+              eq(assetTable.filename, identity.filename),
+              identity.description === null
+                ? isNull(assetTable.description)
+                : eq(assetTable.description, identity.description),
+              identity.folderId === null
+                ? isNull(assetTable.folderId)
+                : eq(assetTable.folderId, identity.folderId),
+            ])
+      )
+    )
+    .orderBy(asc(assetTable.id))
+    .limit(1)
+    .catch((error) => {
+      throw toDbError(error);
+    });
+  return rows[0];
 };
 
 const getContentDeduplicationExtension = (filename: string) =>
@@ -141,16 +174,20 @@ const findFileByContent = async ({
   filename: string;
   context: AppContext;
 }) => {
-  const files = await context.postgrest.client
-    .from("File")
-    .select("*")
-    .eq("uploaderProjectId", projectId)
-    .eq("contentHash", contentHash);
-  if (files.error) {
-    throw new Error(files.error.message);
-  }
+  const files = await context.db
+    .select()
+    .from(fileTable)
+    .where(
+      and(
+        eq(fileTable.uploaderProjectId, projectId),
+        eq(fileTable.contentHash, contentHash)
+      )
+    )
+    .catch((error) => {
+      throw toDbError(error);
+    });
   const extension = getContentDeduplicationExtension(filename);
-  return files.data?.find(
+  return files.find(
     (file) => getContentDeduplicationExtension(file.name) === extension
   );
 };
@@ -208,19 +245,23 @@ const findContentHashUploadTicket = async ({
       if (fontMetaIssues !== undefined) {
         // Keep existing references, but free the unique content hash so a new
         // upload can parse valid metadata instead of reusing the broken file.
-        const excludedFile = await context.postgrest.client
-          .from("File")
-          .update({ contentHash: null })
-          .eq("name", file.name)
-          .eq("uploaderProjectId", projectId)
-          .eq("contentHash", contentHash)
-          .eq("status", "UPLOADED")
-          .eq("format", file.format)
-          .eq("meta", file.meta)
-          .select("name")
-          .maybeSingle();
-        assertPostgrestSuccess(excludedFile);
-        if (excludedFile.data === null) {
+        const excludedFile = maybeOne(
+          await context.db
+            .update(fileTable)
+            .set({ contentHash: null })
+            .where(
+              and(
+                eq(fileTable.name, file.name),
+                eq(fileTable.uploaderProjectId, projectId),
+                eq(fileTable.contentHash, contentHash),
+                eq(fileTable.status, "UPLOADED"),
+                eq(fileTable.format, file.format),
+                eq(fileTable.meta, file.meta)
+              )
+            )
+            .returning({ name: fileTable.name })
+        );
+        if (excludedFile === null) {
           // Another request changed the file; reconsider its current metadata.
           continue;
         }
@@ -228,10 +269,14 @@ const findContentHashUploadTicket = async ({
       }
       if (existingAsset === undefined) {
         await assertAssetCapacity(projectId, context);
-        const insertedAsset = await context.postgrest.client
-          .from("Asset")
-          .insert({ ...asset, name: file.name });
-        if (insertedAsset.error?.code === "23505") {
+        try {
+          await context.db
+            .insert(assetTable)
+            .values({ ...asset, name: file.name });
+        } catch (error) {
+          if (isUniqueViolation(error) === false) {
+            throw error;
+          }
           const concurrentAsset = await findAsset({
             projectId,
             name: file.name,
@@ -242,17 +287,18 @@ const findContentHashUploadTicket = async ({
             throw new Error("Concurrent deduplicated asset is missing.");
           }
           asset = concurrentAsset;
-        } else {
-          assertPostgrestSuccess(insertedAsset);
         }
       }
       if (file.isDeleted) {
-        const restoredFile = await context.postgrest.client
-          .from("File")
-          .update({ isDeleted: false })
-          .eq("name", file.name)
-          .eq("uploaderProjectId", projectId);
-        assertPostgrestSuccess(restoredFile);
+        await context.db
+          .update(fileTable)
+          .set({ isDeleted: false })
+          .where(
+            and(
+              eq(fileTable.name, file.name),
+              eq(fileTable.uploaderProjectId, projectId)
+            )
+          );
       }
       return {
         assetId: asset.id,
@@ -265,17 +311,15 @@ const findContentHashUploadTicket = async ({
       new Date(file.createdAt).getTime() <
       Date.now() - UPLOADING_STALE_TIMEOUT
     ) {
-      const deletedAsset = await context.postgrest.client
-        .from("Asset")
-        .delete()
-        .eq("projectId", projectId)
-        .eq("name", file.name);
-      assertPostgrestSuccess(deletedAsset);
-      const deletedFile = await context.postgrest.client
-        .from("File")
-        .delete()
-        .eq("name", file.name);
-      assertPostgrestSuccess(deletedFile);
+      await context.db
+        .delete(assetTable)
+        .where(
+          and(
+            eq(assetTable.projectId, projectId),
+            eq(assetTable.name, file.name)
+          )
+        );
+      await context.db.delete(fileTable).where(eq(fileTable.name, file.name));
       return;
     }
     await new Promise((resolve) =>
@@ -301,8 +345,8 @@ const cleanupUploadError = async (
     await onUploadError(name, context);
     return;
   }
-  await context.postgrest.client.from("Asset").delete().eq("name", name);
-  await context.postgrest.client.from("File").delete().eq("name", name);
+  await context.db.delete(assetTable).where(eq(assetTable.name, name));
+  await context.db.delete(fileTable).where(eq(fileTable.name, name));
 };
 
 export const createUploadTicket = async (
@@ -348,8 +392,7 @@ export const createUploadTicket = async (
    * - it's possible to create more assets than maxAssetsPerProject,
    *   but for now we assume that the time since the `count` query above and the `create` query below is negligible,
    *   and some kind of rate limiting exists on API.
-   * Also no locking exists in Prisma, and no raw query locking like
-   * "SELECT id FROM "Project" where id=? FOR UPDATE;" is shareable between sqlite and postgres.
+   * No row lock is taken for this.
    **/
   for (
     let attempt = 1;
@@ -359,17 +402,18 @@ export const createUploadTicket = async (
     const assetId = createId();
     const name = createUniqueAssetFilename(sanitizedFilename);
 
-    const fileInsert = await context.postgrest.client.from("File").insert({
-      name,
-      status: "UPLOADING",
-      // store content type in related field
-      format: type,
-      size: 0,
-      uploaderProjectId: projectId,
-      contentHash,
-    });
-    if (fileInsert.error) {
-      if (fileInsert.error.code === "23505" && contentHash !== undefined) {
+    try {
+      await context.db.insert(fileTable).values({
+        name,
+        status: "UPLOADING",
+        // store content type in related field
+        format: type,
+        size: 0,
+        uploaderProjectId: projectId,
+        contentHash,
+      });
+    } catch (error) {
+      if (isUniqueViolation(error) && contentHash !== undefined) {
         const existing = await findContentHashUploadTicket({
           data: { ...data, contentHash },
           context,
@@ -378,26 +422,24 @@ export const createUploadTicket = async (
           return existing;
         }
       }
-      throw new Error(fileInsert.error.message);
+      throw toDbError(error);
     }
 
-    const assetInsert = await context.postgrest.client.from("Asset").insert({
-      id: assetId,
-      projectId,
-      name,
-      filename: displayFilename,
-      description,
-      folderId,
-    });
-    if (assetInsert.error) {
-      await context.postgrest.client.from("File").delete().eq("name", name);
-      if (
-        assetInsert.error.code === "23505" &&
-        attempt < maxCreateUploadTicketAttempts
-      ) {
+    try {
+      await context.db.insert(assetTable).values({
+        id: assetId,
+        projectId,
+        name,
+        filename: displayFilename,
+        description,
+        folderId,
+      });
+    } catch (error) {
+      await context.db.delete(fileTable).where(eq(fileTable.name, name));
+      if (isUniqueViolation(error) && attempt < maxCreateUploadTicketAttempts) {
         continue;
       }
-      throw new Error(assetInsert.error.message);
+      throw toDbError(error);
     }
 
     return { assetId, name, deduplicated: false };
@@ -415,22 +457,26 @@ export const uploadFileData = async (
   assetDataOverride?: AssetDataOverride,
   onUploadError?: UploadErrorCleanup
 ): Promise<Database["public"]["Tables"]["File"]["Row"]> => {
-  let file = await context.postgrest.client
-    .from("File")
-    .select("*")
-    .eq("name", name)
-    .eq("status", "UPLOADING")
-    .gt(
-      "updatedAt",
-      new Date(Date.now() - UPLOADING_STALE_TIMEOUT).toISOString()
-    )
-    .single();
-  if (file.data === null) {
+  const pending = await context.db
+    .select()
+    .from(fileTable)
+    .where(
+      and(
+        eq(fileTable.name, name),
+        eq(fileTable.status, "UPLOADING"),
+        gt(
+          fileTable.updatedAt,
+          new Date(Date.now() - UPLOADING_STALE_TIMEOUT).toISOString()
+        )
+      )
+    );
+  if (pending.length !== 1) {
     throw Error("File already uploaded or url is expired");
   }
+  const pendingFile = pending[0];
 
   try {
-    const expectedContentHash = file.data.contentHash ?? undefined;
+    const expectedContentHash = pendingFile.contentHash ?? undefined;
     const contentHasher =
       expectedContentHash === undefined ? undefined : createHash("sha256");
     const uploadData = async function* () {
@@ -449,27 +495,26 @@ export const uploadFileData = async (
     };
     const assetData = await client.uploadFile(
       name,
-      file.data.format,
+      pendingFile.format,
       uploadData(),
       assetInfoFallback,
       assetDataOverride
     );
     const { meta, format, size } = assetData;
-    file = await context.postgrest.client
-      .from("File")
-      .update({
+    const [uploaded] = await context.db
+      .update(fileTable)
+      .set({
         size,
         format,
         meta: JSON.stringify(meta),
         status: "UPLOADED",
       })
-      .eq("name", name)
-      .select()
-      .single();
-    if (file.data === null) {
+      .where(eq(fileTable.name, name))
+      .returning();
+    if (uploaded === undefined) {
       throw Error("File not found");
     }
-    return file.data;
+    return uploaded;
   } catch (error) {
     await cleanupUploadError(name, context, onUploadError);
     throw error;
@@ -489,16 +534,14 @@ export const getUploadedAsset = async ({
 }): Promise<Asset> => {
   let file = providedFile;
   if (file === undefined) {
-    const result = await context.postgrest.client
-      .from("File")
-      .select("*")
-      .eq("name", name)
-      .eq("status", "UPLOADED")
-      .single();
-    if (result.error || result.data === null) {
-      throw new Error(result.error?.message ?? "File not found");
+    const files = await context.db
+      .select()
+      .from(fileTable)
+      .where(and(eq(fileTable.name, name), eq(fileTable.status, "UPLOADED")));
+    if (files.length !== 1) {
+      throw new Error("File not found");
     }
-    file = result.data;
+    file = files[0];
   }
   const asset = await findAsset({ projectId, name, context });
   if (asset === undefined) {

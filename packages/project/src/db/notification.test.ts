@@ -1,11 +1,12 @@
 import { describe, test, expect } from "vitest";
 import {
-  createTestServer,
-  db,
-  json,
-  empty,
-  testContext,
-} from "@webstudio-is/postgrest/testing";
+  domain,
+  eq,
+  notification,
+  project,
+  projectDomain,
+} from "@webstudio-is/db";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { defaultPlanFeatures } from "@webstudio-is/plans";
 import { accept, __testing__ } from "./notification";
@@ -97,11 +98,10 @@ describe("describeNotification", () => {
 });
 
 // ---------------------------------------------------------------------------
-// accept() — domain guard (MSW integration)
-// Verifies the correct table and filter are used in the ProjectDomain query.
+// accept() — domain guard
 // ---------------------------------------------------------------------------
 
-const server = createTestServer();
+const db = setupTestDb();
 
 const makeAcceptCtx = (
   planOverrides: Partial<typeof defaultPlanFeatures> = {}
@@ -114,7 +114,7 @@ const makeAcceptCtx = (
     domain: {},
     deployment: {},
     entri: {},
-    ...testContext,
+    db,
     createTokenContext: () => {},
     getOwnerPlanFeatures: async () => ({
       ...defaultPlanFeatures,
@@ -122,69 +122,82 @@ const makeAcceptCtx = (
     }),
   }) as unknown as AppContext;
 
-const notificationRow = {
-  id: "notif-1",
-  type: "projectTransfer",
-  status: "pending",
-  senderId: "sender-1",
-  recipientId: "recipient-1",
-  createdAt: new Date(Date.now() - 1000).toISOString(),
-  respondedAt: null,
-  payload: { projectId: "proj-1" },
+const notificationId = "00000000-0000-4000-8000-000000000001";
+
+/** proj-1 owned by sender-1, with a pending transfer to recipient-1. */
+const seedTransfer = async ({ withDomain }: { withDomain: boolean }) => {
+  await seed.user(db, { id: "recipient-1" });
+  await seed.workspace(db, {
+    id: "00000000-0000-4000-8000-0000000000a1",
+    userId: "recipient-1",
+    isDefault: true,
+  });
+  await seed.project(db, { id: "proj-1", userId: "sender-1" });
+  if (withDomain) {
+    await db.insert(domain).values({ id: "domain-1", domain: "example.com" });
+    await db.insert(projectDomain).values({
+      projectId: "proj-1",
+      domainId: "domain-1",
+      txtRecord: "txt",
+      cname: "cname",
+    });
+  }
+  await db.insert(notification).values({
+    id: notificationId,
+    type: "projectTransfer",
+    status: "pending",
+    senderId: "sender-1",
+    recipientId: "recipient-1",
+    createdAt: new Date(Date.now() - 1000).toISOString(),
+    payload: { projectId: "proj-1" },
+  });
 };
 
-/** Handlers shared by all accept() tests: notification load + claim */
-const baseHandlers = [
-  db.get("Notification", () => json(notificationRow)),
-  db.patch("Notification", () => json({ id: "notif-1" })),
-  // existence check — project exists, sender owns it
-  db.get("Project", () => json({ id: "proj-1", userId: "sender-1" })),
-  // receiver's project count — 0 projects owned
-  db.head("Project", () => empty({ headers: { "Content-Range": "*/0" } })),
-];
+const readNotificationStatus = async () =>
+  (
+    await db
+      .select({ status: notification.status })
+      .from(notification)
+      .where(eq(notification.id, notificationId))
+  )[0]?.status;
 
-describe("accept — domain guard (msw)", () => {
+describe("accept — domain guard", () => {
   test("throws when free receiver tries to accept a project with a custom domain", async () => {
-    server.use(
-      ...baseHandlers,
-      // ProjectDomain count — 1 domain attached
-      db.head("ProjectDomain", ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.get("projectId")).toBe("eq.proj-1");
-        return empty({ headers: { "Content-Range": "*/1" } });
-      })
-    );
+    await seedTransfer({ withDomain: true });
 
     const ctx = makeAcceptCtx({
       maxDomainsAllowedPerUser: 0,
       maxProjectsAllowedPerUser: 100,
     });
 
-    await expect(accept({ notificationId: "notif-1" }, ctx)).rejects.toThrow(
+    await expect(accept({ notificationId }, ctx)).rejects.toThrow(
       "custom domains attached"
     );
+    // The claim is reverted so the receiver can retry after upgrading.
+    expect(await readNotificationStatus()).toBe("pending");
   });
 
   test("succeeds when free receiver accepts a project with no custom domains", async () => {
-    server.use(
-      ...baseHandlers,
-      // ProjectDomain count — 0 domains
-      db.head("ProjectDomain", () =>
-        empty({ headers: { "Content-Range": "*/0" } })
-      ),
-      // default workspace lookup
-      db.get("Workspace", () => json({ id: "ws-1" })),
-      // project reassign
-      db.patch("Project", () => json({ id: "proj-1" }))
-    );
+    await seedTransfer({ withDomain: false });
 
     const ctx = makeAcceptCtx({
       maxDomainsAllowedPerUser: 0,
       maxProjectsAllowedPerUser: 100,
     });
 
-    await expect(
-      accept({ notificationId: "notif-1" }, ctx)
-    ).resolves.toBeUndefined();
+    await expect(accept({ notificationId }, ctx)).resolves.toBeUndefined();
+    expect(await readNotificationStatus()).toBe("accepted");
+    // The project moves to the receiver's default workspace.
+    expect(
+      await db
+        .select({ userId: project.userId, workspaceId: project.workspaceId })
+        .from(project)
+        .where(eq(project.id, "proj-1"))
+    ).toEqual([
+      {
+        userId: "recipient-1",
+        workspaceId: "00000000-0000-4000-8000-0000000000a1",
+      },
+    ]);
   });
 });

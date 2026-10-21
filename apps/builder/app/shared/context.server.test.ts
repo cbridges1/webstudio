@@ -2,8 +2,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const env = vi.hoisted(() => ({
   TRPC_SERVER_API_TOKEN: undefined as string | undefined,
-  POSTGREST_URL: "http://localhost:3000",
-  POSTGREST_API_KEY: "",
+  DATABASE_URL: "postgresql://localhost:5432/webstudio",
   PUBLISHER_HOST: "wstd.work",
 }));
 
@@ -52,8 +51,9 @@ vi.mock("@webstudio-is/plans/index.server", () => ({
   getPlanInfo: vi.fn(),
 }));
 
-vi.mock("@webstudio-is/postgrest/index.server", () => ({
-  createClient: vi.fn(),
+vi.mock("@webstudio-is/db", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@webstudio-is/db")>()),
+  getDb: vi.fn(),
 }));
 
 vi.mock("~/services/session.server", () => ({

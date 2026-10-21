@@ -1,11 +1,9 @@
+import { and, eq, one, project } from "@webstudio-is/db";
 import type { PlanFeatures } from "@webstudio-is/plans";
 import type { AppContext } from "./context.server";
 
-type ProjectOwnerContext = Pick<AppContext, "postgrest">;
-type ProjectPlanContext = Pick<
-  AppContext,
-  "postgrest" | "getOwnerPlanFeatures"
->;
+type ProjectOwnerContext = Pick<AppContext, "db">;
+type ProjectPlanContext = Pick<AppContext, "db" | "getOwnerPlanFeatures">;
 type OwnerPlanContext = Pick<AppContext, "getOwnerPlanFeatures">;
 
 const projectOwnerIdCache = new WeakMap<object, Map<string, Promise<string>>>();
@@ -30,22 +28,19 @@ const getCachedProjectOwnerId = (
   }
 
   promise = (async () => {
-    const projectResult = await context.postgrest.client
-      .from("Project")
-      .select("userId")
-      .eq("id", projectId)
-      .eq("isDeleted", false)
-      .single();
+    const { userId } = one(
+      await context.db
+        .select({ userId: project.userId })
+        .from(project)
+        .where(and(eq(project.id, projectId), eq(project.isDeleted, false))),
+      "Project"
+    );
 
-    if (projectResult.error) {
-      throw projectResult.error;
-    }
-
-    if (projectResult.data.userId === null) {
+    if (userId === null) {
       throw new Error("Project must have project userId defined");
     }
 
-    return projectResult.data.userId;
+    return userId;
   })();
 
   promise.catch(() => {

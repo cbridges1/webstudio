@@ -24,5 +24,5 @@ export const deleteAssets = async (
     );
   }
 
-  await deleteAssetsWithClient(props, context.postgrest.client);
+  await deleteAssetsWithClient(props, context.db);
 };

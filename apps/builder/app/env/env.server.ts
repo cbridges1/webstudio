@@ -3,6 +3,10 @@ import { z } from "zod";
 const environment = z.object({
   // Authentication
   DEV_LOGIN: z.string().optional(),
+  // selfhost: username/password sign-in (Better Auth)
+  AUTH_USERNAME_LOGIN: z.string().optional(),
+  BETTER_AUTH_SECRET: z.string().optional(),
+  BETTER_AUTH_URL: z.string().url().optional(),
   GH_CLIENT_ID: z.string().optional(),
   GH_CLIENT_SECRET: z.string().optional(),
   GITHUB_ISSUE_REPORT_APP_ID: z.string().optional(),
@@ -66,8 +70,7 @@ const environment = z.object({
       }
     }, "PLANS must be valid JSON"),
 
-  POSTGREST_URL: z.string().url().default("http://localhost:3000"),
-  POSTGREST_API_KEY: z.string().default(""),
+  DATABASE_URL: z.string().default("postgresql://localhost:5432/webstudio"),
 
   // Payment worker configuration
   PAYMENT_WORKER_URL: z.string().optional(),
@@ -85,6 +88,9 @@ const environment = z.object({
 
 const rawEnv = {
   DEV_LOGIN: process.env.DEV_LOGIN,
+  AUTH_USERNAME_LOGIN: process.env.AUTH_USERNAME_LOGIN,
+  BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
+  BETTER_AUTH_URL: process.env.BETTER_AUTH_URL,
   GH_CLIENT_ID: process.env.GH_CLIENT_ID,
   GH_CLIENT_SECRET: process.env.GH_CLIENT_SECRET,
   GITHUB_ISSUE_REPORT_APP_ID: process.env.GITHUB_ISSUE_REPORT_APP_ID,
@@ -112,8 +118,7 @@ const rawEnv = {
   STAGING_PASSWORD: process.env.STAGING_PASSWORD,
   FEATURE_FLAGS: process.env.FEATURE_FLAGS,
   PLANS: process.env.PLANS,
-  POSTGREST_URL: process.env.POSTGREST_URL,
-  POSTGREST_API_KEY: process.env.POSTGREST_API_KEY,
+  DATABASE_URL: process.env.DATABASE_URL,
   PAYMENT_WORKER_URL: process.env.PAYMENT_WORKER_URL,
   PAYMENT_WORKER_TOKEN: process.env.PAYMENT_WORKER_TOKEN,
   AUTH_WS_CLIENT_ID: process.env.AUTH_WS_CLIENT_ID,
@@ -145,6 +150,27 @@ if (
 ) {
   throw new Error(
     "AUTH_WS_CLIENT_ID and AUTH_WS_CLIENT_SECRET must be set in production"
+  );
+}
+
+// selfhost: dev login signs anyone in with AUTH_SECRET; never allow it in production.
+if (
+  env.DEV_LOGIN === "true" &&
+  (process.env.NODE_ENV === "production" ||
+    env.DEPLOYMENT_ENVIRONMENT === "production")
+) {
+  throw new Error("DEV_LOGIN must not be enabled in production");
+}
+
+// selfhost: Better Auth signs its tokens with BETTER_AUTH_SECRET.
+if (
+  env.AUTH_USERNAME_LOGIN === "true" &&
+  (process.env.NODE_ENV === "production" ||
+    env.DEPLOYMENT_ENVIRONMENT === "production") &&
+  (env.BETTER_AUTH_SECRET === undefined || env.BETTER_AUTH_SECRET.length < 32)
+) {
+  throw new Error(
+    "BETTER_AUTH_SECRET (32+ characters) must be set to use username sign-in in production"
   );
 }
 

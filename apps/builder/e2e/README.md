@@ -1,8 +1,8 @@
 # Builder E2E tests
 
 Builder E2E workflows run with Playwright Test. The Playwright setup project
-waits for PostgREST, resets the disposable database, and warms the login route
-before Chromium runs the selected tests.
+waits for the database, resets the disposable database, and warms the login
+route before Chromium runs the selected tests.
 
 ## Run the suite
 
@@ -20,13 +20,8 @@ explicitly with:
 pnpm e2e:builder:refresh-schema-cache
 ```
 
-The regular E2E suite uses lightweight PostgreSQL containers. Verify that the
-complete migration chain also applies to the pinned Supabase PostgreSQL image
-with:
-
-```sh
-pnpm e2e:builder:check-supabase-migrations
-```
+The E2E suite uses stock PostgreSQL containers and applies the Drizzle
+migrations in `packages/db/drizzle`.
 
 Pass normal Playwright Test arguments after `--`. For example:
 
@@ -65,9 +60,9 @@ pnpm e2e:builder:dev -- --grep "Builder can copy, duplicate, and delete a page"
 ```
 
 `pnpm e2e:builder:dev` defaults to
-`E2E_BUILDER_URL=https://127.0.0.1:3000`. Override it when the development
-server uses another port. Chromium maps `wstd.dev` and its project subdomains
-to loopback for local Builder URLs, so host-file changes are unnecessary.
+`E2E_BUILDER_URL=http://localhost:3000`. Override it when the development
+server uses another port. Project builders run on `p-<projectId>.localhost`,
+which Chromium resolves to loopback, so host-file changes are unnecessary.
 
 The development backend uses `E2E_DB_BOOTSTRAP=if-empty` and keeps Docker
 containers running. The Playwright setup project still resets test data before
@@ -106,7 +101,7 @@ setup data and the tests do not depend on each other's mutations.
 
 ## Backend organization
 
-Development, E2E, schema-cache, and Supabase compatibility commands share the
+Development, E2E, and schema-cache commands share the
 backend definition in `apps/builder/backend`. `compose.yaml` defines the common
 services, and `compose.<mode>.yaml` defines only the differences for a named
 mode. Backend commands resolve these files by convention; callers do not pass

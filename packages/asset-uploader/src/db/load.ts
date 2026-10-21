@@ -48,10 +48,7 @@ export const loadAssetFoldersByProject = async (
   { skipPermissionsCheck = false }: LoadAssetOptions = {}
 ): Promise<AssetFolder[]> => {
   await assertAssetReadPermission(projectId, context, skipPermissionsCheck);
-  return loadAssetFoldersByProjectWithClient(
-    projectId,
-    context.postgrest.client
-  );
+  return loadAssetFoldersByProjectWithClient(projectId, context.db);
 };
 
 export const loadAssetDataByProject = async (
@@ -61,8 +58,8 @@ export const loadAssetDataByProject = async (
 ) => {
   await assertAssetReadPermission(projectId, context, skipPermissionsCheck);
   const [assets, assetFolders] = await Promise.all([
-    loadAssetsByProjectWithClient(projectId, context.postgrest.client),
-    loadAssetFoldersByProjectWithClient(projectId, context.postgrest.client),
+    loadAssetsByProjectWithClient(projectId, context.db),
+    loadAssetFoldersByProjectWithClient(projectId, context.db),
   ]);
   const normalized = normalizeAssetFolderData({
     assets,

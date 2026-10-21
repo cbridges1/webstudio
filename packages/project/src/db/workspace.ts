@@ -1,4 +1,20 @@
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  maybeOne,
+  notification,
+  one,
+  project,
+  user,
+  workspace as workspaceTable,
+  workspaceMember,
+  type Database,
+} from "@webstudio-is/db";
 import { createId } from "@webstudio-is/sdk";
 import {
   type AppContext,
@@ -30,6 +46,16 @@ export type WorkspaceWithRelation = Workspace & {
   isDowngraded: boolean;
 };
 
+const activeMembership = (workspaceId: string, userId: string) =>
+  and(
+    eq(workspaceMember.workspaceId, workspaceId),
+    eq(workspaceMember.userId, userId),
+    isNull(workspaceMember.removedAt)
+  );
+
+const liveWorkspace = (workspaceId: string) =>
+  and(eq(workspaceTable.id, workspaceId), eq(workspaceTable.isDeleted, false));
+
 const assertUser = (context: AppContext) => {
   if (context.authorization.type !== "user") {
     throw new AuthorizationError("Only logged in users can manage workspaces");
@@ -49,38 +75,28 @@ export const create = async (
   }
 
   // Count existing workspaces owned by the user
-  const countResult = await context.postgrest.client
-    .from("Workspace")
-    .select("id", { count: "exact", head: true })
-    .eq("userId", userId)
-    .eq("isDeleted", false);
+  const workspaceCount = await context.db.$count(
+    workspaceTable,
+    and(eq(workspaceTable.userId, userId), eq(workspaceTable.isDeleted, false))
+  );
 
-  if (countResult.error) {
-    throw countResult.error;
-  }
-
-  if ((countResult.count ?? 0) >= maxWorkspaces) {
+  if (workspaceCount >= maxWorkspaces) {
     throw new Error(
       `You have reached the maximum number of workspaces (${maxWorkspaces}).`
     );
   }
 
-  const result = await context.postgrest.client
-    .from("Workspace")
-    .insert({
-      id: createId(),
-      name: trimmed,
-      isDefault: false,
-      userId,
-    })
-    .select()
-    .single();
-
-  if (result.error) {
-    throw result.error;
-  }
-
-  return result.data;
+  return one(
+    await context.db
+      .insert(workspaceTable)
+      .values({
+        id: createId(),
+        name: trimmed,
+        isDefault: false,
+        userId,
+      })
+      .returning()
+  );
 };
 
 export const rename = async (
@@ -94,20 +110,14 @@ export const rename = async (
     throw new Error("Workspace name must be at least 2 characters");
   }
 
-  const result = await context.postgrest.client
-    .from("Workspace")
-    .update({ name: trimmed })
-    .eq("id", workspaceId)
-    .eq("userId", userId)
-    .eq("isDeleted", false)
-    .select()
-    .single();
-
-  if (result.error) {
-    throw result.error;
-  }
-
-  return result.data;
+  return one(
+    await context.db
+      .update(workspaceTable)
+      .set({ name: trimmed })
+      .where(and(liveWorkspace(workspaceId), eq(workspaceTable.userId, userId)))
+      .returning(),
+    "Workspace"
+  );
 };
 
 export const remove = async (
@@ -120,41 +130,39 @@ export const remove = async (
   const userId = assertUser(context);
 
   // Load the workspace to check ownership and isDefault
-  const workspace = await context.postgrest.client
-    .from("Workspace")
-    .select("id, isDefault, userId")
-    .eq("id", workspaceId)
-    .eq("isDeleted", false)
-    .single();
+  const workspace = one(
+    await context.db
+      .select({
+        id: workspaceTable.id,
+        isDefault: workspaceTable.isDefault,
+        userId: workspaceTable.userId,
+      })
+      .from(workspaceTable)
+      .where(liveWorkspace(workspaceId)),
+    "Workspace"
+  );
 
-  if (workspace.error) {
-    throw workspace.error;
-  }
-
-  if (workspace.data.userId !== userId) {
+  if (workspace.userId !== userId) {
     throw new AuthorizationError(
       "Only the workspace owner can delete a workspace"
     );
   }
 
-  if (workspace.data.isDefault) {
+  if (workspace.isDefault) {
     throw new Error("The default workspace cannot be deleted");
   }
 
   // Check for active projects BEFORE soft-deleting to avoid
   // leaving the workspace in a deleted state on error.
-  const projects = await context.postgrest.client
-    .from("Project")
-    .select("id")
-    .eq("workspaceId", workspaceId)
-    .eq("isDeleted", false);
-
-  if (projects.error) {
-    throw projects.error;
-  }
+  const projects = await context.db
+    .select({ id: project.id })
+    .from(project)
+    .where(
+      and(eq(project.workspaceId, workspaceId), eq(project.isDeleted, false))
+    );
 
   // Collect project IDs upfront so concurrent changes can't alter the set.
-  const projectIds = projects.data.map((p) => p.id);
+  const projectIds = projects.map((p) => p.id);
 
   if (projectIds.length > 0 && deleteProjects !== true) {
     throw new Error(
@@ -173,50 +181,46 @@ export const remove = async (
 
   // Soft-delete the workspace last — single atomic update makes it
   // immediately invisible everywhere.
-  const result = await context.postgrest.client
-    .from("Workspace")
-    .update({ isDeleted: true })
-    .eq("id", workspaceId)
-    .eq("userId", userId);
-
-  if (result.error) {
-    throw result.error;
-  }
+  await context.db
+    .update(workspaceTable)
+    .set({ isDeleted: true })
+    .where(
+      and(eq(workspaceTable.id, workspaceId), eq(workspaceTable.userId, userId))
+    );
 };
 
 export const findMany = async (userId: string, context: AppContext) => {
   assertUser(context);
 
   // Workspaces owned by the user
-  const owned = await context.postgrest.client
-    .from("Workspace")
+  const owned = await context.db
     .select()
-    .eq("userId", userId)
-    .eq("isDeleted", false)
-    .order("isDefault", { ascending: false })
-    .order("createdAt");
-
-  if (owned.error) {
-    throw owned.error;
-  }
+    .from(workspaceTable)
+    .where(
+      and(
+        eq(workspaceTable.userId, userId),
+        eq(workspaceTable.isDeleted, false)
+      )
+    )
+    .orderBy(desc(workspaceTable.isDefault), asc(workspaceTable.createdAt));
 
   // Workspaces where the user is a member (not owner)
-  const memberships = await context.postgrest.client
-    .from("WorkspaceMember")
-    .select("workspaceId, relation")
-    .eq("userId", userId)
-    .is("removedAt", null);
+  const memberships = await context.db
+    .select({
+      workspaceId: workspaceMember.workspaceId,
+      relation: workspaceMember.relation,
+    })
+    .from(workspaceMember)
+    .where(
+      and(eq(workspaceMember.userId, userId), isNull(workspaceMember.removedAt))
+    );
 
-  if (memberships.error) {
-    throw memberships.error;
-  }
-
-  const memberWorkspaceIds = memberships.data.map((m) => m.workspaceId);
+  const memberWorkspaceIds = memberships.map((m) => m.workspaceId);
   const relationByWorkspaceId = new Map(
-    memberships.data.map((m) => [m.workspaceId, m.relation as Role])
+    memberships.map((m) => [m.workspaceId, m.relation as Role])
   );
 
-  const ownedWithRelation: WorkspaceWithRelation[] = owned.data.map((w) => ({
+  const ownedWithRelation: WorkspaceWithRelation[] = owned.map((w) => ({
     ...w,
     role: "own" as const,
     isDowngraded: false,
@@ -226,22 +230,22 @@ export const findMany = async (userId: string, context: AppContext) => {
     return ownedWithRelation;
   }
 
-  const memberOf = await context.postgrest.client
-    .from("Workspace")
+  const memberOf = await context.db
     .select()
-    .in("id", memberWorkspaceIds)
-    .eq("isDeleted", false)
-    .order("createdAt");
-
-  if (memberOf.error) {
-    throw memberOf.error;
-  }
+    .from(workspaceTable)
+    .where(
+      and(
+        inArray(workspaceTable.id, memberWorkspaceIds),
+        eq(workspaceTable.isDeleted, false)
+      )
+    )
+    .orderBy(asc(workspaceTable.createdAt));
 
   // For member workspaces, check whether the owner still grants workspace access.
   // Two conditions downgrade: plan no longer includes workspaces
   // (`maxWorkspaces <= 1`), or owner has more members than paid seats
   // (`actualMembers > paidSeats`). Collect unique owner IDs and batch-check.
-  const ownerIds = [...new Set(memberOf.data.map((w) => w.userId))];
+  const ownerIds = [...new Set(memberOf.map((w) => w.userId))];
   const downgradedOwners = new Set<string>();
 
   if (ownerIds.length > 0) {
@@ -271,39 +275,37 @@ export const findMany = async (userId: string, context: AppContext) => {
     }
   }
 
-  const memberWithRelation: WorkspaceWithRelation[] = memberOf.data.map(
-    (w) => ({
-      ...w,
-      role: relationByWorkspaceId.get(w.id) ?? defaultRole,
-      isDowngraded: downgradedOwners.has(w.userId),
-    })
-  );
+  const memberWithRelation: WorkspaceWithRelation[] = memberOf.map((w) => ({
+    ...w,
+    role: relationByWorkspaceId.get(w.id) ?? defaultRole,
+    isDowngraded: downgradedOwners.has(w.userId),
+  }));
 
   // Owned workspaces first (default on top), then member workspaces
   return [...ownedWithRelation, ...memberWithRelation];
 };
+
+const loadWorkspaceOwner = async (workspaceId: string, context: AppContext) =>
+  one(
+    await context.db
+      .select({ id: workspaceTable.id, userId: workspaceTable.userId })
+      .from(workspaceTable)
+      .where(liveWorkspace(workspaceId)),
+    "Workspace"
+  );
 
 const assertWorkspaceOwnerByUserId = async (
   workspaceId: string,
   userId: string,
   context: AppContext
 ) => {
-  const workspace = await context.postgrest.client
-    .from("Workspace")
-    .select("id, userId")
-    .eq("id", workspaceId)
-    .eq("isDeleted", false)
-    .single();
+  const workspace = await loadWorkspaceOwner(workspaceId, context);
 
-  if (workspace.error) {
-    throw workspace.error;
-  }
-
-  if (workspace.data.userId !== userId) {
+  if (workspace.userId !== userId) {
     throw new AuthorizationError("Only the workspace owner can manage members");
   }
 
-  return workspace.data;
+  return workspace;
 };
 
 export const assertWorkspaceOwner = async (
@@ -335,50 +337,67 @@ export const countAllMembers = async (
   userId: string,
   context: AppContext
 ): Promise<number> => {
-  const workspaces = await context.postgrest.client
-    .from("Workspace")
-    .select("id")
-    .eq("userId", userId)
-    .eq("isDeleted", false);
+  const workspaces = await context.db
+    .select({ id: workspaceTable.id })
+    .from(workspaceTable)
+    .where(
+      and(
+        eq(workspaceTable.userId, userId),
+        eq(workspaceTable.isDeleted, false)
+      )
+    );
 
-  if (workspaces.error) {
-    throw workspaces.error;
-  }
-
-  if (workspaces.data.length === 0) {
+  if (workspaces.length === 0) {
     return 0;
   }
 
-  const workspaceIds = workspaces.data.map((w) => w.id);
+  const workspaceIds = workspaces.map((w) => w.id);
 
-  const [membersResult, pendingResult] = await Promise.all([
+  const [members, pendingCount] = await Promise.all([
     // Fetch all userIds so we can deduplicate — the same person may be a
     // member of several of the owner's workspaces but counts as one seat.
-    context.postgrest.client
-      .from("WorkspaceMember")
-      .select("userId")
-      .in("workspaceId", workspaceIds)
-      .is("removedAt", null),
-    context.postgrest.client
-      .from("Notification")
-      .select("id", { count: "exact", head: true })
-      .eq("type", "workspaceInvite")
-      .eq("senderId", userId)
-      .eq("status", "pending"),
+    context.db
+      .select({ userId: workspaceMember.userId })
+      .from(workspaceMember)
+      .where(
+        and(
+          inArray(workspaceMember.workspaceId, workspaceIds),
+          isNull(workspaceMember.removedAt)
+        )
+      ),
+    context.db.$count(
+      notification,
+      and(
+        eq(notification.type, "workspaceInvite"),
+        eq(notification.senderId, userId),
+        eq(notification.status, "pending")
+      )
+    ),
   ]);
 
-  if (membersResult.error) {
-    throw membersResult.error;
-  }
-  if (pendingResult.error) {
-    throw pendingResult.error;
-  }
-
-  const uniqueMembers = new Set(
-    (membersResult.data ?? []).map((row) => row.userId)
-  );
-  return uniqueMembers.size + (pendingResult.count ?? 0);
+  const uniqueMembers = new Set(members.map((row) => row.userId));
+  return uniqueMembers.size + pendingCount;
 };
+
+const findUserIdByEmail = async (email: string, context: AppContext) =>
+  maybeOne(
+    await context.db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.email, email))
+  );
+
+const findActiveMember = async (
+  workspaceId: string,
+  userId: string,
+  context: AppContext
+) =>
+  maybeOne(
+    await context.db
+      .select({ relation: workspaceMember.relation })
+      .from(workspaceMember)
+      .where(activeMembership(workspaceId, userId))
+  );
 
 export const addMember = async (
   {
@@ -392,42 +411,24 @@ export const addMember = async (
   await assertWorkspaceOwnerByUserId(workspaceId, userId, context);
 
   // Look up the user by email
-  const user = await context.postgrest.client
-    .from("User")
-    .select("id, email, username")
-    .eq("email", email)
-    .maybeSingle();
+  const invitee = await findUserIdByEmail(email, context);
 
-  if (user.error) {
-    throw user.error;
-  }
-
-  if (user.data === null) {
+  if (invitee === null) {
     throw new Error(
       "No Webstudio account found. The user needs to sign up first."
     );
   }
 
-  if (user.data.id === userId) {
+  if (invitee.id === userId) {
     throw new Error("You are already the owner of this workspace");
   }
 
-  const memberId = user.data.id;
+  const memberId = invitee.id;
 
   // Check if already a member — no need for a notification
-  const existing = await context.postgrest.client
-    .from("WorkspaceMember")
-    .select("userId")
-    .eq("workspaceId", workspaceId)
-    .eq("userId", memberId)
-    .is("removedAt", null)
-    .maybeSingle();
+  const existing = await findActiveMember(workspaceId, memberId, context);
 
-  if (existing.error) {
-    throw existing.error;
-  }
-
-  if (existing.data !== null) {
+  if (existing !== null) {
     throw new Error("Already a member of this workspace.");
   }
 
@@ -460,20 +461,13 @@ export const updateRole = async (
     throw new Error("Cannot change the workspace owner's role");
   }
 
-  const result = await context.postgrest.client
-    .from("WorkspaceMember")
-    .update({ relation })
-    .eq("workspaceId", workspaceId)
-    .eq("userId", memberUserId)
-    .is("removedAt", null)
-    .select()
-    .maybeSingle();
+  const updated = await context.db
+    .update(workspaceMember)
+    .set({ relation })
+    .where(activeMembership(workspaceId, memberUserId))
+    .returning({ userId: workspaceMember.userId });
 
-  if (result.error) {
-    throw result.error;
-  }
-
-  if (result.data === null) {
+  if (updated.length === 0) {
     throw new Error("Member not found");
   }
 };
@@ -489,18 +483,9 @@ export const removeMember = async (
 
   if (isSelfRemoval) {
     // Verify the caller is NOT the owner — owners cannot leave their own workspace.
-    const workspace = await context.postgrest.client
-      .from("Workspace")
-      .select("id, userId")
-      .eq("id", workspaceId)
-      .eq("isDeleted", false)
-      .single();
+    const workspace = await loadWorkspaceOwner(workspaceId, context);
 
-    if (workspace.error) {
-      throw workspace.error;
-    }
-
-    if (workspace.data.userId === userId) {
+    if (workspace.userId === userId) {
       throw new Error("The workspace owner cannot be removed");
     }
   } else {
@@ -508,20 +493,13 @@ export const removeMember = async (
     await assertWorkspaceOwnerByUserId(workspaceId, userId, context);
   }
 
-  const result = await context.postgrest.client
-    .from("WorkspaceMember")
-    .update({ removedAt: new Date().toISOString() })
-    .eq("workspaceId", workspaceId)
-    .eq("userId", memberUserId)
-    .is("removedAt", null)
-    .select("userId")
-    .maybeSingle();
+  const removed = await context.db
+    .update(workspaceMember)
+    .set({ removedAt: new Date().toISOString() })
+    .where(activeMembership(workspaceId, memberUserId))
+    .returning({ userId: workspaceMember.userId });
 
-  if (result.error) {
-    throw result.error;
-  }
-
-  if (result.data === null) {
+  if (removed.length === 0) {
     throw new Error("Member not found");
   }
 };
@@ -533,71 +511,61 @@ export const listMembers = async (
   const userId = assertUser(context);
 
   // Verify the caller is the owner or a member
-  const workspace = await context.postgrest.client
-    .from("Workspace")
-    .select("id, userId")
-    .eq("id", workspaceId)
-    .eq("isDeleted", false)
-    .single();
+  const workspace = await loadWorkspaceOwner(workspaceId, context);
 
-  if (workspace.error) {
-    throw workspace.error;
-  }
-
-  if (workspace.data.userId !== userId) {
+  if (workspace.userId !== userId) {
     // Check if caller is a member
-    const membership = await context.postgrest.client
-      .from("WorkspaceMember")
-      .select("userId")
-      .eq("workspaceId", workspaceId)
-      .eq("userId", userId)
-      .is("removedAt", null)
-      .maybeSingle();
+    const membership = await findActiveMember(workspaceId, userId, context);
 
-    if (membership.error) {
-      throw membership.error;
-    }
-
-    if (membership.data === null) {
+    if (membership === null) {
       throw new AuthorizationError("You don't have access to this workspace");
     }
   }
 
-  const members = await context.postgrest.client
-    .from("WorkspaceMember")
-    .select("userId, relation, createdAt")
-    .eq("workspaceId", workspaceId)
-    .is("removedAt", null)
-    .order("createdAt", { ascending: false });
-
-  if (members.error) {
-    throw members.error;
-  }
+  const members = await context.db
+    .select({
+      userId: workspaceMember.userId,
+      relation: workspaceMember.relation,
+      createdAt: workspaceMember.createdAt,
+    })
+    .from(workspaceMember)
+    .where(
+      and(
+        eq(workspaceMember.workspaceId, workspaceId),
+        isNull(workspaceMember.removedAt)
+      )
+    )
+    .orderBy(desc(workspaceMember.createdAt));
 
   // Fetch pending workspace invite notifications for this workspace.
   // Only visible to the owner (already verified above).
   const pendingInvites =
-    workspace.data.userId === userId
-      ? await context.postgrest.client
-          .from("Notification")
-          .select("id, recipientId, payload, createdAt")
-          .eq("type", "workspaceInvite")
-          .eq("senderId", workspace.data.userId)
-          .eq("status", "pending")
-          .gte(
-            "createdAt",
-            new Date(Date.now() - NOTIFICATION_TTL_MS).toISOString()
+    workspace.userId === userId
+      ? await context.db
+          .select({
+            id: notification.id,
+            recipientId: notification.recipientId,
+            payload: notification.payload,
+            createdAt: notification.createdAt,
+          })
+          .from(notification)
+          .where(
+            and(
+              eq(notification.type, "workspaceInvite"),
+              eq(notification.senderId, workspace.userId),
+              eq(notification.status, "pending"),
+              gte(
+                notification.createdAt,
+                new Date(Date.now() - NOTIFICATION_TTL_MS).toISOString()
+              )
+            )
           )
-          .order("createdAt", { ascending: false })
-      : { data: [], error: null };
-
-  if (pendingInvites.error) {
-    throw pendingInvites.error;
-  }
+          .orderBy(desc(notification.createdAt))
+      : [];
 
   // Filter to only invites for this specific workspace.
-  const acceptedUserIds = new Set(members.data.map((m) => m.userId));
-  const pendingForWorkspace = pendingInvites.data.filter((n) => {
+  const acceptedUserIds = new Set(members.map((m) => m.userId));
+  const pendingForWorkspace = pendingInvites.filter((n) => {
     const payload = n.payload as unknown as Partial<WorkspaceInvitePayload>;
     return (
       payload.workspaceId === workspaceId && !acceptedUserIds.has(n.recipientId)
@@ -606,32 +574,28 @@ export const listMembers = async (
 
   // Fetch user info for members, owner, and pending invite recipients.
   const allUserIds = [
-    workspace.data.userId,
-    ...members.data.map((m) => m.userId),
+    workspace.userId,
+    ...members.map((m) => m.userId),
     ...pendingForWorkspace.map((n) => n.recipientId),
   ];
   const uniqueUserIds = [...new Set(allUserIds)];
 
-  const users = await context.postgrest.client
-    .from("User")
-    .select("id, email, username")
-    .in("id", uniqueUserIds);
+  const users = await context.db
+    .select({ id: user.id, email: user.email, username: user.username })
+    .from(user)
+    .where(inArray(user.id, uniqueUserIds));
 
-  if (users.error) {
-    throw users.error;
-  }
+  const usersById = new Map(users.map((u) => [u.id, u]));
 
-  const usersById = new Map(users.data.map((u) => [u.id, u]));
-
-  const ownerUser = usersById.get(workspace.data.userId);
+  const ownerUser = usersById.get(workspace.userId);
 
   return {
     owner: {
-      userId: workspace.data.userId,
+      userId: workspace.userId,
       email: ownerUser?.email ?? "",
       username: ownerUser?.username ?? "",
     },
-    members: members.data.map((m) => ({
+    members: members.map((m) => ({
       userId: m.userId,
       relation: m.relation,
       createdAt: m.createdAt,
@@ -663,33 +627,31 @@ const assertProjectPermission = async (
   }: { projectId: string; userId: string; action: string },
   context: AppContext
 ) => {
-  const project = await context.postgrest.client
-    .from("Project")
-    .select("id, userId, workspaceId")
-    .eq("id", projectId)
-    .eq("isDeleted", false)
-    .single();
+  const projectRows = await context.db
+    .select({
+      id: project.id,
+      userId: project.userId,
+      workspaceId: project.workspaceId,
+    })
+    .from(project)
+    .where(and(eq(project.id, projectId), eq(project.isDeleted, false)));
 
-  if (project.error) {
+  if (projectRows.length !== 1) {
     throw new Error("Project not found");
   }
+  const projectData = projectRows[0];
 
-  const isProjectOwner = project.data.userId === userId;
-  const sourceWorkspaceId = project.data.workspaceId;
+  const isProjectOwner = projectData.userId === userId;
+  const sourceWorkspaceId = projectData.workspaceId;
 
   if (isProjectOwner === false && sourceWorkspaceId !== null) {
-    const membership = await context.postgrest.client
-      .from("WorkspaceMember")
-      .select("relation")
-      .eq("workspaceId", sourceWorkspaceId)
-      .eq("userId", userId)
-      .is("removedAt", null)
-      .maybeSingle();
+    const membership = await findActiveMember(
+      sourceWorkspaceId,
+      userId,
+      context
+    );
 
-    if (
-      membership.data === null ||
-      membership.data.relation !== "administrators"
-    ) {
+    if (membership === null || membership.relation !== "administrators") {
       throw new AuthorizationError(
         `Only the project owner or a workspace admin can ${action} projects`
       );
@@ -700,7 +662,21 @@ const assertProjectPermission = async (
     );
   }
 
-  return project.data;
+  return projectData;
+};
+
+const findTargetWorkspace = async (
+  workspaceId: string,
+  context: AppContext
+) => {
+  const rows = await context.db
+    .select({ id: workspaceTable.id, userId: workspaceTable.userId })
+    .from(workspaceTable)
+    .where(liveWorkspace(workspaceId));
+  if (rows.length !== 1) {
+    throw new Error("Target workspace not found");
+  }
+  return rows[0];
 };
 
 /**
@@ -722,31 +698,20 @@ export const moveProject = async (
   );
 
   // Verify the target workspace exists
-  const targetWorkspace = await context.postgrest.client
-    .from("Workspace")
-    .select("id, userId")
-    .eq("id", targetWorkspaceId)
-    .eq("isDeleted", false)
-    .single();
-
-  if (targetWorkspace.error) {
-    throw new Error("Target workspace not found");
-  }
+  const targetWorkspace = await findTargetWorkspace(targetWorkspaceId, context);
 
   // Verify the caller is owner or admin of the target workspace
-  const isTargetOwner = targetWorkspace.data.userId === userId;
+  const isTargetOwner = targetWorkspace.userId === userId;
   if (isTargetOwner === false) {
-    const targetMembership = await context.postgrest.client
-      .from("WorkspaceMember")
-      .select("relation")
-      .eq("workspaceId", targetWorkspaceId)
-      .eq("userId", userId)
-      .is("removedAt", null)
-      .maybeSingle();
+    const targetMembership = await findActiveMember(
+      targetWorkspaceId,
+      userId,
+      context
+    );
 
     if (
-      targetMembership.data === null ||
-      targetMembership.data.relation !== "administrators"
+      targetMembership === null ||
+      targetMembership.relation !== "administrators"
     ) {
       throw new AuthorizationError(
         "You need admin or owner permissions on the target workspace"
@@ -756,22 +721,20 @@ export const moveProject = async (
 
   // Cross-owner moves are not allowed — use the transfer flow instead
   // so the target workspace owner gets a notification and must accept.
-  if (targetWorkspace.data.userId !== projectData.userId) {
+  if (targetWorkspace.userId !== projectData.userId) {
     throw new AuthorizationError(
       "Use the transfer flow to move a project to another user's workspace"
     );
   }
 
-  const result = await context.postgrest.client
-    .from("Project")
-    .update({ workspaceId: targetWorkspaceId })
-    .eq("id", projectId)
-    .select("id")
-    .single();
-
-  if (result.error) {
-    throw result.error;
-  }
+  one(
+    await context.db
+      .update(project)
+      .set({ workspaceId: targetWorkspaceId })
+      .where(eq(project.id, projectId))
+      .returning({ id: project.id }),
+    "Project"
+  );
 };
 
 /**
@@ -798,39 +761,25 @@ export const transferProject = async (
   );
 
   // Look up the recipient by email
-  const recipient = await context.postgrest.client
-    .from("User")
-    .select("id")
-    .eq("email", recipientEmail)
-    .maybeSingle();
-
-  if (recipient.error) {
-    throw recipient.error;
-  }
+  const recipient = await findUserIdByEmail(recipientEmail, context);
 
   // Silently succeed for non-existent emails (anti-enumeration)
-  if (recipient.data === null) {
+  if (recipient === null) {
     return;
   }
 
-  if (recipient.data.id === userId) {
+  if (recipient.id === userId) {
     throw new Error("You cannot transfer a project to yourself");
   }
 
   // If a target workspace is specified, verify it exists and belongs to the recipient
   if (targetWorkspaceId !== undefined) {
-    const targetWorkspace = await context.postgrest.client
-      .from("Workspace")
-      .select("id, userId")
-      .eq("id", targetWorkspaceId)
-      .eq("isDeleted", false)
-      .single();
+    const targetWorkspace = await findTargetWorkspace(
+      targetWorkspaceId,
+      context
+    );
 
-    if (targetWorkspace.error) {
-      throw new Error("Target workspace not found");
-    }
-
-    if (targetWorkspace.data.userId !== recipient.data.id) {
+    if (targetWorkspace.userId !== recipient.id) {
       throw new Error("Target workspace does not belong to the recipient");
     }
   }
@@ -841,7 +790,7 @@ export const transferProject = async (
   };
 
   await createNotification(
-    { type: "projectTransfer", recipientId: recipient.data.id, payload },
+    { type: "projectTransfer", recipientId: recipient.id, payload },
     context
   );
 };
@@ -857,54 +806,44 @@ export const findSharedWorkspacesByOwnerEmail = async (
   const userId = assertUser(context);
 
   // Look up the target user by email
-  const targetUser = await context.postgrest.client
-    .from("User")
-    .select("id")
-    .eq("email", email)
-    .maybeSingle();
-
-  if (targetUser.error) {
-    throw targetUser.error;
-  }
+  const targetUser = await findUserIdByEmail(email, context);
 
   // Return empty for non-existent emails (anti-enumeration)
-  if (targetUser.data === null) {
+  if (targetUser === null) {
     return [];
   }
 
   // Find workspaces owned by the target user
-  const workspaces = await context.postgrest.client
-    .from("Workspace")
-    .select("id, name")
-    .eq("userId", targetUser.data.id)
-    .eq("isDeleted", false);
+  const workspaces = await context.db
+    .select({ id: workspaceTable.id, name: workspaceTable.name })
+    .from(workspaceTable)
+    .where(
+      and(
+        eq(workspaceTable.userId, targetUser.id),
+        eq(workspaceTable.isDeleted, false)
+      )
+    );
 
-  if (workspaces.error) {
-    throw workspaces.error;
-  }
-
-  if (workspaces.data.length === 0) {
+  if (workspaces.length === 0) {
     return [];
   }
 
   // Filter to only those where the current user is a member
-  const memberships = await context.postgrest.client
-    .from("WorkspaceMember")
-    .select("workspaceId")
-    .eq("userId", userId)
-    .is("removedAt", null)
-    .in(
-      "workspaceId",
-      workspaces.data.map((w) => w.id)
+  const memberships = await context.db
+    .select({ workspaceId: workspaceMember.workspaceId })
+    .from(workspaceMember)
+    .where(
+      and(
+        eq(workspaceMember.userId, userId),
+        isNull(workspaceMember.removedAt),
+        inArray(
+          workspaceMember.workspaceId,
+          workspaces.map((w) => w.id)
+        )
+      )
     );
 
-  if (memberships.error) {
-    throw memberships.error;
-  }
+  const memberWorkspaceIds = new Set(memberships.map((m) => m.workspaceId));
 
-  const memberWorkspaceIds = new Set(
-    memberships.data.map((m) => m.workspaceId)
-  );
-
-  return workspaces.data.filter((w) => memberWorkspaceIds.has(w.id));
+  return workspaces.filter((w) => memberWorkspaceIds.has(w.id));
 };

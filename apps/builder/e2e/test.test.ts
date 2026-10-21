@@ -1,12 +1,15 @@
 import { expect, test } from "vitest";
-import { getBrowserLaunchOptions } from "./test";
+import { getBrowserLaunchOptions, getProjectBuilderUrl } from "./test";
 
-test("maps Builder and project wstd.dev hosts to loopback for local runs", () => {
-  expect(getBrowserLaunchOptions("https://127.0.0.1:3000")).toEqual({
-    args: [
-      "--host-resolver-rules=MAP wstd.dev 127.0.0.1,MAP *.wstd.dev 127.0.0.1",
-    ],
-  });
+test("needs no host mapping: project hosts are subdomains of localhost", () => {
+  expect(getBrowserLaunchOptions("http://localhost:3000")).toEqual({});
+  expect(
+    new URL(
+      getProjectBuilderUrl({
+        projectId: "00000000-0000-4000-8000-000000000001",
+      })
+    ).hostname
+  ).toBe("p-00000000-0000-4000-8000-000000000001.localhost");
 });
 
 test("does not override host resolution for remote Builder URLs", () => {

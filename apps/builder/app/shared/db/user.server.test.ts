@@ -1,10 +1,6 @@
 import { describe, test, expect } from "vitest";
-import {
-  createTestServer,
-  db,
-  testContext,
-  json,
-} from "@webstudio-is/postgrest/testing";
+import { eq, user, workspace } from "@webstudio-is/db";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { AuthorizationError } from "@webstudio-is/trpc-interface/index.server";
 import {
@@ -14,11 +10,11 @@ import {
   updateUserProjectsTags,
 } from "./user.server";
 
-const server = createTestServer();
+const db = setupTestDb();
 
 const createContext = (overrides: Partial<AppContext> = {}): AppContext =>
   ({
-    ...testContext,
+    db,
     authorization: { type: "user", userId: "user-1" },
     ...overrides,
   }) as unknown as AppContext;
@@ -29,16 +25,19 @@ const userRow = {
   username: "tester",
   image: "",
   provider: "dev",
-  projectsTags: [],
-  createdAt: new Date().toISOString(),
-  team: null,
 };
+
+const defaultWorkspaces = async (userId: string) =>
+  await db
+    .select({ name: workspace.name, isDefault: workspace.isDefault })
+    .from(workspace)
+    .where(eq(workspace.userId, userId));
 
 // ─── getUserById ───────────────────────────────────────────────
 
-describe("getUserById (msw)", () => {
+describe("getUserById", () => {
   test("returns user when found", async () => {
-    server.use(db.get("User", () => json(userRow)));
+    await seed.user(db, userRow);
 
     const result = await getUserById(createContext(), "user-1");
     expect(result.id).toBe("user-1");
@@ -47,15 +46,6 @@ describe("getUserById (msw)", () => {
   });
 
   test("throws when user not found", async () => {
-    server.use(
-      db.get("User", () =>
-        json(
-          { code: "PGRST116", message: "Row not found", details: "", hint: "" },
-          { status: 406 }
-        )
-      )
-    );
-
     await expect(getUserById(createContext(), "missing")).rejects.toThrow(
       "User not found"
     );
@@ -64,114 +54,58 @@ describe("getUserById (msw)", () => {
 
 // ─── createOrLoginWithDev ──────────────────────────────────────
 
-describe("createOrLoginWithDev (msw)", () => {
+describe("createOrLoginWithDev", () => {
   test("returns existing user when found", async () => {
-    let workspaceChecked = false;
-    server.use(
-      // User SELECT resolves successfully → existing user
-      db.get("User", () => json(userRow)),
-      // Workspace check — has default workspace
-      db.get("Workspace", () => {
-        workspaceChecked = true;
-        return json({ id: "ws-1" });
-      })
-    );
+    await seed.user(db, userRow);
+    await seed.workspace(db, {
+      id: crypto.randomUUID(),
+      userId: "user-1",
+      isDefault: true,
+    });
 
     const result = await createOrLoginWithDev(
       createContext(),
       "test@example.com"
     );
     expect(result.id).toBe("user-1");
-    expect(workspaceChecked).toBe(true);
+    expect(await defaultWorkspaces("user-1")).toHaveLength(1);
   });
 
   test("lazily creates workspace when existing user has none", async () => {
-    let workspaceCreated = false;
-    server.use(
-      db.get("User", () => json(userRow)),
-      // maybeSingle returns null when no row exists
-      db.get("Workspace", () => json(null)),
-      db.post("Workspace", () => {
-        workspaceCreated = true;
-        return json({ id: "ws-new" }, { status: 201 });
-      })
-    );
+    await seed.user(db, userRow);
 
     const result = await createOrLoginWithDev(
       createContext(),
       "test@example.com"
     );
     expect(result.id).toBe("user-1");
-    expect(workspaceCreated).toBe(true);
+    expect(await defaultWorkspaces("user-1")).toEqual([
+      { name: "My workspace", isDefault: true },
+    ]);
   });
 
   test("creates new user and workspace when email not found", async () => {
-    let userInserted = false;
-    let workspaceInserted = false;
-    server.use(
-      // User SELECT → PGRST116 (not found)
-      db.get("User", () =>
-        json(
-          { code: "PGRST116", message: "Row not found", details: "", hint: "" },
-          { status: 406 }
-        )
-      ),
-      db.post("User", () => {
-        userInserted = true;
-        return json({ ...userRow, id: "new-user" }, { status: 201 });
-      }),
-      db.post("Workspace", () => {
-        workspaceInserted = true;
-        return json({ id: "ws-new" }, { status: 201 });
-      })
-    );
-
     const result = await createOrLoginWithDev(
       createContext(),
       "new@example.com"
     );
 
-    expect(result.email).toBe("test@example.com"); // from userRow mock
-    expect(userInserted).toBe(true);
-    expect(workspaceInserted).toBe(true);
-  });
-
-  test("throws when User SELECT fails with unexpected error", async () => {
-    server.use(
-      db.get("User", () =>
-        json(
-          { code: "PGRST999", message: "DB error", details: "", hint: "" },
-          { status: 500 }
-        )
-      )
-    );
-
-    await expect(
-      createOrLoginWithDev(createContext(), "fail@example.com")
-    ).rejects.toThrow("User not found");
+    expect(result).toMatchObject({
+      email: "new@example.com",
+      username: "admin",
+      provider: "dev",
+    });
+    expect(await defaultWorkspaces(result.id)).toEqual([
+      { name: "My workspace", isDefault: true },
+    ]);
   });
 });
 
 // ─── createOrLoginWithOAuth ───────────────────────────────────
 
-describe("createOrLoginWithOAuth (msw)", () => {
+describe("createOrLoginWithOAuth", () => {
   test("syncs changed profile fields for an existing user", async () => {
-    const updatedUser = {
-      ...userRow,
-      username: "new-github-username",
-      image: "https://avatars.example.com/new",
-      provider: "github",
-    };
-    let capturedBody: unknown;
-
-    server.use(
-      db.get("User", () => json(userRow)),
-      db.patch("User", async ({ request }) => {
-        capturedBody = await request.json();
-        return json(updatedUser);
-      }),
-      db.get("Workspace", () => json({ id: "ws-1" }))
-    );
+    await seed.user(db, userRow);
 
     const result = await createOrLoginWithOAuth(createContext(), {
       provider: "github",
@@ -180,26 +114,33 @@ describe("createOrLoginWithOAuth (msw)", () => {
       photos: [{ value: "https://avatars.example.com/new" }],
     } as Parameters<typeof createOrLoginWithOAuth>[1]);
 
-    expect(capturedBody).toEqual({
-      username: "new-github-username",
-      image: "https://avatars.example.com/new",
-      provider: "github",
-    });
     expect(result.username).toBe("new-github-username");
+    expect(
+      await db
+        .select({
+          username: user.username,
+          image: user.image,
+          provider: user.provider,
+        })
+        .from(user)
+        .where(eq(user.id, "user-1"))
+    ).toEqual([
+      {
+        username: "new-github-username",
+        image: "https://avatars.example.com/new",
+        provider: "github",
+      },
+    ]);
   });
 });
 
 // ─── updateUserProjectsTags ───────────────────────────────────
 
-describe("updateUserProjectsTags (msw)", () => {
+describe("updateUserProjectsTags", () => {
   const tags = [{ id: "tag-1", label: "Design" }];
 
   test("returns updated tags", async () => {
-    server.use(
-      db.patch("User", () =>
-        json({ ...userRow, projectsTags: tags }, { status: 200 })
-      )
-    );
+    await seed.user(db, userRow);
 
     const result = await updateUserProjectsTags({ tags }, createContext());
     expect(result).toEqual(tags);
@@ -214,18 +155,9 @@ describe("updateUserProjectsTags (msw)", () => {
     ).rejects.toThrow(AuthorizationError);
   });
 
-  test("throws when DB update fails", async () => {
-    server.use(
-      db.patch("User", () =>
-        json(
-          { code: "PGRST123", message: "Update failed", details: "", hint: "" },
-          { status: 500 }
-        )
-      )
-    );
-
+  test("throws when the user doesn't exist", async () => {
     await expect(
       updateUserProjectsTags({ tags }, createContext())
-    ).rejects.toBeTruthy();
+    ).rejects.toThrow("User not found");
   });
 });

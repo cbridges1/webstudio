@@ -3,13 +3,17 @@ import {
   createAssetFolderHierarchy,
   type AssetFolder,
 } from "@webstudio-is/sdk";
-import type { Client } from "@webstudio-is/postgrest/index.server";
 import {
-  applyValidatedMapPatches,
-  assertPostgrestSuccess,
-  diffMaps,
-  type Patch,
-} from "./patch-utils";
+  and,
+  asc,
+  assetFolder,
+  eq,
+  inArray,
+  isNull,
+  sql,
+  type Db,
+} from "@webstudio-is/db";
+import { applyValidatedMapPatches, diffMaps, type Patch } from "./patch-utils";
 import { AssetRepositoryConflictError } from "./asset-repository-errors";
 
 const pendingProjectMutations = new Map<string, Promise<void>>();
@@ -90,16 +94,21 @@ export const createAssetFolderRows = (
 
 const loadAssetFoldersByProjectRaw = async (
   projectId: string,
-  client: Client
+  client: Db
 ): Promise<AssetFolder[]> => {
-  const result = await client
-    .from("AssetFolder")
-    .select("id, projectId, name, parentId, createdAt")
-    .eq("projectId", projectId)
-    .order("id");
-  assertPostgrestSuccess(result);
+  const rows = await client
+    .select({
+      id: assetFolder.id,
+      projectId: assetFolder.projectId,
+      name: assetFolder.name,
+      parentId: assetFolder.parentId,
+      createdAt: assetFolder.createdAt,
+    })
+    .from(assetFolder)
+    .where(eq(assetFolder.projectId, projectId))
+    .orderBy(asc(assetFolder.id));
 
-  return (result.data ?? []).map((folder) => ({
+  return rows.map((folder) => ({
     id: folder.id,
     projectId: folder.projectId,
     name: folder.name,
@@ -110,7 +119,7 @@ const loadAssetFoldersByProjectRaw = async (
 
 export const loadAssetFoldersByProjectWithClient = async (
   projectId: string,
-  client: Client,
+  client: Db,
   folderIds?: string[]
 ): Promise<AssetFolder[]> => {
   if (folderIds?.length === 0) {
@@ -129,14 +138,17 @@ export const loadAssetFoldersByProjectWithClient = async (
         continue;
       }
       const result = await client
-        .from("AssetFolder")
-        .update({ parentId: null })
-        .eq("id", folderId)
-        .eq("projectId", projectId)
-        .eq("parentId", original.parentId)
-        .select("id");
-      assertPostgrestSuccess(result);
-      if (result.data?.some(({ id }) => id === folderId) !== true) {
+        .update(assetFolder)
+        .set({ parentId: null })
+        .where(
+          and(
+            eq(assetFolder.id, folderId),
+            eq(assetFolder.projectId, projectId),
+            eq(assetFolder.parentId, original.parentId)
+          )
+        )
+        .returning({ id: assetFolder.id });
+      if (result.some(({ id }) => id === folderId) !== true) {
         sourceChanged = true;
         break;
       }
@@ -155,7 +167,7 @@ export const loadAssetFoldersByProjectWithClient = async (
   );
 };
 
-const getPersistedFolderCycles = async (projectId: string, client: Client) =>
+const getPersistedFolderCycles = async (projectId: string, client: Db) =>
   repairAssetFolderCycles(await loadAssetFoldersByProjectRaw(projectId, client))
     .repairedIds;
 
@@ -168,26 +180,24 @@ const restoreAssetFolder = async ({
   projectId: string;
   previous: AssetFolder | undefined;
   persisted: AssetFolder;
-  client: Client;
+  client: Db;
 }) => {
-  const table = client.from("AssetFolder");
-  let match = (
-    previous === undefined
-      ? table.delete()
-      : table.update({
-          name: previous.name,
-          parentId: previous.parentId ?? null,
-        })
-  )
-    .eq("id", persisted.id)
-    .eq("projectId", projectId)
-    .eq("name", persisted.name);
-  match =
+  const match = and(
+    eq(assetFolder.id, persisted.id),
+    eq(assetFolder.projectId, projectId),
+    eq(assetFolder.name, persisted.name),
     persisted.parentId === undefined
-      ? match.is("parentId", null)
-      : match.eq("parentId", persisted.parentId);
-  const result = await match.select("id");
-  assertPostgrestSuccess(result);
+      ? isNull(assetFolder.parentId)
+      : eq(assetFolder.parentId, persisted.parentId)
+  );
+  if (previous === undefined) {
+    await client.delete(assetFolder).where(match);
+  } else {
+    await client
+      .update(assetFolder)
+      .set({ name: previous.name, parentId: previous.parentId ?? null })
+      .where(match);
+  }
 };
 
 const verifyAndRollbackFolderMutation = async ({
@@ -199,7 +209,7 @@ const verifyAndRollbackFolderMutation = async ({
   projectId: string;
   previousById: ReadonlyMap<string, AssetFolder>;
   persisted: readonly AssetFolder[];
-  client: Client;
+  client: Db;
 }) => {
   if ((await getPersistedFolderCycles(projectId, client)).length === 0) {
     return;
@@ -217,6 +227,23 @@ const verifyAndRollbackFolderMutation = async ({
   );
 };
 
+/** Inserts folders, or updates them when they already exist in the project. */
+const upsertAssetFolderRows = (
+  client: Db,
+  rows: ReturnType<typeof createAssetFolderRows>
+) =>
+  client
+    .insert(assetFolder)
+    .values(rows)
+    .onConflictDoUpdate({
+      target: [assetFolder.id, assetFolder.projectId],
+      set: {
+        name: sql`excluded.name`,
+        parentId: sql`excluded."parentId"`,
+        createdAt: sql`excluded."createdAt"`,
+      },
+    });
+
 export const upsertAssetFolderWithClient = async (
   {
     projectId,
@@ -225,7 +252,7 @@ export const upsertAssetFolderWithClient = async (
     projectId: string;
     folder: AssetFolder;
   },
-  client: Client
+  client: Db
 ): Promise<AssetFolder> =>
   await withAssetFolderMutationLock(projectId, async () => {
     const current = new Map(
@@ -240,23 +267,25 @@ export const upsertAssetFolderWithClient = async (
     if (value === undefined) {
       throw new Error("Asset folder was not validated");
     }
-    const result = await client
-      .from("AssetFolder")
-      .upsert(createAssetFolderRows([value], projectId), {
-        onConflict: "id,projectId",
-      })
-      .select("id, projectId, name, parentId, createdAt")
-      .single();
-    assertPostgrestSuccess(result);
-    if (result.data?.id !== value.id) {
+    const [row] = await upsertAssetFolderRows(
+      client,
+      createAssetFolderRows([value], projectId)
+    ).returning({
+      id: assetFolder.id,
+      projectId: assetFolder.projectId,
+      name: assetFolder.name,
+      parentId: assetFolder.parentId,
+      createdAt: assetFolder.createdAt,
+    });
+    if (row?.id !== value.id) {
       throw new Error("Asset folder was not persisted");
     }
     const persisted = {
-      id: result.data.id,
-      projectId: result.data.projectId,
-      name: result.data.name,
-      parentId: result.data.parentId ?? undefined,
-      createdAt: result.data.createdAt,
+      id: row.id,
+      projectId: row.projectId,
+      name: row.name,
+      parentId: row.parentId ?? undefined,
+      createdAt: row.createdAt,
     };
     await verifyAndRollbackFolderMutation({
       projectId,
@@ -268,7 +297,7 @@ export const upsertAssetFolderWithClient = async (
   });
 
 export const patchAssetFoldersWithClient = async (
-  { projectId, client }: { projectId: string; client: Client },
+  { projectId, client }: { projectId: string; client: Db },
   patches: Array<Patch>,
   { deferDeletes = false }: { deferDeletes?: boolean } = {}
 ): Promise<string[]> =>
@@ -295,16 +324,15 @@ export const patchAssetFoldersWithClient = async (
     );
     const changed = [...added, ...updated];
     if (changed.length > 0) {
-      const result = await client
-        .from("AssetFolder")
-        .upsert(createAssetFolderRows(changed, projectId), {
-          onConflict: "id,projectId",
-        })
-        .select("id, name, parentId");
-      assertPostgrestSuccess(result);
-      const persisted = new Map(
-        (result.data ?? []).map((row) => [row.id, row])
-      );
+      const rows = await upsertAssetFolderRows(
+        client,
+        createAssetFolderRows(changed, projectId)
+      ).returning({
+        id: assetFolder.id,
+        name: assetFolder.name,
+        parentId: assetFolder.parentId,
+      });
+      const persisted = new Map(rows.map((row) => [row.id, row]));
       for (const folder of changed) {
         const row = persisted.get(folder.id);
         if (
@@ -332,19 +360,18 @@ export const patchAssetFoldersWithClient = async (
 
 const deleteAssetFoldersUnlocked = async (
   { projectId, ids }: { projectId: string; ids: string[] },
-  client: Client
+  client: Db
 ) => {
   if (ids.length === 0) {
     return;
   }
-  const result = await client
-    .from("AssetFolder")
-    .delete()
-    .in("id", ids)
-    .eq("projectId", projectId)
-    .select("id");
-  assertPostgrestSuccess(result);
-  const deletedIds = new Set((result.data ?? []).map(({ id }) => id));
+  const deleted = await client
+    .delete(assetFolder)
+    .where(
+      and(inArray(assetFolder.id, ids), eq(assetFolder.projectId, projectId))
+    )
+    .returning({ id: assetFolder.id });
+  const deletedIds = new Set(deleted.map(({ id }) => id));
   const missingId = ids.find((id) => deletedIds.has(id) === false);
   if (missingId !== undefined) {
     throw new Error(`Asset folder deletion was not persisted for ${missingId}`);
@@ -353,7 +380,7 @@ const deleteAssetFoldersUnlocked = async (
 
 export const deleteAssetFoldersWithClient = async (
   props: { projectId: string; ids: string[] },
-  client: Client
+  client: Db
 ) =>
   await withAssetFolderMutationLock(props.projectId, async () => {
     await deleteAssetFoldersUnlocked(props, client);

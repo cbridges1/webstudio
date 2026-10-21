@@ -11,12 +11,14 @@ import { GithubIcon, GoogleIcon, WebstudioIcon } from "@webstudio-is/icons";
 import { Form } from "@remix-run/react";
 import { authPath } from "~/shared/router-utils";
 import { SecretLogin } from "./secret-login";
+import { PasswordLogin } from "./password-login";
 
 export type LoginProps = {
   errorMessage?: string;
   isGithubEnabled?: boolean;
   isGoogleEnabled?: boolean;
   isSecretLoginEnabled?: boolean;
+  isUsernameLoginEnabled?: boolean;
   devPlanNames?: string[];
 };
 
@@ -25,6 +27,7 @@ export const Login = ({
   isGithubEnabled,
   isGoogleEnabled,
   isSecretLoginEnabled,
+  isUsernameLoginEnabled,
   devPlanNames,
 }: LoginProps) => {
   return (
@@ -56,7 +59,15 @@ export const Login = ({
 
         <TooltipProvider>
           <Flex direction="column" gap="3" css={{ width: "100%" }}>
-            <Form method="post" style={{ display: "contents" }}>
+            {isUsernameLoginEnabled && <PasswordLogin />}
+            <Form
+              method="post"
+              style={{
+                // selfhost: hide OAuth when no provider is configured
+                display:
+                  isGoogleEnabled || isGithubEnabled ? "contents" : "none",
+              }}
+            >
               <Button
                 disabled={isGoogleEnabled === false}
                 prefix={<GoogleIcon size={22} />}

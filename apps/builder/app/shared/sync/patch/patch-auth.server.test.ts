@@ -94,20 +94,7 @@ const createContext = () => {
     createTokenContext: vi.fn(async (authToken: string) => ({
       authorization: { type: "token", authToken },
     })),
-    postgrest: {
-      client: {
-        from: vi.fn(() => ({
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              single: vi.fn(async () => ({
-                data: buildRow,
-                error: undefined,
-              })),
-            })),
-          })),
-        })),
-      },
-    },
+    db: {},
   };
   return context;
 };

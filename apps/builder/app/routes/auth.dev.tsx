@@ -6,7 +6,7 @@ import { clearReturnToCookie, returnToPath } from "~/services/cookie.server";
 import { preventCrossOriginCookie } from "~/services/no-cross-origin-cookie";
 import { redirect, setNoStoreToRedirect } from "~/services/no-store-redirect";
 import { applyDevPlan } from "@webstudio-is/plans/index.server";
-import { createPostgrestContext } from "~/shared/context.server";
+import { createDbContext } from "~/shared/context.server";
 
 export default function Dev() {
   return null;
@@ -45,9 +45,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const response = await clearReturnToCookie(request, error);
       // Write the selected dev plan directly into the DB so that getPlanInfo
       // reads it naturally for any user (including owner lookups from other sessions).
-      await applyDevPlan(email, planName, {
-        postgrest: createPostgrestContext(),
-      });
+      await applyDevPlan(email, planName, { db: createDbContext() });
       return setNoStoreToRedirect(response);
     }
 

@@ -177,26 +177,6 @@ jobs:
         with:
           submodules-ssh-key: ${{ secrets.PRIVATE_GITHUB_DEPLOY_TOKEN }}
 
-  supabase-migrations:
-    name: Supabase migrations
-    timeout-minutes: 7
-    runs-on: ubuntu-24.04
-    environment:
-      name: empty
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          allow-unsafe-pr-checkout: ${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-deploy' }}
-
-      - uses: ./.github/actions/ci-setup
-        with:
-          run-scripts: "true"
-
-      - name: Apply migrations to Supabase PostgreSQL
-        run: pnpm --filter @webstudio-is/builder e2e:supabase-migrations
-
   builder-e2e:
     name: builder-e2e (${{ matrix.shard }})
     timeout-minutes: 7

@@ -3,6 +3,14 @@
  * The _ui._index route isn’t recognized on Vercel, even though it works perfectly in other environments.
  */
 
+import {
+  and,
+  eq,
+  isNull,
+  one,
+  workspace as workspaceTable,
+  workspaceMember,
+} from "@webstudio-is/db";
 import { lazy } from "react";
 import { useLoaderData } from "@remix-run/react";
 import type { MetaFunction, ShouldRevalidateFunction } from "@remix-run/react";
@@ -177,18 +185,29 @@ export const loader = async (loaderArgs: LoaderFunctionArgs) => {
       // When currentUserId is undefined (token auth), filter with a UUID that
       // can never match so the members array comes back empty.
       const noMatchId = "00000000-0000-0000-0000-000000000000";
-      const workspace = await context.postgrest.client
-        .from("Workspace")
-        .select("userId, members:WorkspaceMember(relation)")
-        .eq("id", project.workspaceId)
-        .eq("isDeleted", false)
-        .eq("members.userId", currentUserId ?? noMatchId)
-        .is("members.removedAt", null)
-        .single();
-
-      if (workspace.error) {
-        throw workspace.error;
-      }
+      const workspaceRow = one(
+        await context.db
+          .select({ userId: workspaceTable.userId })
+          .from(workspaceTable)
+          .where(
+            and(
+              eq(workspaceTable.id, project.workspaceId),
+              eq(workspaceTable.isDeleted, false)
+            )
+          ),
+        "Workspace"
+      );
+      const members = await context.db
+        .select({ relation: workspaceMember.relation })
+        .from(workspaceMember)
+        .where(
+          and(
+            eq(workspaceMember.workspaceId, project.workspaceId),
+            eq(workspaceMember.userId, currentUserId ?? noMatchId),
+            isNull(workspaceMember.removedAt)
+          )
+        );
+      const workspace = { data: { ...workspaceRow, members } };
 
       const planResult = await getPlanInfo([workspace.data.userId], context);
       const ownerPlan = planResult.get(workspace.data.userId) ?? {

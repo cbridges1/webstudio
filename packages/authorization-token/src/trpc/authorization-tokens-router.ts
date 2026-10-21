@@ -7,7 +7,7 @@ import {
 } from "@webstudio-is/trpc-interface/index.server";
 import { db } from "../db";
 import type { IsEqual } from "type-fest";
-import type { Database } from "@webstudio-is/postgrest/index.server";
+import type { Database } from "@webstudio-is/db";
 
 type Relation =
   Database["public"]["Tables"]["AuthorizationToken"]["Row"]["relation"];

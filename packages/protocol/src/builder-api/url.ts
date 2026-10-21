@@ -31,8 +31,8 @@ export const parseBuilderUrl = (urlStr: string) => {
 
   fragments[0] = fragments[0].replace(re, branch ?? "");
 
+  // Keep the request's protocol: the deployment decides whether that's HTTPS.
   const sourceUrl = new URL(url.origin);
-  sourceUrl.protocol = "https";
   sourceUrl.host = fragments.filter(Boolean).join(".");
 
   return {

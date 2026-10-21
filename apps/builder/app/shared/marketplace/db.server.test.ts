@@ -1,16 +1,11 @@
 import { describe, test, expect } from "vitest";
-import {
-  createTestServer,
-  db,
-  testContext,
-  json,
-} from "@webstudio-is/postgrest/testing";
+import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { getItems } from "./db.server";
 
-const server = createTestServer();
+const db = setupTestDb();
 
-const ctx = testContext as unknown as AppContext;
+const ctx = { db } as unknown as AppContext;
 
 const marketplaceProductJson = JSON.stringify({
   category: "sectionTemplates",
@@ -23,78 +18,70 @@ const marketplaceProductJson = JSON.stringify({
   description: "A nice section template for testing purposes.",
 });
 
+/** A marketplace project with one published build carrying `marketplaceProduct`. */
+const seedMarketplaceProject = async ({
+  id = "proj-1",
+  marketplaceApprovalStatus = "APPROVED" as const,
+  marketplaceProduct = marketplaceProductJson,
+  published = true,
+}: {
+  id?: string;
+  marketplaceApprovalStatus?: "APPROVED" | "PENDING";
+  marketplaceProduct?: string;
+  published?: boolean;
+} = {}) => {
+  await seed.project(db, { id, userId: "author-1", marketplaceApprovalStatus });
+  await seed.build(db, {
+    id: `${id}-build`,
+    projectId: id,
+    marketplaceProduct,
+    deployment: published
+      ? JSON.stringify({ destination: "saas", domains: [id] })
+      : null,
+  });
+};
+
 // ─── getItems ─────────────────────────────────────────────────
 
-describe("getItems (msw)", () => {
+describe("getItems", () => {
   test("returns empty array when no marketplace products", async () => {
-    server.use(db.get("ApprovedMarketplaceProduct", () => json([])));
-
     const result = await getItems(ctx);
     expect(result).toEqual([]);
   });
 
-  test("skips products with null marketplaceProduct or projectId", async () => {
-    server.use(
-      db.get("ApprovedMarketplaceProduct", () =>
-        json([
-          {
-            id: "1",
-            projectId: null,
-            marketplaceProduct: marketplaceProductJson,
-            authorizationToken: null,
-          },
-          {
-            id: "2",
-            projectId: "proj-1",
-            marketplaceProduct: null,
-            authorizationToken: null,
-          },
-        ])
-      )
-    );
+  test("skips projects that aren't approved or published", async () => {
+    await seedMarketplaceProject({
+      id: "pending",
+      marketplaceApprovalStatus: "PENDING",
+    });
+    await seedMarketplaceProject({ id: "unpublished", published: false });
 
     const result = await getItems(ctx);
     expect(result).toHaveLength(0);
   });
 
   test("skips products with invalid marketplaceProduct JSON", async () => {
-    server.use(
-      db.get("ApprovedMarketplaceProduct", () =>
-        json([
-          {
-            id: "1",
-            projectId: "proj-1",
-            // Category not in enum → parse fails
-            marketplaceProduct: JSON.stringify({
-              category: "invalid",
-              name: "x",
-            }),
-            authorizationToken: null,
-          },
-        ])
-      )
-    );
+    await seedMarketplaceProject({
+      // Category not in enum → parse fails
+      marketplaceProduct: JSON.stringify({ category: "invalid", name: "x" }),
+    });
 
     const result = await getItems(ctx);
     expect(result).toHaveLength(0);
   });
 
   test("returns items with thumbnailAssetName when asset exists", async () => {
-    server.use(
-      db.get("ApprovedMarketplaceProduct", () =>
-        json([
-          {
-            id: "1",
-            projectId: "proj-1",
-            marketplaceProduct: marketplaceProductJson,
-            authorizationToken: "tok-abc",
-          },
-        ])
-      ),
-      db.get("Asset", () =>
-        json([{ id: "asset-thumb", name: "thumb.png", projectId: "proj-1" }])
-      )
-    );
+    await seedMarketplaceProject();
+    await seed.asset(db, {
+      id: "asset-thumb",
+      projectId: "proj-1",
+      name: "thumb.png",
+    });
+    await seed.authorizationToken(db, {
+      token: "tok-abc",
+      projectId: "proj-1",
+      relation: "viewers",
+    });
 
     const result = await getItems(ctx);
     expect(result).toHaveLength(1);
@@ -104,22 +91,11 @@ describe("getItems (msw)", () => {
   });
 
   test("returns items without thumbnailAssetName when asset missing", async () => {
-    server.use(
-      db.get("ApprovedMarketplaceProduct", () =>
-        json([
-          {
-            id: "1",
-            projectId: "proj-1",
-            marketplaceProduct: marketplaceProductJson,
-            authorizationToken: null,
-          },
-        ])
-      ),
-      db.get("Asset", () => json([]))
-    );
+    await seedMarketplaceProject();
 
     const result = await getItems(ctx);
     expect(result).toHaveLength(1);
+    expect(result[0].authorizationToken).toBeUndefined();
     expect(result[0].thumbnailAssetName).toBeUndefined();
   });
 });

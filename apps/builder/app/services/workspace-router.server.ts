@@ -1,3 +1,14 @@
+import {
+  and,
+  eq,
+  isNull,
+  maybeOne,
+  notification,
+  sql,
+  user,
+  workspace as workspaceTable,
+  workspaceMember,
+} from "@webstudio-is/db";
 import { z } from "zod";
 import {
   router,
@@ -140,29 +151,25 @@ export const workspaceRouter = router({
 
         const { maxSeatsPerWorkspace } = plan;
         if (maxSeatsPerWorkspace > 0) {
-          const [membersResult, pendingResult] = await Promise.all([
-            ctx.postgrest.client
-              .from("WorkspaceMember")
-              .select("userId", { count: "exact", head: true })
-              .eq("workspaceId", input.workspaceId)
-              .is("removedAt", null),
-            ctx.postgrest.client
-              .from("Notification")
-              .select("id", { count: "exact", head: true })
-              .eq("type", "workspaceInvite")
-              .eq("status", "pending")
-              .filter("payload->>workspaceId", "eq", input.workspaceId),
+          const [memberCount, pendingCount] = await Promise.all([
+            ctx.db.$count(
+              workspaceMember,
+              and(
+                eq(workspaceMember.workspaceId, input.workspaceId),
+                isNull(workspaceMember.removedAt)
+              )
+            ),
+            ctx.db.$count(
+              notification,
+              and(
+                eq(notification.type, "workspaceInvite"),
+                eq(notification.status, "pending"),
+                sql`${notification.payload} ->> 'workspaceId' = ${input.workspaceId}`
+              )
+            ),
           ]);
 
-          if (membersResult.error) {
-            throw membersResult.error;
-          }
-          if (pendingResult.error) {
-            throw pendingResult.error;
-          }
-
-          const currentCount =
-            (membersResult.count ?? 0) + (pendingResult.count ?? 0);
+          const currentCount = memberCount + pendingCount;
           if (currentCount >= maxSeatsPerWorkspace) {
             throw new Error(
               `This workspace has reached its seat limit of ${maxSeatsPerWorkspace}. Remove a member or upgrade your plan to invite more.`
@@ -180,30 +187,30 @@ export const workspaceRouter = router({
         // Validate the invitee exists and is not already a member before
         // touching billing. This mirrors the checks in workspaceApi.addMember
         // so that we never charge for a doomed invite.
-        const inviteeResult = await ctx.postgrest.client
-          .from("User")
-          .select("id")
-          .eq("email", input.email)
-          .maybeSingle();
-        if (inviteeResult.error) {
-          throw inviteeResult.error;
-        }
-        if (inviteeResult.data === null) {
+        const invitee = maybeOne(
+          await ctx.db
+            .select({ id: user.id })
+            .from(user)
+            .where(eq(user.email, input.email))
+        );
+        if (invitee === null) {
           throw new Error(
             "No Webstudio account found. The user needs to sign up first."
           );
         }
-        const existingMemberResult = await ctx.postgrest.client
-          .from("WorkspaceMember")
-          .select("userId")
-          .eq("workspaceId", input.workspaceId)
-          .eq("userId", inviteeResult.data.id)
-          .is("removedAt", null)
-          .maybeSingle();
-        if (existingMemberResult.error) {
-          throw existingMemberResult.error;
-        }
-        if (existingMemberResult.data !== null) {
+        const existingMember = maybeOne(
+          await ctx.db
+            .select({ userId: workspaceMember.userId })
+            .from(workspaceMember)
+            .where(
+              and(
+                eq(workspaceMember.workspaceId, input.workspaceId),
+                eq(workspaceMember.userId, invitee.id),
+                isNull(workspaceMember.removedAt)
+              )
+            )
+        );
+        if (existingMember !== null) {
           throw new Error("Already a member of this workspace.");
         }
 
@@ -317,23 +324,24 @@ export const workspaceRouter = router({
     )
     .mutation(async ({ input, ctx }) => {
       try {
-        const targetWorkspace = await ctx.postgrest.client
-          .from("Workspace")
-          .select("userId")
-          .eq("id", input.targetWorkspaceId)
-          .eq("isDeleted", false)
-          .maybeSingle();
+        const targetWorkspace = maybeOne(
+          await ctx.db
+            .select({ userId: workspaceTable.userId })
+            .from(workspaceTable)
+            .where(
+              and(
+                eq(workspaceTable.id, input.targetWorkspaceId),
+                eq(workspaceTable.isDeleted, false)
+              )
+            )
+        );
 
-        if (targetWorkspace.error) {
-          throw targetWorkspace.error;
-        }
-
-        if (targetWorkspace.data === null) {
+        if (targetWorkspace === null) {
           throw new Error("Target workspace not found");
         }
 
         const ownerPlan = await getPlanFeaturesByOwnerId(
-          targetWorkspace.data.userId,
+          targetWorkspace.userId,
           ctx
         );
 

@@ -5,8 +5,7 @@
   "sortPackageJson": false,
   "ignorePatterns": [
     "pnpm-lock.yaml",
-    "packages/prisma-client/prisma/migrations/*/client",
-    "packages/prisma-client/**/*.d.ts",
+    "packages/db/drizzle/**",
     "**/*.yml",
     "**/*.yaml",
     "**/*.toml",

@@ -12,15 +12,10 @@ const temporaryDirectories: string[] = [];
 const createRepositoryFixture = async () => {
   const root = await mkdtemp(join(tmpdir(), "webstudio-builder-backend-"));
   temporaryDirectories.push(root);
-  await mkdir(join(root, "packages/prisma-client/prisma/migrations/initial"), {
-    recursive: true,
-  });
+  await mkdir(join(root, "packages/db/drizzle"), { recursive: true });
   await mkdir(join(root, "apps/builder/backend"), { recursive: true });
   await writeFile(
-    join(
-      root,
-      "packages/prisma-client/prisma/migrations/initial/migration.sql"
-    ),
+    join(root, "packages/db/drizzle/0000_baseline.sql"),
     "SELECT 1;"
   );
   await writeFile(join(root, "apps/builder/backend/compose.yaml"), "services:");

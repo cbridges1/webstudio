@@ -56,26 +56,10 @@ const buildRow = {
 const createContext = () => {
   const selectedColumns: string[] = [];
   const context = {
-    postgrest: {
-      client: {
-        from: () => ({
-          select: (columns: string) => ({
-            selectedColumns,
-            eq: () => {
-              selectedColumns.push(columns);
-              const result = Promise.resolve({
-                data: [buildRow],
-                error: undefined,
-              });
-              return Object.assign(result, {
-                single: async () => ({
-                  data: buildRow,
-                  error: undefined,
-                }),
-              });
-            },
-          }),
-        }),
+    db: {
+      select: (fields: Record<string, unknown>) => {
+        selectedColumns.push(Object.keys(fields).join(", "));
+        return { from: () => ({ where: async () => [buildRow] }) };
       },
     },
   };
