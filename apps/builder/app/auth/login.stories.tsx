@@ -19,9 +19,7 @@ const createRouter = (element: JSX.Element) =>
   ]);
 
 export const Auth: StoryFn<typeof LoginComponent> = () => {
-  const router = createRouter(
-    <LoginComponent isGoogleEnabled={false} isSecretLoginEnabled />
-  );
+  const router = createRouter(<LoginComponent isUsernameLoginEnabled />);
   return (
     <StorySection title="Auth">
       <RouterProvider router={router} />

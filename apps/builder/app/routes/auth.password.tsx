@@ -1,4 +1,4 @@
-// selfhost: username/password sign-in, modeled on auth.dev.tsx
+// selfhost: username/password sign-in
 import { type ActionFunctionArgs } from "@remix-run/server-runtime";
 import { authenticator } from "~/services/auth.server";
 import { dashboardPath, isDashboard, loginPath } from "~/shared/router-utils";

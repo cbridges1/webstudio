@@ -5,7 +5,6 @@ import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { AuthorizationError } from "@webstudio-is/trpc-interface/index.server";
 import {
   getUserById,
-  createOrLoginWithDev,
   createOrLoginWithOAuth,
   updateUserProjectsTags,
 } from "./user.server";
@@ -52,55 +51,6 @@ describe("getUserById", () => {
   });
 });
 
-// ─── createOrLoginWithDev ──────────────────────────────────────
-
-describe("createOrLoginWithDev", () => {
-  test("returns existing user when found", async () => {
-    await seed.user(db, userRow);
-    await seed.workspace(db, {
-      id: crypto.randomUUID(),
-      userId: "user-1",
-      isDefault: true,
-    });
-
-    const result = await createOrLoginWithDev(
-      createContext(),
-      "test@example.com"
-    );
-    expect(result.id).toBe("user-1");
-    expect(await defaultWorkspaces("user-1")).toHaveLength(1);
-  });
-
-  test("lazily creates workspace when existing user has none", async () => {
-    await seed.user(db, userRow);
-
-    const result = await createOrLoginWithDev(
-      createContext(),
-      "test@example.com"
-    );
-    expect(result.id).toBe("user-1");
-    expect(await defaultWorkspaces("user-1")).toEqual([
-      { name: "My workspace", isDefault: true },
-    ]);
-  });
-
-  test("creates new user and workspace when email not found", async () => {
-    const result = await createOrLoginWithDev(
-      createContext(),
-      "new@example.com"
-    );
-
-    expect(result).toMatchObject({
-      email: "new@example.com",
-      username: "admin",
-      provider: "dev",
-    });
-    expect(await defaultWorkspaces(result.id)).toEqual([
-      { name: "My workspace", isDefault: true },
-    ]);
-  });
-});
-
 // ─── createOrLoginWithOAuth ───────────────────────────────────
 
 describe("createOrLoginWithOAuth", () => {
@@ -130,6 +80,40 @@ describe("createOrLoginWithOAuth", () => {
         image: "https://avatars.example.com/new",
         provider: "github",
       },
+    ]);
+  });
+
+  test("creates a new user with a default workspace", async () => {
+    const result = await createOrLoginWithOAuth(createContext(), {
+      provider: "github",
+      displayName: "newcomer",
+      emails: [{ value: "new@example.com" }],
+      photos: [],
+    } as unknown as Parameters<typeof createOrLoginWithOAuth>[1]);
+
+    expect(result).toMatchObject({
+      email: "new@example.com",
+      username: "newcomer",
+      provider: "github",
+    });
+    expect(await defaultWorkspaces(result.id)).toEqual([
+      { name: "My workspace", isDefault: true },
+    ]);
+  });
+
+  test("lazily creates a workspace when an existing user has none", async () => {
+    await seed.user(db, userRow);
+
+    const result = await createOrLoginWithOAuth(createContext(), {
+      provider: "github",
+      displayName: "tester",
+      emails: [{ value: "test@example.com" }],
+      photos: [],
+    } as unknown as Parameters<typeof createOrLoginWithOAuth>[1]);
+
+    expect(result.id).toBe("user-1");
+    expect(await defaultWorkspaces("user-1")).toEqual([
+      { name: "My workspace", isDefault: true },
     ]);
   });
 });

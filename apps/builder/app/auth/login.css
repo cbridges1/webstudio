@@ -1,4 +1,4 @@
-/* Login alone locks the UI document; dashboard routes retain document scrolling. */
+/* The login page scrolls when its card is taller than the window (small screens). */
 body {
-  overflow: hidden;
+  overflow: auto;
 }

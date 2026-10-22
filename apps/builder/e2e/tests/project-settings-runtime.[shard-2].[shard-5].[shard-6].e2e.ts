@@ -3,7 +3,7 @@ import type { Page as WebstudioPage } from "@webstudio-is/sdk";
 import { parseProjectAuthRoutes } from "@webstudio-is/project-build/contracts";
 import { loadDevBuild, updateProject } from "../db";
 import { openProjectBuilder, waitForCanvasText } from "../flows/builder";
-import { loginWithSecret } from "../flows/dashboard";
+import { loginWithPassword } from "../flows/dashboard";
 import {
   createPageFromTemplate,
   openPage,
@@ -269,7 +269,7 @@ test("Project settings site name and redirects persist after reload", async ({
     to: "/",
   };
 
-  await loginWithSecret({ page, email });
+  await loginWithPassword({ page, email });
 
   await measure("project settings runtime open builder", async () => {
     await openProjectBuilder({
@@ -401,7 +401,7 @@ test("Marketplace page settings persist after reload", async ({
     marketplaceApprovalStatus: "PENDING",
   });
 
-  await loginWithSecret({ page, email });
+  await loginWithPassword({ page, email });
 
   await measure("marketplace page settings open builder", async () => {
     await openProjectBuilder({
@@ -510,7 +510,7 @@ test("Project authentication routes persist after reload and deletion", async ({
   const login = "editor";
   const password = "e2e-secret";
 
-  await loginWithSecret({ page, email });
+  await loginWithPassword({ page, email });
   await measure("project auth runtime open builder", async () => {
     await openProjectBuilder({
       page,

@@ -51,6 +51,8 @@ export POSTGRES_PASSWORD="${E2E_POSTGRES_PASSWORD:-pass}"
 export DATABASE_URL="${E2E_DATABASE_URL:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${PGPORT}/${POSTGRES_DB}}"
 export DIRECT_URL="${E2E_DIRECT_URL:-$DATABASE_URL}"
 export E2E_BACKEND_MODE="${E2E_BACKEND_MODE:-test}"
+# Every test signs in with a username and password; turn off the sign-in rate limit.
+export AUTH_RATE_LIMIT="${AUTH_RATE_LIMIT:-false}"
 
 source "$ROOT_DIR/apps/builder/backend/lib.sh"
 source "$ROOT_DIR/apps/builder/e2e/run-step.sh"
@@ -93,23 +95,27 @@ bootstrap_database() {
 }
 
 install_playwright_chromium() {
+  # selfhost: tests run in Google Chrome by default (see playwright.config.ts).
+  local browser="${E2E_BROWSER_CHANNEL:-chrome}"
   chromium_executable_exists() {
-    pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/builder exec node -e '
+    E2E_BROWSER_CHANNEL="$browser" pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/builder exec node -e '
       const { chromium } = require("@playwright/test");
-      const { existsSync } = require("node:fs");
-      process.exit(existsSync(chromium.executablePath()) ? 0 : 1);
+      chromium
+        .launch({ channel: process.env.E2E_BROWSER_CHANNEL })
+        .then((instance) => instance.close())
+        .then(() => process.exit(0), () => process.exit(1));
     ' >/dev/null 2>&1
   }
 
   case "$E2E_INSTALL_PLAYWRIGHT" in
     true)
-      pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/builder exec playwright install --with-deps chromium
+      pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/builder exec playwright install --with-deps "$browser"
       ;;
     auto)
       if chromium_executable_exists; then
-        echo "Skipping Playwright Chromium install; cached executable already exists"
+        echo "Skipping Playwright browser install; $browser is already installed"
       else
-        pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/builder exec playwright install --with-deps chromium
+        pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/builder exec playwright install --with-deps "$browser"
       fi
       ;;
     false)

@@ -1,6 +1,12 @@
 {
   "extends": "@webstudio-is/tsconfig/base.json",
-  "include": ["app", "**/*.ts", "**/*.tsx", "../../@types/**/*.d.ts"],
+  "include": [
+    "app",
+    "**/*.ts",
+    "**/*.tsx",
+    "../../cli/**/*.ts",
+    "../../@types/**/*.d.ts"
+  ],
   "exclude": ["node_modules", "party"],
 
   "compilerOptions": {

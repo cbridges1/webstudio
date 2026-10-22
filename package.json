@@ -9,9 +9,10 @@
     "webstudio": "node packages/cli/local.js",
     "dts": "pnpm -r dts",
     "dev": "pnpm --filter=@webstudio-is/builder dev:local",
-    "bootstrap": "pnpm install && pnpm --filter \"@webstudio-is/builder^...\" build",
+    "bootstrap": "npx --yes pnpm@9.14.4 install && pnpm --filter \"@webstudio-is/builder^...\" build",
     "users": "pnpm --silent --filter=@webstudio-is/builder users",
-    "test:selfhost": "pnpm --filter=@webstudio-is/builder exec vitest run --project core-server app/services/password app/shared/published-domain",
+    "cli": "tsx --conditions=webstudio cli/index.ts",
+    "test:selfhost": "pnpm --filter=@webstudio-is/builder exec vitest run --project core-server app/services/better-auth.server app/shared/published-domain && pnpm --filter=@webstudio-is/db test",
     "evaluations": "pnpm --filter webstudio evaluations",
     "lint": "oxlint --deny-warnings",
     "check:package-boundaries": "node scripts/check-package-boundaries.mjs",
@@ -56,6 +57,7 @@
     "pre-commit": "./node_modules/.bin/nano-staged"
   },
   "devDependencies": {
+    "@clack/prompts": "^0.10.0",
     "@modelcontextprotocol/sdk": "^1.10.0",
     "@radix-ui/react-tooltip": "^1.2.4",
     "@storybook/addon-actions": "^8.6.4",
@@ -74,14 +76,15 @@
     "oxfmt": "0.58.0",
     "oxlint": "^1.73.0",
     "parse5": "7.3.0",
+    "pnpm": "9.14.4",
     "react": "18.3.0-canary-14898b6a9-20240318",
     "react-dom": "18.3.0-canary-14898b6a9-20240318",
     "simple-git-hooks": "^2.11.1",
     "storybook": "^8.6.4",
     "tsx": "^4.19.3",
     "typescript": "7.0.2",
-    "webstudio": "workspace:^",
-    "vite": "^6.3.4"
+    "vite": "^6.3.4",
+    "webstudio": "workspace:^"
   },
   "engines": {
     "node": "22",

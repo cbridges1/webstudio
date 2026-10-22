@@ -4,7 +4,6 @@ import { GitHubStrategy, type GitHubProfile } from "remix-auth-github";
 import { GoogleStrategy, type GoogleProfile } from "remix-auth-google";
 import * as db from "~/shared/db";
 import { sessionStorage } from "~/services/session.server";
-import { AUTH_PROVIDERS } from "~/shared/session";
 import { authCallbackPath, isBuilder } from "~/shared/router-utils";
 import { getUserById } from "~/shared/db/user.server";
 import env from "~/env/env.server";
@@ -54,7 +53,7 @@ const strategyCallback = async ({
       console.error({
         error,
         extras: {
-          loginMethod: AUTH_PROVIDERS.LOGIN_DEV,
+          loginMethod: profile.provider,
         },
       });
     }
@@ -115,50 +114,6 @@ if (env.AUTH_USERNAME_LOGIN === "true") {
       return { userId: result.userId, createdAt: Date.now() };
     }),
     "password"
-  );
-}
-
-if (env.DEV_LOGIN === "true") {
-  authenticator.use(
-    new FormStrategy(async ({ form, request }) => {
-      const secretValue = form.get("secret");
-
-      if (secretValue == null) {
-        throw new Error("Secret is required");
-      }
-
-      const secret = secretValue.toString();
-      const emailValue = form.get("email");
-      const email =
-        emailValue != null && emailValue.toString().trim() !== ""
-          ? emailValue.toString().trim()
-          : "hello@webstudio.is";
-
-      if (secret === env.AUTH_SECRET) {
-        try {
-          const context = await createContext(request);
-
-          const user = await db.user.createOrLoginWithDev(context, email);
-          return {
-            userId: user.id,
-            createdAt: Date.now(),
-          };
-        } catch (error) {
-          if (error instanceof Error) {
-            console.error({
-              error,
-              extras: {
-                loginMethod: AUTH_PROVIDERS.LOGIN_DEV,
-              },
-            });
-          }
-          throw error;
-        }
-      }
-
-      throw new Error("Secret is incorrect");
-    }),
-    "dev"
   );
 }
 

@@ -121,7 +121,7 @@ export const authCallbackPath = ({
 export const authPath = ({
   provider,
 }: {
-  provider: "google" | "github" | "dev" | "password";
+  provider: "google" | "github" | "password";
 }) => `/auth/${provider}`;
 
 export const restAssetsUploadPath = ({

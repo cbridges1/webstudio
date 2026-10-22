@@ -6,6 +6,6 @@ test("prepare Builder E2E environment", async ({ page }) => {
   await resetDatabase();
   await page.goto(`${dashboardUrl}/login`);
   await page
-    .getByRole("button", { name: "Login with Secret" })
+    .getByLabel("Username")
     .waitFor({ state: "visible", timeout: 60_000 });
 });

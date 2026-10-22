@@ -12,7 +12,7 @@ import {
   waitForSyncStatus,
 } from "../flows/sync-status";
 import { createContentModeProject } from "../fixtures/content-mode-suite";
-import { loginWithSecret } from "../flows/dashboard";
+import { loginWithPassword } from "../flows/dashboard";
 import { expectGeneratedAppToRender } from "../flows/generated-app";
 import { test } from "../test";
 import { measure } from "../perf";
@@ -363,7 +363,7 @@ test("Builder-created data variables and resources persist after reload", async 
   const graphqlQuery = "query Posts { posts { id title } }";
   const systemName = "e2eSitemap";
 
-  await loginWithSecret({ page, email });
+  await loginWithPassword({ page, email });
 
   await measure("data variables runtime open builder", async () => {
     await openProjectBuilder({
@@ -552,7 +552,7 @@ test("Text Content can bind to a Builder-created variable and persist after relo
   const staticName = "e2eTextBindingLabel";
   const staticValue = "Bound Text Content";
 
-  await loginWithSecret({ page, email });
+  await loginWithPassword({ page, email });
 
   await measure("text content binding open builder", async () => {
     await openProjectBuilder({

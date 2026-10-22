@@ -6,6 +6,11 @@ import {
 } from "./e2e/test";
 import { getE2eTestMatch } from "./e2e/test-shards";
 
+// selfhost: the builder is plain HTTP and its cookies are Secure (__Host-). Google
+// Chrome keeps Secure cookies on http://localhost; Playwright's bundled Chromium builds
+// drop them, so sign-in can't work there. Set E2E_BROWSER_CHANNEL to override.
+const browserChannel = process.env.E2E_BROWSER_CHANNEL ?? "chrome";
+
 const testTimeout =
   Number.parseInt(process.env.E2E_TEST_TIMEOUT_MS ?? "", 10) || 120_000;
 
@@ -31,12 +36,13 @@ export default defineConfig({
     {
       name: "setup",
       testMatch: /setup\.ts/,
+      use: { browserName: "chromium", channel: browserChannel },
     },
     {
       name: "chromium",
       testMatch: getE2eTestMatch(process.env.E2E_TEST_SHARD),
       dependencies: ["setup"],
-      use: { browserName: "chromium" },
+      use: { browserName: "chromium", channel: browserChannel },
     },
   ],
   webServer:

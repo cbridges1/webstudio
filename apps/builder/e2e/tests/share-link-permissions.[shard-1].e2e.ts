@@ -9,7 +9,7 @@ import {
   selectCanvasTextInstanceForProps,
 } from "../flows/canvas-selection";
 import { replaceCanvasText } from "../flows/content-editing";
-import { loginWithSecret } from "../flows/dashboard";
+import { loginWithPassword } from "../flows/dashboard";
 import {
   copyShareLink,
   createShareLink,
@@ -256,7 +256,7 @@ test("Share links enforce viewer, editor, builder, admin, and owner permissions"
       message: "Expected Style tab to be unavailable for editor link",
     });
 
-    await loginWithSecret({ page: ownerPage, email: ownerEmail });
+    await loginWithPassword({ page: ownerPage, email: ownerEmail });
     await openProjectBuilder({ page: ownerPage, projectId });
     await waitForCanvasText({ page: ownerPage, text: baselineText });
 

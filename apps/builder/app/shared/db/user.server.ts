@@ -176,21 +176,6 @@ export const createOrLoginWithOAuth = async (
   return newUser;
 };
 
-export const createOrLoginWithDev = async (
-  context: AppContext,
-  email: string
-): Promise<User> => {
-  const userData = {
-    email,
-    username: "admin",
-    image: "",
-    provider: "dev",
-  };
-
-  const newUser = await genericCreateAccount(context, userData);
-  return newUser;
-};
-
 export const userProjectTag = z.object({
   id: z.string(),
   label: z.string().min(1).max(100),

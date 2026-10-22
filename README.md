@@ -8,36 +8,56 @@
 
 ## Running this fork locally
 
-This fork adds email/password sign-in (no Google or GitHub app needed) and shows each project's
-real published address. Everything needed to run it locally is in this repository.
+This fork stores everything with Drizzle in plain Postgres, signs in with a username and password
+(no Google or GitHub app needed) and shows each project's real published address. Everything
+needed to run it locally is in this repository.
 
-**You need:** Docker Desktop, Node 22 and pnpm 9 (`corepack enable`).
+**You need:** Docker Desktop and Node 22 with npm. You don't need to install pnpm: the repository
+is a pnpm workspace, and `npm run bootstrap` fetches the pinned version for you. Use the
+`npm run` commands below rather than `npm install`.
 
 ```sh
-pnpm run bootstrap   # install dependencies and build the workspace packages the dev server loads
-pnpm run dev         # Postgres + PostgREST in Docker, migrations, then the builder
+npm run bootstrap   # install dependencies and build the workspace packages the dev server loads
+npm run dev         # Postgres in Docker, migrations, then the builder
 ```
 
 In a second terminal, create an account. There is no public sign-up.
 
 ```sh
-pnpm run users add you@example.com   # prompts for a password (12+ characters)
+npm run cli   # pick "Users — add a user"; passwords need 12+ characters
 ```
 
-Then open the `Network` address the dev server prints (usually https://wstd.dev:5173) and sign in.
-`wstd.dev` resolves to 127.0.0.1 and the certificate in `https/` covers it. The builder needs
-HTTPS even locally.
+Then open http://localhost:5173 and sign in with that username and password. Everything is plain
+HTTP: TLS and domain mapping belong to whatever hosts the builder.
 
-### Accounts
+### Dev CLI
+
+`npm run cli` opens an interactive menu:
+
+| Action                  | What it does                                                               |
+| ----------------------- | -------------------------------------------------------------------------- |
+| Setup                   | Starts the local Postgres in Docker and applies migrations                 |
+| Reset                   | Deletes the local database, then runs Setup                                |
+| Destroy                 | Stops Postgres and deletes the local database, with every user and project |
+| Users — add a user      | Creates an account with its default workspace                              |
+| List users              | Shows each account, its email and whether it can sign in                   |
+| Set a password          | Replaces a user's password                                                 |
+| Disable / Enable a user | Blocks or allows sign-in; the user's projects stay                         |
+
+An email is optional, but only accounts with one can accept workspace invites. Sign-in allows 5
+attempts per minute from one address. The account actions use `DATABASE_URL` (the environment
+first, then `apps/builder/.env.development`, then `apps/builder/.env`).
+
+For scripts, the same account actions are available without prompts:
 
 ```sh
-pnpm run users list
-pnpm run users set-password you@example.com      # also clears a lockout
-pnpm run users remove-password you@example.com   # disables sign-in
+npm run users -- add you --email you@example.com --password-stdin < password.txt
+npm run users -- list
+npm run users -- set-password you
+npm run users -- disable you   # enable undoes it
 ```
 
-Add `--password-stdin` to read the password from stdin instead of prompting. An account locks for
-15 minutes after 10 wrong passwords.
+The `--` passes the options through npm.
 
 ### Settings
 
@@ -46,25 +66,25 @@ Local settings are in `apps/builder/.env`. Put overrides in `apps/builder/.env.d
 
 | Variable                                   | Purpose                                                                                                                                      |
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AUTH_PASSWORD_LOGIN=true`                 | Email/password sign-in                                                                                                                       |
-| `DEV_LOGIN=true`                           | Upstream's local-only "Login with Secret" (uses `AUTH_SECRET`). The builder refuses to start with it in production                           |
+| `AUTH_USERNAME_LOGIN=true`                 | Username/password sign-in                                                                                                                    |
+| `BETTER_AUTH_SECRET`                       | Signs sign-in requests. The checked-in value is for local use only; production needs its own random 32+ character secret                     |
+| `AUTH_SECRET`                              | Signs the builder's session cookies                                                                                                          |
 | `TRPC_SERVER_URL`, `TRPC_SERVER_API_TOKEN` | Optional deploy service for **Publish**. Without one, Publish shows upstream's "use the Webstudio CLI" message, which is fine for local work |
 | `STAGING_USERNAME=`, `STAGING_PASSWORD=`   | Set both empty when using a deploy service, so published links don't include basic-auth credentials                                          |
 
 ### Existing databases
 
-`pnpm run dev` only sets up an empty database. After pulling new migrations, apply them with:
+`npm run dev` applies new migrations when it starts. To apply them to another database, set
+`DATABASE_URL` and run:
 
 ```sh
-pnpm run migrations migrate
+npm run migrations
 ```
-
-Then restart `pnpm run dev` so PostgREST picks up the new tables.
 
 ### Tests for this fork's changes
 
 ```sh
-pnpm run test:selfhost
+npm run test:selfhost
 ```
 
 ## Learning Resources

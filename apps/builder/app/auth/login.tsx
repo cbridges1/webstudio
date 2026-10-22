@@ -1,5 +1,6 @@
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import {
+  Box,
   Button,
   Flex,
   Text,
@@ -7,99 +8,168 @@ import {
   cssVar,
   webstudioBrand,
 } from "@webstudio-is/design-system";
-import { GithubIcon, GoogleIcon, WebstudioIcon } from "@webstudio-is/icons";
+import {
+  AlertCircleIcon,
+  GithubIcon,
+  GoogleIcon,
+  WebstudioIcon,
+} from "@webstudio-is/icons";
 import { Form } from "@remix-run/react";
 import { authPath } from "~/shared/router-utils";
-import { SecretLogin } from "./secret-login";
 import { PasswordLogin } from "./password-login";
 
 export type LoginProps = {
   errorMessage?: string;
   isGithubEnabled?: boolean;
   isGoogleEnabled?: boolean;
-  isSecretLoginEnabled?: boolean;
   isUsernameLoginEnabled?: boolean;
-  devPlanNames?: string[];
 };
+
+const ErrorBanner = ({ message }: { message: string }) => (
+  <Flex
+    role="alert"
+    align="start"
+    gap="2"
+    css={{
+      padding: `${theme.spacing[6]} ${theme.spacing[7]}`,
+      borderRadius: theme.borderRadius[6],
+      color: cssVar("--foreground-negative"),
+      backgroundColor: `oklch(from ${cssVar("--foreground-negative")} l c h / 10%)`,
+      border: `1px solid oklch(from ${cssVar("--foreground-negative")} l c h / 25%)`,
+    }}
+  >
+    <Box css={{ flexShrink: 0, lineHeight: 0, paddingTop: 1 }}>
+      <AlertCircleIcon fill="currentColor" />
+    </Box>
+    <Text color="destructive">{message}</Text>
+  </Flex>
+);
+
+const Divider = () => (
+  <Flex align="center" gap="3">
+    <Box
+      css={{ flex: 1, height: 1, backgroundColor: cssVar("--border-default") }}
+    />
+    <Text variant="labels" color="moreSubtle">
+      or
+    </Text>
+    <Box
+      css={{ flex: 1, height: 1, backgroundColor: cssVar("--border-default") }}
+    />
+  </Flex>
+);
 
 export const Login = ({
   errorMessage,
   isGithubEnabled,
   isGoogleEnabled,
-  isSecretLoginEnabled,
   isUsernameLoginEnabled,
-  devPlanNames,
 }: LoginProps) => {
+  const isOAuthEnabled = isGoogleEnabled || isGithubEnabled;
   return (
     <Flex
       align="center"
       justify="center"
       css={{
-        height: "100vh",
+        minHeight: "100dvh",
+        padding: theme.spacing[9],
+        boxSizing: "border-box",
         color: cssVar("--foreground-primary"),
         background: webstudioBrand.backgroundGradient,
       }}
     >
       <Flex
+        as="main"
         direction="column"
-        align="center"
         gap="6"
         css={{
-          width: theme.spacing[35],
-          minWidth: theme.spacing[20],
-          padding: theme.spacing[17],
-          borderRadius: theme.spacing[5],
-          backgroundColor: `oklch(from ${cssVar("--background-primary")} l c h / 50%)`,
+          width: "100%",
+          maxWidth: 400,
+          boxSizing: "border-box",
+          padding: `${theme.spacing[17]} ${theme.spacing[13]}`,
+          borderRadius: theme.spacing[9],
+          backgroundColor: `oklch(from ${cssVar("--background-primary")} l c h / 82%)`,
+          backdropFilter: "blur(24px) saturate(140%)",
+          border: `1px solid oklch(from ${cssVar("--border-default")} l c h / 60%)`,
+          boxShadow:
+            "0 1px 2px #1717170d, 0 12px 32px -8px #17171726, 0 32px 64px -24px #17171733",
+          "@media (max-width: 480px)": {
+            padding: `${theme.spacing[13]} ${theme.spacing[11]}`,
+          },
         }}
       >
-        <WebstudioIcon size={48} />
-        <Text variant="brandSectionTitle" as="h1" align="center">
-          Welcome to Webstudio
-        </Text>
+        <Flex direction="column" align="center" gap="3">
+          <Flex
+            align="center"
+            justify="center"
+            css={{
+              width: 64,
+              height: 64,
+              borderRadius: theme.spacing[9],
+              backgroundColor: cssVar("--background-primary"),
+              boxShadow: "0 4px 12px #1717171f",
+            }}
+          >
+            <WebstudioIcon size={40} />
+          </Flex>
+          <Flex direction="column" align="center" gap="1">
+            <Text variant="brandSectionTitle" as="h1" align="center">
+              Welcome back
+            </Text>
+            <Text align="center" color="subtle">
+              Sign in to continue to Webstudio
+            </Text>
+          </Flex>
+        </Flex>
+
+        {errorMessage ? <ErrorBanner message={errorMessage} /> : null}
 
         <TooltipProvider>
-          <Flex direction="column" gap="3" css={{ width: "100%" }}>
+          <Flex direction="column" gap="4">
             {isUsernameLoginEnabled && <PasswordLogin />}
-            <Form
-              method="post"
-              style={{
-                // selfhost: hide OAuth when no provider is configured
-                display:
-                  isGoogleEnabled || isGithubEnabled ? "contents" : "none",
-              }}
-            >
-              <Button
-                disabled={isGoogleEnabled === false}
-                prefix={<GoogleIcon size={22} />}
-                color="primary"
-                css={{ height: theme.spacing[15] }}
-                formAction={authPath({ provider: "google" })}
-              >
-                Sign in with Google
-              </Button>
-              <Button
-                disabled={isGithubEnabled === false}
-                prefix={<GithubIcon size={22} fill="currentColor" />}
-                color="ghost"
-                css={{
-                  border: `1px solid ${cssVar("--border-default")}`,
-                  height: theme.spacing[15],
-                }}
-                formAction={authPath({ provider: "github" })}
-              >
-                Sign in with GitHub
-              </Button>
-            </Form>
-            {isSecretLoginEnabled && (
-              <SecretLogin devPlanNames={devPlanNames} />
+            {isOAuthEnabled && (
+              <>
+                {isUsernameLoginEnabled && <Divider />}
+                <Form method="post" style={{ display: "contents" }}>
+                  <Flex direction="column" gap="2">
+                    {isGoogleEnabled && (
+                      <Button
+                        prefix={<GoogleIcon size={20} />}
+                        color="neutral"
+                        css={{
+                          height: theme.spacing[15],
+                          borderRadius: theme.borderRadius[6],
+                        }}
+                        formAction={authPath({ provider: "google" })}
+                      >
+                        Continue with Google
+                      </Button>
+                    )}
+                    {isGithubEnabled && (
+                      <Button
+                        prefix={<GithubIcon size={20} fill="currentColor" />}
+                        color="neutral"
+                        css={{
+                          height: theme.spacing[15],
+                          borderRadius: theme.borderRadius[6],
+                        }}
+                        formAction={authPath({ provider: "github" })}
+                      >
+                        Continue with GitHub
+                      </Button>
+                    )}
+                  </Flex>
+                </Form>
+              </>
+            )}
+            {isUsernameLoginEnabled !== true && isOAuthEnabled !== true && (
+              <Text align="center" color="subtle">
+                Sign-in isn't configured. Set AUTH_USERNAME_LOGIN=true in the
+                builder's environment.
+              </Text>
             )}
           </Flex>
         </TooltipProvider>
-        {errorMessage ? (
-          <Text align="center" color="destructive">
-            {errorMessage}
-          </Text>
-        ) : null}
       </Flex>
     </Flex>
   );

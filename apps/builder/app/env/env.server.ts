@@ -2,11 +2,12 @@ import { z } from "zod";
 
 const environment = z.object({
   // Authentication
-  DEV_LOGIN: z.string().optional(),
   // selfhost: username/password sign-in (Better Auth)
   AUTH_USERNAME_LOGIN: z.string().optional(),
   BETTER_AUTH_SECRET: z.string().optional(),
   BETTER_AUTH_URL: z.string().url().optional(),
+  // "false" turns off the sign-in rate limit (e2e runs only; refused in production).
+  AUTH_RATE_LIMIT: z.string().optional(),
   GH_CLIENT_ID: z.string().optional(),
   GH_CLIENT_SECRET: z.string().optional(),
   GITHUB_ISSUE_REPORT_APP_ID: z.string().optional(),
@@ -87,10 +88,10 @@ const environment = z.object({
 });
 
 const rawEnv = {
-  DEV_LOGIN: process.env.DEV_LOGIN,
   AUTH_USERNAME_LOGIN: process.env.AUTH_USERNAME_LOGIN,
   BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
   BETTER_AUTH_URL: process.env.BETTER_AUTH_URL,
+  AUTH_RATE_LIMIT: process.env.AUTH_RATE_LIMIT,
   GH_CLIENT_ID: process.env.GH_CLIENT_ID,
   GH_CLIENT_SECRET: process.env.GH_CLIENT_SECRET,
   GITHUB_ISSUE_REPORT_APP_ID: process.env.GITHUB_ISSUE_REPORT_APP_ID,
@@ -153,15 +154,6 @@ if (
   );
 }
 
-// selfhost: dev login signs anyone in with AUTH_SECRET; never allow it in production.
-if (
-  env.DEV_LOGIN === "true" &&
-  (process.env.NODE_ENV === "production" ||
-    env.DEPLOYMENT_ENVIRONMENT === "production")
-) {
-  throw new Error("DEV_LOGIN must not be enabled in production");
-}
-
 // selfhost: Better Auth signs its tokens with BETTER_AUTH_SECRET.
 if (
   env.AUTH_USERNAME_LOGIN === "true" &&
@@ -172,6 +164,19 @@ if (
   throw new Error(
     "BETTER_AUTH_SECRET (32+ characters) must be set to use username sign-in in production"
   );
+}
+
+// selfhost: e2e runs (a production build) sign in far more often than the rate limit
+// allows, so only a production deployment refuses to turn it off.
+if (env.AUTH_RATE_LIMIT === "false") {
+  if (env.DEPLOYMENT_ENVIRONMENT === "production") {
+    throw new Error("AUTH_RATE_LIMIT=false must not be used in production");
+  }
+  if (process.env.NODE_ENV === "production") {
+    console.warn(
+      "AUTH_RATE_LIMIT=false: sign-in attempts are not rate-limited"
+    );
+  }
 }
 
 export type ServerEnv = typeof env;

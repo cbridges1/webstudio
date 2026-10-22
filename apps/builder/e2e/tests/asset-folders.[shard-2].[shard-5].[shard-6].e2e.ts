@@ -6,7 +6,7 @@ import {
   uploadAsset,
 } from "../flows/assets-panel";
 import { openProjectBuilder } from "../flows/builder";
-import { loginWithSecret } from "../flows/dashboard";
+import { loginWithPassword } from "../flows/dashboard";
 import {
   waitForChangeToBeSaved,
   waitForSyncStatus,
@@ -45,7 +45,7 @@ test("Cloning a project preserves nested asset folders", async ({
       filename: "upload-image.svg",
     });
 
-    await loginWithSecret({ page, email });
+    await loginWithPassword({ page, email });
     const cloneUrl = new URL("/dashboard", dashboardUrl);
     cloneUrl.searchParams.set("projectToCloneAuthToken", fixture.builderToken);
     await page.goto(cloneUrl.href);

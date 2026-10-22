@@ -9,7 +9,7 @@ import {
   startGraphqlResourceServer,
   startJsonResourceServer,
 } from "../flows/data-variables";
-import { loginWithSecret } from "../flows/dashboard";
+import { loginWithPassword } from "../flows/dashboard";
 import { expectGeneratedAppToRender } from "../flows/generated-app";
 import { createContentModeProject } from "../fixtures/content-mode-suite";
 import { test } from "../test";
@@ -36,7 +36,7 @@ const openGeneratedResourceProject = async ({
     editorToken: `${assetNamePrefix}editor-token`,
     builderToken: `${assetNamePrefix}builder-token`,
   });
-  await loginWithSecret({ page, email });
+  await loginWithPassword({ page, email });
   await measure(`${title} open builder`, async () => {
     await openProjectBuilder({
       page,

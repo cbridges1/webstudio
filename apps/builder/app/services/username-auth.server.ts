@@ -16,6 +16,7 @@ export const getBetterAuth = () => {
       env.BETTER_AUTH_URL ??
       env.DEPLOYMENT_URL ??
       `http://localhost:${env.PORT}`,
+    rateLimit: env.AUTH_RATE_LIMIT !== "false",
   });
   return betterAuth;
 };

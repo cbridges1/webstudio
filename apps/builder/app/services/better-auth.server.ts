@@ -19,6 +19,8 @@ import {
 
 export const minPasswordLength = 12;
 export const maxPasswordLength = 128;
+/** Usernames have 3–32 lowercase letters, digits, '.', '_' or '-'. */
+export const usernamePattern = /^[a-z0-9_.-]{3,32}$/;
 
 const basePath = "/api/auth";
 
@@ -26,11 +28,14 @@ export const createBetterAuth = ({
   db,
   secret,
   baseURL,
+  rateLimit = true,
 }: {
   db: Db;
   secret: string;
   /** The builder's public origin. */
   baseURL: string;
+  /** Limits sign-in attempts per client address. Only e2e runs turn it off. */
+  rateLimit?: boolean;
 }) =>
   betterAuth({
     secret,
@@ -63,13 +68,15 @@ export const createBetterAuth = ({
       username({
         minUsernameLength: 3,
         maxUsernameLength: 32,
+        // The same rule the account tools check (Better Auth's default has no '-').
+        usernameValidator: (value) => usernamePattern.test(value),
         schema: { user: { fields: { username: "loginName" } } },
       }),
       admin(),
     ],
     disabledPaths: ["/sign-in/email", "/sign-up/email"],
     rateLimit: {
-      enabled: true,
+      enabled: rateLimit,
       // Survives restarts and is shared by every builder instance.
       storage: "database",
       modelName: "AuthRateLimit",

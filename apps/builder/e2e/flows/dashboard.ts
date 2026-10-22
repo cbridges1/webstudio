@@ -1,6 +1,14 @@
 import { dashboardUrl, getProjectIdFromBuilderUrl } from "../test";
 import type { Page } from "@playwright/test";
+import { createHash } from "node:crypto";
+import { createDb, type Db } from "@webstudio-is/db";
+import { applyDevPlan } from "@webstudio-is/plans/index.server";
 import env from "../../app/env/env.server";
+import { createBetterAuth } from "../../app/services/better-auth.server";
+import {
+  createUserAccounts,
+  type UserAccounts,
+} from "../../app/services/user-accounts.server";
 
 const loginReadyTimeout = 30_000;
 
@@ -15,7 +23,47 @@ export const getWorkerEmail = (
   return `${email.slice(0, separatorIndex)}+worker-${parallelIndex}${email.slice(separatorIndex)}`;
 };
 
-export const loginWithSecret = async ({
+/** Every e2e account uses this password; e2e databases are disposable. */
+const e2ePassword = "e2e-password-not-secret";
+
+let db: Db | undefined;
+const getDb = () => (db ??= createDb(env.DATABASE_URL, { max: 2 }));
+
+let accounts: UserAccounts | undefined;
+const getAccounts = () => {
+  if (accounts === undefined) {
+    const db = getDb();
+    accounts = createUserAccounts({
+      db,
+      auth: createBetterAuth({
+        db,
+        secret: env.BETTER_AUTH_SECRET ?? env.AUTH_SECRET ?? "",
+        baseURL: dashboardUrl,
+      }),
+    });
+  }
+  return accounts;
+};
+
+/**
+ * A username unique to the worker's email: a readable prefix of its local part plus a
+ * hash of the whole address (usernames have at most 32 characters).
+ */
+export const getWorkerUsername = (email: string) => {
+  const prefix = email
+    .slice(0, email.lastIndexOf("@"))
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .slice(0, 23);
+  const hash = createHash("sha256").update(email).digest("hex").slice(0, 8);
+  return `${prefix}-${hash}`;
+};
+
+/**
+ * Signs in as the account for this worker's email, creating it on first use (there
+ * is no sign-up). A devPlan gives the account that plan, as upstream's dev login did.
+ */
+export const loginWithPassword = async ({
   page,
   email,
   devPlan,
@@ -30,13 +78,11 @@ export const loginWithSecret = async ({
 
   console.info("e2e: opening login");
   await page.goto(`${dashboardUrl}/login`);
-  const loginWithSecretButton = page.getByRole("button", {
-    name: "Login with Secret",
-  });
+  const usernameField = page.getByLabel("Username");
   let loginState: "login" | "dashboard";
   try {
     loginState = await Promise.any([
-      loginWithSecretButton
+      usernameField
         .waitFor({ state: "visible", timeout: loginReadyTimeout })
         .then(() => "login" as const),
       page
@@ -59,17 +105,19 @@ export const loginWithSecret = async ({
     console.info("e2e: dashboard loaded");
     return;
   }
-  await loginWithSecretButton.click();
-  if (env.AUTH_SECRET === undefined) {
-    throw new Error("AUTH_SECRET must be set for e2e dev login");
+
+  const workerEmail = getWorkerEmail(email);
+  const username = getWorkerUsername(workerEmail);
+  const accounts = getAccounts();
+  if ((await accounts.exists(username)) === false) {
+    await accounts.add({ username, email: workerEmail, password: e2ePassword });
   }
-  await page.getByPlaceholder("Auth secret").fill(env.AUTH_SECRET);
-  await page.getByPlaceholder("Email (optional)").fill(getWorkerEmail(email));
-  if (devPlan !== undefined) {
-    await page.locator('select[name="devPlan"]').selectOption(devPlan);
-  }
-  console.info("e2e: submitting dev login");
-  await page.getByRole("button", { name: "Login" }).click();
+  await applyDevPlan(workerEmail, devPlan ?? null, { db: getDb() });
+
+  await usernameField.fill(username);
+  await page.getByLabel("Password", { exact: true }).fill(e2ePassword);
+  console.info("e2e: submitting sign-in");
+  await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL(`${dashboardUrl}/dashboard`);
   console.info("e2e: dashboard loaded");
 };
@@ -102,7 +150,7 @@ export const createBlankProject = async ({
   await page.getByPlaceholder("My Project").fill(title);
   console.info("e2e: submitting create project");
   await page.getByRole("button", { name: "Create Project" }).click();
-  await page.waitForURL(/https:\/\/p-[^.]+\.wstd\.dev:\d+\//);
+  await page.waitForURL(/\/\/p-[^.]+\.localhost:\d+\//);
   console.info(`e2e: created project at ${page.url()}`);
 
   const projectId = getProjectIdFromBuilderUrl(page.url());
@@ -123,6 +171,6 @@ export const loginAndCreateBlankProject = async ({
   title: string;
   devPlan?: string;
 }) => {
-  await loginWithSecret({ page, email, devPlan });
+  await loginWithPassword({ page, email, devPlan });
   return await createBlankProject({ page, title });
 };
