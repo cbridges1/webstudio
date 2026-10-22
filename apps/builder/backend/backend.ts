@@ -179,9 +179,7 @@ const findPackageDir = (fromDir: string, packageName: string) => {
       return candidate;
     }
     if (dirname(directory) === directory) {
-      throw new Error(
-        `${packageName} is not installed (run npm run bootstrap)`
-      );
+      throw new Error(`${packageName} is not installed (run npm run setup)`);
     }
   }
 };

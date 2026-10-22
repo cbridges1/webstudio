@@ -11,7 +11,6 @@
     "dev": "node scripts/knowbra-webstudio.mjs dev",
     "cli": "node scripts/knowbra-webstudio.mjs cli",
     "setup": "node scripts/knowbra-webstudio.mjs setup",
-    "bootstrap": "npx --yes pnpm@9.14.4 install && pnpm --filter \"@webstudio-is/builder^...\" build",
     "test:selfhost": "pnpm --filter=@webstudio-is/builder exec vitest run --project core-server app/services/better-auth.server app/shared/published-domain && pnpm --filter=@webstudio-is/db test",
     "evaluations": "pnpm --filter webstudio evaluations",
     "lint": "oxlint --deny-warnings",
@@ -47,11 +46,7 @@
     "visual-regression:typecheck": "tsc -p scripts/visual-regression/tsconfig.json",
     "migrations": "pnpm --filter=@webstudio-is/db migrate",
     "prepare": "which git && git config core.hooksPath .git/hooks/ && simple-git-hooks || echo git not installed",
-    "local:version-snapshot": "pnpm -r exec pnpm version prepatch --preid $(cat /dev/urandom | LC_ALL=C tr -dc 'a-z' | fold -w 8 | head -n 1)",
-    "local:publish-snapshot": "pnpm -r publish --access public --no-git-checks --registry http://localhost:4873",
-    "local:dangerously-undo-version-snapshot": "git restore --source=$(git branch --show-current) '**/*/package.json'",
-    "local:release": "pnpm build && pnpm dts && pnpm local:version-snapshot && pnpm local:publish-snapshot && pnpm local:dangerously-undo-version-snapshot && echo \"now execute\npnpm up -r -L '@webstudio-is/*' --registry http://localhost:4873\"",
-    "clean:deep": "bash ./cleanup.sh"
+    "clean:deep": "node scripts/clean-deep.mjs"
   },
   "simple-git-hooks": {
     "pre-commit": "./node_modules/.bin/nano-staged"

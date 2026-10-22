@@ -36,7 +36,10 @@ runs:
     - name: Try checkout submodules to the same branch as main repo
       if: ${{ inputs.submodules-ssh-key }}
       run: |
-        ./submodules.sh ${{ github.event.pull_request.head.ref || github.ref_name }}
+        git submodule update --init --recursive
+        git submodule foreach 'git checkout "$BRANCH" 2>/dev/null && git pull origin "$BRANCH" || (git checkout main && git pull origin main)'
+      env:
+        BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
       shell: bash
 
     - name: Show main readme
