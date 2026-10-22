@@ -144,7 +144,7 @@ const blockMeta: TemplateMeta = {
 const builtWithWebstudioMeta: TemplateMeta = {
   category: "other",
   description:
-    "A “Built with Webstudio” badge should be added to every project page on the free plan. This helps Webstudio spread awareness as a platform.",
+    "An optional “Built with Webstudio” badge that links to webstudio.is.",
   icon: Webstudio1cIcon,
   template: setInstanceMeta(
     { label: "Built with Webstudio" },

@@ -89,11 +89,9 @@ const keyDown = (element: Element, key: string) => {
 };
 
 const renderShareProject = ({
-  allowAdditionalPermissions = true,
   linkOptions = link,
   onChange,
 }: {
-  allowAdditionalPermissions?: boolean;
   linkOptions?: LinkOptions;
   onChange: (value: LinkOptions) => void;
 }) => {
@@ -112,8 +110,6 @@ const renderShareProject = ({
           builderUrl: ({ authToken }) =>
             `https://example.com?token=${authToken}`,
           isPending: false,
-          allowAdditionalPermissions,
-          isFreePlan: allowAdditionalPermissions === false,
         }),
       })
     );
@@ -240,50 +236,9 @@ describe("ShareProject", () => {
     });
   });
 
-  test("disables api permission when it requires an upgrade", () => {
+  test("allows removing an existing api permission", () => {
     const onChange = vi.fn();
     renderShareProject({
-      allowAdditionalPermissions: false,
-      onChange,
-    });
-
-    const optionsButton = getElement('[aria-label="Options menu"]');
-    click(optionsButton);
-
-    const apiCheckbox = getControlByLabel<HTMLButtonElement>("API");
-    expect(apiCheckbox.disabled).toBe(true);
-    click(apiCheckbox);
-    click(optionsButton);
-
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  test("disables missing api permission when it requires an upgrade", () => {
-    const onChange = vi.fn();
-    renderShareProject({
-      allowAdditionalPermissions: false,
-      linkOptions: {
-        ...link,
-        canUseApi: undefined as unknown as boolean,
-      },
-      onChange,
-    });
-
-    const optionsButton = getElement('[aria-label="Options menu"]');
-    click(optionsButton);
-
-    const apiCheckbox = getControlByLabel<HTMLButtonElement>("API");
-    expect(apiCheckbox.disabled).toBe(true);
-    click(apiCheckbox);
-    click(optionsButton);
-
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  test("allows removing existing api permission without an upgrade", () => {
-    const onChange = vi.fn();
-    renderShareProject({
-      allowAdditionalPermissions: false,
       linkOptions: {
         ...link,
         canUseApi: true,

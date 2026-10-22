@@ -43,7 +43,6 @@ import {
   InputErrorsTooltip,
   InputField,
   Label,
-  ProChip,
   Select,
   SmallIconButton,
   Text,
@@ -55,7 +54,6 @@ import {
 import { TrashIcon, InfoCircleIcon, PlusIcon } from "@webstudio-is/icons";
 import { humanizeString } from "~/shared/string-utils";
 import {
-  $permissions,
   $selectedInstance,
   $selectedInstancePathWithRoot,
   $selectedPage,
@@ -922,7 +920,6 @@ export const SystemResourceForm = forwardRef<
   } = props;
   const { scope, aliases } = useResourceScope({ variable });
   const resources = useStore($resources);
-  const { allowDynamicData } = useStore($permissions);
 
   const resource =
     variable?.type === "resource"
@@ -1022,8 +1019,6 @@ export const SystemResourceForm = forwardRef<
             getLabel={(option) => (
               <Flex direction="row" gap="2" align="center">
                 {option.label}
-                {option.value === assetsLocalResource.value &&
-                  allowDynamicData === false && <ProChip>Pro</ProChip>}
               </Flex>
             )}
             getValue={(option) => option.value}

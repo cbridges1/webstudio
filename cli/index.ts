@@ -6,6 +6,7 @@
 // Setup, Reset and Destroy manage the local development Postgres that `npm run dev`
 // uses (apps/builder/backend). WEBSTUDIO_CLI_DATABASE_ACTIONS=false hides them, for
 // stacks that run their own database (webstudio-selfhost's `selfhost.sh cli`).
+// Drizzle Studio opens the same database in the browser.
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
@@ -77,6 +78,55 @@ const setup = () => {
   log.success("Database ready. Start the builder with: npm run dev");
 };
 
+/** host:port of DATABASE_URL, for messages (never the password). */
+const databaseAddress = () => {
+  try {
+    const url = new URL(process.env.DATABASE_URL ?? "");
+    return `${url.hostname}:${url.port || "5432"}`;
+  } catch {
+    return "DATABASE_URL";
+  }
+};
+
+const isConnectionRefused = (error: unknown) =>
+  ((error as { cause?: { code?: string } })?.cause?.code ??
+    (error as { code?: string })?.code) === "ECONNREFUSED";
+
+/**
+ * Opens Drizzle Studio on DATABASE_URL until Ctrl+C, then returns to the menu.
+ * DRIZZLE_STUDIO_PORT picks the port (4984, so it doesn't clash with other apps'
+ * Studio on drizzle-kit's default 4983).
+ */
+const studio = () => {
+  const port = process.env.DRIZZLE_STUDIO_PORT ?? "4984";
+  log.step(`Opening Drizzle Studio for ${databaseAddress()}. Ctrl+C to stop.`);
+  // Ctrl+C reaches Studio too; the CLI ignores it while Studio runs.
+  const ignore = () => {};
+  process.on("SIGINT", ignore);
+  try {
+    spawnSync(
+      "npx",
+      [
+        "--no-install",
+        "drizzle-kit",
+        "studio",
+        "--port",
+        port,
+        "--host",
+        "127.0.0.1",
+      ],
+      {
+        cwd: join(rootDir, "packages/db"),
+        stdio: "inherit",
+        // drizzle.config.ts prefers DIRECT_URL; open the account actions' database.
+        env: { ...process.env, DIRECT_URL: process.env.DATABASE_URL },
+      }
+    );
+  } finally {
+    process.off("SIGINT", ignore);
+  }
+};
+
 const destroy = async () => {
   const sure = answer(
     await confirm({
@@ -94,26 +144,46 @@ const destroy = async () => {
   return true;
 };
 
-/** Opens the account database for one action and explains connection failures. */
+/**
+ * Opens the account database for one action. When the local dev database isn't
+ * running, offers to start it and tries again.
+ */
 const withAccounts = async (
-  run: (accounts: ReturnType<typeof openAccounts>["accounts"]) => Promise<void>
-) => {
+  run: (accounts: ReturnType<typeof openAccounts>["accounts"]) => Promise<void>,
+  retry = true
+): Promise<void> => {
   const { accounts, close } = openAccounts();
   try {
     await run(accounts);
+    return;
   } catch (error) {
-    const code =
-      (error as { cause?: { code?: string } })?.cause?.code ??
-      (error as { code?: string })?.code;
-    if (code === "ECONNREFUSED") {
-      throw new Error(
-        "Can't reach the database. Run Setup first (or npm run dev), or check DATABASE_URL."
-      );
+    if (isConnectionRefused(error) === false) {
+      throw error;
     }
-    throw error;
   } finally {
     await close();
   }
+  if (hasDatabaseActions === false) {
+    throw new Error(
+      `Can't reach the database at ${databaseAddress()}. Start it with: scripts/selfhost.sh up`
+    );
+  }
+  log.warn(`The database at ${databaseAddress()} isn't running.`);
+  const start =
+    retry &&
+    answer(
+      await confirm({
+        message: "Start the local database now?",
+        initialValue: true,
+      })
+    );
+  if (start === false) {
+    throw new Error(
+      "Can't reach the database. Run Setup (or npm run dev), or check DATABASE_URL."
+    );
+  }
+  setup();
+  await withAccounts(run, false);
 };
 
 const askPassword = async (message = "Password") => {
@@ -255,6 +325,7 @@ const main = async () => {
                 },
               ]
             : []),
+          { value: "studio", label: "Drizzle Studio — browse the database" },
           { value: "user:add", label: "─── Users — add a user" },
           { value: "user:list", label: "    List users" },
           { value: "user:password", label: "    Set a password" },
@@ -277,6 +348,9 @@ const main = async () => {
           break;
         case "destroy":
           await destroy();
+          break;
+        case "studio":
+          studio();
           break;
         case "user:add":
           await addUser();

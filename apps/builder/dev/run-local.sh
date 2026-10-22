@@ -19,7 +19,12 @@ export DATABASE_URL="${DATABASE_URL:-$(read_builder_env DATABASE_URL)}"
 export DIRECT_URL="${DIRECT_URL:-$(read_builder_env DIRECT_URL)}"
 builder_backend_init_schema_snapshot
 
+STUDIO_PID=""
+
 cleanup() {
+  if [ -n "$STUDIO_PID" ]; then
+    kill "$STUDIO_PID" 2>/dev/null || true
+  fi
   if [ "${LOCAL_DEV_CLEANUP:-${LOCAL_DEV_START_BUILDER:-true}}" != "true" ]; then
     return
   fi
@@ -44,5 +49,14 @@ builder_backend_bootstrap_if_empty
 builder_backend_migrate
 
 if [ "${LOCAL_DEV_START_BUILDER:-true}" = "true" ]; then
+  # Drizzle Studio on the same database, like the builder's other local tools.
+  # Port 4984 leaves drizzle-kit's default 4983 to other apps; LOCAL_DEV_STUDIO=false skips it.
+  if [ "${LOCAL_DEV_STUDIO:-true}" = "true" ]; then
+    studio_port="${DRIZZLE_STUDIO_PORT:-4984}"
+    (cd "$ROOT_DIR/packages/db" &&
+      exec ./node_modules/.bin/drizzle-kit studio --port "$studio_port" --host 127.0.0.1) &
+    STUDIO_PID=$!
+    echo "Drizzle Studio: https://local.drizzle.studio?port=$studio_port"
+  fi
   pnpm --dir "$ROOT_DIR" --filter=@webstudio-is/builder dev
 fi

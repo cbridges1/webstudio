@@ -1,14 +1,9 @@
-import { describe, test, expect, afterEach } from "vitest";
-import { product, transactionLog } from "@webstudio-is/db";
+import { describe, test, expect } from "vitest";
 import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { resolveTopics } from "./topic-resolvers.server";
 
 const db = setupTestDb();
-
-afterEach(() => {
-  delete process.env.PLANS;
-});
 
 const createContext = (userId = "user-1"): AppContext =>
   ({
@@ -62,33 +57,9 @@ describe("seatSuspended", () => {
     expect(result.seatSuspended).toBe(false);
   });
 
-  test("returns workspace name when owner has default (free) plan", async () => {
-    // No purchases → defaultPlanFeatures (maxWorkspaces=1 → suspended)
+  test("returns false for members of someone else's workspace", async () => {
+    // selfhost: no plans, so an owner's members are never suspended.
     await seedMembership("owner-1", "user-1", "Owner Workspace");
-
-    const result = await resolveTopics(
-      ["seatSuspended"],
-      createContext("user-1")
-    );
-    expect(result.seatSuspended).toBe("Owner Workspace");
-  });
-
-  test("returns false when owner has upgraded plan (maxWorkspaces > 1)", async () => {
-    process.env.PLANS = JSON.stringify([
-      { name: "Pro", features: { maxWorkspaces: 5 } },
-    ]);
-    await seedMembership("owner-1", "user-1", "Owner Workspace");
-    await db.insert(product).values({ id: "prod-pro", name: "Pro", meta: {} });
-    await db.insert(transactionLog).values({
-      eventId: "evt-pro",
-      userId: "owner-1",
-      productId: "prod-pro",
-      eventData: {
-        type: "checkout.session.completed",
-        created: 100,
-        data: { object: { status: "complete" } },
-      },
-    });
 
     const result = await resolveTopics(
       ["seatSuspended"],

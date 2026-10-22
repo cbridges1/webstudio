@@ -1,12 +1,5 @@
 import { useStore } from "@nanostores/react";
-import {
-  Flex,
-  Tooltip,
-  Text,
-  theme,
-  LinkButton,
-  Checkbox,
-} from "@webstudio-is/design-system";
+import { Tooltip, Text, Checkbox } from "@webstudio-is/design-system";
 
 import { $project } from "~/shared/sync/data-stores";
 import { $permissions } from "~/shared/nano-states";
@@ -15,24 +8,17 @@ export const domainToPublishName = "domainToPublish[]";
 
 /**
  * Pure function: returns true when a custom domain checkbox should be disabled
- * because the user's permissions restrict them to staging-only publishing.
- *
- * Two cases disable custom domains:
- *  - Free plan users (`!allowStagingPublish`): publishing is staging-only by plan.
- *  - Builder role (`canPublishToStagingOnly`): role-based staging restriction.
+ * because the builder role can only publish to staging.
  *
  * Staging domains are always unrestricted — this function returns false for them.
  */
 const isCustomDomainPublishRestricted = ({
-  allowStagingPublish,
   canPublishToStagingOnly,
   isCustomDomain,
 }: {
-  allowStagingPublish: boolean;
   canPublishToStagingOnly: boolean;
   isCustomDomain: boolean | undefined;
-}) =>
-  (!allowStagingPublish || canPublishToStagingOnly) && isCustomDomain === true;
+}) => canPublishToStagingOnly && isCustomDomain === true;
 
 export const __testing__ = { isCustomDomainPublishRestricted };
 
@@ -45,40 +31,14 @@ interface DomainCheckboxProps {
 }
 
 export const DomainCheckbox = (props: DomainCheckboxProps) => {
-  const { allowStagingPublish, canPublishToStagingOnly } =
-    useStore($permissions);
+  const { canPublishToStagingOnly } = useStore($permissions);
   const project = useStore($project);
 
   if (project === undefined) {
     return;
   }
 
-  const tooltipContentForFreeUsers = allowStagingPublish ? undefined : (
-    <Flex direction="column" gap="2" css={{ maxWidth: theme.spacing[28] }}>
-      <Text variant="titles">Publish to staging</Text>
-      <Text>
-        <Flex direction="column">
-          Staging allows you to preview a production version of your site
-          without potentially breaking what production site visitors will see.
-          <>
-            <br />
-            <br />
-            Upgrade to Pro account to publish to each domain individually.
-            <br /> <br />
-            <LinkButton
-              color="primary"
-              href="https://webstudio.is/pricing"
-              target="_blank"
-            >
-              Upgrade
-            </LinkButton>
-          </>
-        </Flex>
-      </Text>
-    </Flex>
-  );
-
-  const tooltipContentForBuilders =
+  const tooltipContent =
     canPublishToStagingOnly && props.isCustomDomain ? (
       <Text>
         Builders can only publish to staging. Contact the project owner or an
@@ -86,24 +46,21 @@ export const DomainCheckbox = (props: DomainCheckboxProps) => {
       </Text>
     ) : undefined;
 
-  const tooltipContent =
-    tooltipContentForBuilders ?? tooltipContentForFreeUsers;
-
-  // On free plan: custom domains are disabled+unchecked (can't publish to them).
   // For builders: custom domains are disabled (staging-only permission).
   // Staging domain behaves normally — user can still check/uncheck it.
   const isRestricted = isCustomDomainPublishRestricted({
-    allowStagingPublish,
     canPublishToStagingOnly,
     isCustomDomain: props.isCustomDomain,
   });
   const defaultChecked = isRestricted ? false : props.defaultChecked;
   const disabled = isRestricted ? true : props.disabled;
 
+  // With only the staging domain there is nothing to choose, so it is always
+  // published and the checkbox is hidden.
   const hideDomainCheckbox =
     project.domainsVirtual.filter(
       (domain) => domain.status === "ACTIVE" && domain.verified
-    ).length === 0 && allowStagingPublish;
+    ).length === 0;
 
   return (
     <div style={{ display: hideDomainCheckbox ? "none" : "contents" }}>

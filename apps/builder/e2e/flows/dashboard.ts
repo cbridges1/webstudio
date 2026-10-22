@@ -2,7 +2,6 @@ import { dashboardUrl, getProjectIdFromBuilderUrl } from "../test";
 import type { Page } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { createDb, type Db } from "@webstudio-is/db";
-import { applyDevPlan } from "@webstudio-is/plans/index.server";
 import env from "../../app/env/env.server";
 import { createBetterAuth } from "../../app/services/better-auth.server";
 import {
@@ -61,21 +60,15 @@ export const getWorkerUsername = (email: string) => {
 
 /**
  * Signs in as the account for this worker's email, creating it on first use (there
- * is no sign-up). A devPlan gives the account that plan, as upstream's dev login did.
+ * is no sign-up).
  */
 export const loginWithPassword = async ({
   page,
   email,
-  devPlan,
 }: {
   page: Page;
   email: string;
-  devPlan?: string;
 }) => {
-  if (devPlan !== undefined) {
-    await page.context().clearCookies();
-  }
-
   console.info("e2e: opening login");
   await page.goto(`${dashboardUrl}/login`);
   const usernameField = page.getByLabel("Username");
@@ -112,7 +105,6 @@ export const loginWithPassword = async ({
   if ((await accounts.exists(username)) === false) {
     await accounts.add({ username, email: workerEmail, password: e2ePassword });
   }
-  await applyDevPlan(workerEmail, devPlan ?? null, { db: getDb() });
 
   await usernameField.fill(username);
   await page.getByLabel("Password", { exact: true }).fill(e2ePassword);
@@ -164,13 +156,11 @@ export const loginAndCreateBlankProject = async ({
   page,
   email,
   title,
-  devPlan,
 }: {
   page: Page;
   email: string;
   title: string;
-  devPlan?: string;
 }) => {
-  await loginWithPassword({ page, email, devPlan });
+  await loginWithPassword({ page, email });
   return await createBlankProject({ page, title });
 };

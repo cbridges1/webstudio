@@ -4,10 +4,8 @@ import {
   router,
   procedure,
   createErrorResponse,
-  getPlanFeaturesByOwnerId,
 } from "@webstudio-is/trpc-interface/index.server";
 import { roles } from "@webstudio-is/trpc-interface/authorize";
-import { and, eq, maybeOne, workspace } from "@webstudio-is/db";
 
 const name = z.string().min(2).max(100);
 const relation = z.enum(roles);
@@ -79,15 +77,7 @@ export const workspaceRouter = router({
     )
     .mutation(async ({ input, ctx }) => {
       try {
-        const { plan } = await workspaceApi.assertWorkspaceOwnerPlan(
-          input.workspaceId,
-          ctx
-        );
-
-        if (plan.maxWorkspaces <= 1) {
-          throw new Error("Upgrade your plan to invite members to workspaces.");
-        }
-
+        await workspaceApi.assertWorkspaceOwner(input.workspaceId, ctx);
         const { notificationId } = await workspaceApi.addMember(input, ctx);
         return { success: true as const, notificationId };
       } catch (error) {
@@ -105,16 +95,7 @@ export const workspaceRouter = router({
     )
     .mutation(async ({ input, ctx }) => {
       try {
-        const { plan } = await workspaceApi.assertWorkspaceOwnerPlan(
-          input.workspaceId,
-          ctx
-        );
-
-        if (plan.maxWorkspaces <= 1) {
-          throw new Error(
-            "Upgrade your plan to manage workspace member roles."
-          );
-        }
+        await workspaceApi.assertWorkspaceOwner(input.workspaceId, ctx);
         await workspaceApi.updateRole(input, ctx);
         return { success: true as const };
       } catch (error) {
@@ -153,34 +134,6 @@ export const workspaceRouter = router({
     )
     .mutation(async ({ input, ctx }) => {
       try {
-        // Check the target workspace owner's plan, not the caller's —
-        // workspace admins shouldn't be blocked by their own plan.
-        const targetWorkspace = maybeOne(
-          await ctx.db
-            .select({ userId: workspace.userId })
-            .from(workspace)
-            .where(
-              and(
-                eq(workspace.id, input.targetWorkspaceId),
-                eq(workspace.isDeleted, false)
-              )
-            )
-        );
-
-        if (targetWorkspace === null) {
-          throw new Error("Target workspace not found");
-        }
-
-        const ownerPlan = await getPlanFeaturesByOwnerId(
-          targetWorkspace.userId,
-          ctx
-        );
-
-        if (ownerPlan.maxWorkspaces <= 1) {
-          throw new Error(
-            "Upgrade your plan to move projects between workspaces."
-          );
-        }
         await workspaceApi.moveProject(input, ctx);
         return { success: true as const };
       } catch (error) {

@@ -28,8 +28,6 @@ import {
   authorizeProject,
 } from "@webstudio-is/trpc-interface/index.server";
 import { createContext } from "~/shared/context.server";
-import { getPlanInfo } from "@webstudio-is/plans/index.server";
-import { defaultPlanFeatures } from "@webstudio-is/plans";
 import { dashboardPath, isBuilder, isDashboard } from "~/shared/router-utils";
 import { areBuilderDataUrlsEqual } from "~/shared/router-utils/path-utils";
 
@@ -171,8 +169,7 @@ export const loader = async (loaderArgs: LoaderFunctionArgs) => {
           )
         : authDb.tokenDefaultPermissions;
 
-    // When the project belongs to a workspace, resolve plan from the workspace owner
-    // so the owner's subscription governs all projects in the workspace
+    // When the project belongs to a workspace, resolve the current user's role in it
     let role: Role | "own" = "own";
 
     if (project.workspaceId !== null) {
@@ -209,14 +206,6 @@ export const loader = async (loaderArgs: LoaderFunctionArgs) => {
         );
       const workspace = { data: { ...workspaceRow, members } };
 
-      const planResult = await getPlanInfo([workspace.data.userId], context);
-      const ownerPlan = planResult.get(workspace.data.userId) ?? {
-        planFeatures: defaultPlanFeatures,
-        purchases: [],
-      };
-      context.planFeatures = ownerPlan.planFeatures;
-      context.purchases = ownerPlan.purchases;
-
       // Determine the current user's relation to the workspace
       if (
         currentUserId !== undefined &&
@@ -224,18 +213,10 @@ export const loader = async (loaderArgs: LoaderFunctionArgs) => {
       ) {
         const membership = workspace.data.members[0];
         role = (membership?.relation as Role) ?? defaultRole;
-
-        // When the workspace owner has downgraded, members lose access.
-        // Data stays intact but permissions are suspended.
-        if (ownerPlan.planFeatures.maxWorkspaces <= 1) {
-          throw new AuthorizationError(
-            "The workspace owner's plan no longer supports workspace access"
-          );
-        }
       }
     }
 
-    const { planFeatures, purchases } = context;
+    const { planFeatures } = context;
     const user =
       context.authorization.type === "user"
         ? await getUserById(context, context.authorization.userId)
@@ -285,7 +266,6 @@ export const loader = async (loaderArgs: LoaderFunctionArgs) => {
         user,
         role,
         planFeatures,
-        purchases,
         stagingUsername: env.STAGING_USERNAME,
         stagingPassword: env.STAGING_PASSWORD,
       } as const,

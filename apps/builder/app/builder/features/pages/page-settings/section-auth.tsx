@@ -7,11 +7,8 @@ import {
   InputErrorsTooltip,
   InputField,
   Label,
-  LinkButton,
-  ProChip,
   Text,
   Tooltip,
-  theme,
 } from "@webstudio-is/design-system";
 import { InfoCircleIcon } from "@webstudio-is/icons";
 import type {
@@ -29,13 +26,11 @@ export const AuthSection = ({
   values,
   errors,
   onChange,
-  showUpgrade = false,
   showErrors = false,
 }: {
   values: PageSettingsValues;
   errors: PageSettingsErrors;
   onChange: OnChange;
-  showUpgrade?: boolean;
   showErrors?: boolean;
 }) => {
   const enableId = useId();
@@ -68,7 +63,6 @@ export const AuthSection = ({
             }}
           />
           <Label htmlFor={enableId}>Require login and password</Label>
-          {showUpgrade && <ProChip>PRO</ProChip>}
           <Tooltip
             content={
               <>
@@ -76,24 +70,6 @@ export const AuthSection = ({
                   Authentication asks visitors for HTTP Basic Auth credentials
                   before protected pages load on custom domains.
                 </Text>
-                {showUpgrade && (
-                  <>
-                    <br />
-                    <Text>
-                      Page authentication is a Pro feature. You can publish to
-                      staging for free; upgrade to Pro to publish to custom
-                      domains.
-                    </Text>
-                    <LinkButton
-                      color="primary"
-                      css={{ marginTop: theme.spacing[5], width: "100%" }}
-                      target="_blank"
-                      href="https://webstudio.is/pricing"
-                    >
-                      Upgrade
-                    </LinkButton>
-                  </>
-                )}
               </>
             }
             variant="wrapped"

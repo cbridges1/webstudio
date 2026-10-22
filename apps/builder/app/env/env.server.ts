@@ -58,24 +58,7 @@ const environment = z.object({
 
   FEATURE_FLAGS: z.string().default(""),
 
-  // Plan definitions for local dev/staging (JSON array of {name, features})
-  PLANS: z
-    .string()
-    .default("[]")
-    .refine((val) => {
-      try {
-        JSON.parse(val);
-        return true;
-      } catch {
-        return false;
-      }
-    }, "PLANS must be valid JSON"),
-
   DATABASE_URL: z.string().default("postgresql://localhost:5432/webstudio"),
-
-  // Payment worker configuration
-  PAYMENT_WORKER_URL: z.string().optional(),
-  PAYMENT_WORKER_TOKEN: z.string().optional(),
 
   // Used for project oauth login flow
   AUTH_WS_CLIENT_ID: z.string().default("12345"),
@@ -118,10 +101,7 @@ const rawEnv = {
   STAGING_USERNAME: process.env.STAGING_USERNAME,
   STAGING_PASSWORD: process.env.STAGING_PASSWORD,
   FEATURE_FLAGS: process.env.FEATURE_FLAGS,
-  PLANS: process.env.PLANS,
   DATABASE_URL: process.env.DATABASE_URL,
-  PAYMENT_WORKER_URL: process.env.PAYMENT_WORKER_URL,
-  PAYMENT_WORKER_TOKEN: process.env.PAYMENT_WORKER_TOKEN,
   AUTH_WS_CLIENT_ID: process.env.AUTH_WS_CLIENT_ID,
   AUTH_WS_CLIENT_SECRET: process.env.AUTH_WS_CLIENT_SECRET,
   VERCEL: process.env.VERCEL,

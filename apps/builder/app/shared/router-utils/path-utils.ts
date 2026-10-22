@@ -102,16 +102,6 @@ export const loginPath = (params: {
 export const logoutPath = () => "/logout";
 export const restLogoutPath = () => "/dashboard-logout";
 
-export const planSubscriptionPath = (subscriptionId?: string) => {
-  const urlSearchParams = new URLSearchParams();
-  urlSearchParams.set("return_url", window.location.href);
-  if (subscriptionId) {
-    urlSearchParams.set("subscription", subscriptionId);
-  }
-
-  return `/builder-payments/billing-portal/sessions?${urlSearchParams.toString()}`;
-};
-
 export const authCallbackPath = ({
   provider,
 }: {

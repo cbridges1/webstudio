@@ -3,8 +3,6 @@ import { useDebouncedCallback } from "use-debounce";
 import { builderUrl } from "~/shared/router-utils";
 import { trpcClient } from "../trpc/trpc-client";
 import { ShareProject, type LinkOptions } from "./share-project";
-import { useStore } from "@nanostores/react";
-import { $permissions, $purchases } from "../nano-states";
 import { toast } from "@webstudio-is/design-system";
 
 const normalizeLinks = (links: LinkOptions[]) =>
@@ -139,15 +137,11 @@ type ShareButtonProps = {
  * Then remix will not call `trpc.findMany.useQuery` if Popover is closed
  */
 export const ShareProjectContainer = ({ projectId }: ShareButtonProps) => {
-  const { allowAdditionalPermissions } = useStore($permissions);
-  const purchases = useStore($purchases);
   const { links, handleChange, handleDelete, handleCreate, isPending } =
     useShareProjectContainer(projectId);
 
   return (
     <ShareProject
-      allowAdditionalPermissions={allowAdditionalPermissions}
-      isFreePlan={purchases.length === 0}
       links={links}
       onChange={handleChange}
       onDelete={handleDelete}

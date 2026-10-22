@@ -1,5 +1,4 @@
 import stripIndent from "strip-indent";
-import { computed } from "nanostores";
 import {
   useEffect,
   useState,
@@ -29,7 +28,6 @@ import {
   theme,
   TextArea,
   Link,
-  LinkButton,
   PanelBanner,
   toast,
   RadioGroup,
@@ -44,9 +42,6 @@ import {
   PopoverTitle,
   PopoverClose,
   PopoverTitleActions,
-  css,
-  textVariants,
-  SmallIconButton,
 } from "@webstudio-is/design-system";
 import { validateProjectDomain, type Project } from "@webstudio-is/project";
 import {
@@ -56,7 +51,6 @@ import {
 import { $selectedPageId } from "~/shared/nano-states";
 import {
   $authTokenPermissions,
-  $editingPageId,
   $permissions,
   $stagingUsername,
   $stagingPassword,
@@ -66,10 +60,7 @@ import {
   $assets,
   $publisherHost,
 } from "~/shared/sync/data-stores";
-import {
-  $publishDialog,
-  setActiveSidebarPanel,
-} from "../../shared/nano-states";
+import { $publishDialog } from "../../shared/nano-states";
 import { $project } from "~/shared/sync/data-stores";
 import { Domains, PENDING_TIMEOUT, getPublishStatusAndText } from "./domains";
 import { CollapsibleDomainSection } from "./collapsible-domain-section";
@@ -77,8 +68,6 @@ import {
   AlertIcon,
   CopyIcon,
   GearIcon,
-  UpgradeIcon,
-  HelpIcon,
   InfoCircleIcon,
   EllipsesIcon,
   PlusIcon,
@@ -86,7 +75,7 @@ import {
 } from "@webstudio-is/icons";
 import { AddDomain } from "./add-domain";
 import { humanizeString } from "~/shared/string-utils";
-import { trpcClient, nativeClient } from "~/shared/trpc/trpc-client";
+import { nativeClient } from "~/shared/trpc/trpc-client";
 import {
   publishedDeploymentDestination,
   type Templates,
@@ -98,19 +87,13 @@ import {
   $dataSources,
   $instances,
   $pages,
-  $projectSettings,
   $props,
   $resources,
 } from "~/shared/sync/data-stores";
 import { RelativeTime } from "~/builder/shared/relative-time";
-import cmsUpgradeBanner from "~/shared/cms-upgrade-banner.svg?url";
 import { $currentSystem } from "~/shared/system";
 import { getPublishUrl } from "./publish-url";
 import { getInstanceLink } from "~/shared/instance-utils/link";
-import {
-  getRestrictedFeatures,
-  type RestrictedFeature,
-} from "./restricted-features";
 import {
   findPageAndSelectorByInstanceId,
   formatPrePublishAuditFinding,
@@ -552,26 +535,6 @@ const ChangeProjectDomain = ({
   );
 };
 
-const $restrictedFeatures = computed(
-  [
-    $pages,
-    $projectSettings,
-    $dataSources,
-    $resources,
-    $instances,
-    $permissions,
-  ],
-  (pages, projectSettings, dataSources, resources, instances, permissions) =>
-    getRestrictedFeatures({
-      pages,
-      projectSettings,
-      dataSources,
-      resources,
-      instances,
-      permissions,
-    })
-);
-
 const usePublishCountdown = (isPublishing: boolean) => {
   const [countdown, setCountdown] = useState<number | undefined>(undefined);
 
@@ -602,26 +565,21 @@ const usePublishCountdown = (isPublishing: boolean) => {
 
 const Publish = ({
   project,
-  timesLeft,
   disabled,
   refresh,
-  restrictedFeatures,
   validationState,
   onValidationStateChange,
   isPublishing,
   setIsPublishing,
 }: {
   project: Project;
-  timesLeft: number;
   disabled: boolean;
   refresh: () => Promise<void>;
-  restrictedFeatures: Map<string, RestrictedFeature>;
   validationState: PublishValidationState;
   onValidationStateChange: (state: PublishValidationState) => void;
   isPublishing: boolean;
   setIsPublishing: (isPublishing: boolean) => void;
 }) => {
-  const { userPublishCount, maxDailyPublishesPerUser } = useUserPublishCount();
   const [publishError, setPublishError] = useState<
     undefined | JSX.Element | string
   >();
@@ -630,8 +588,6 @@ const Publish = ({
   >([]);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const [hasSelectedDomains, setHasSelectedDomains] = useState(false);
-  const [hasCustomDomainsSelected, setHasCustomDomainsSelected] =
-    useState(false);
   const previousDomainsKey = useRef<string>();
   const hasPendingState = project.latestBuildVirtual
     ? getPublishStatusAndText(project.latestBuildVirtual).status === "PENDING"
@@ -662,13 +618,6 @@ const Publish = ({
       previousDomainsKey.current = domainsKey;
 
       setHasSelectedDomains(domainsSelected.length > 0);
-
-      // Check if any custom domains are selected
-      // Custom domains are those that are NOT the staging domain (project.domain)
-      const hasCustom = domainsSelected.some(
-        (domain) => domain !== project.domain
-      );
-      setHasCustomDomainsSelected(hasCustom);
     };
 
     const observer = new MutationObserver(() => {
@@ -757,18 +706,9 @@ const Publish = ({
             };
 
       if (status === "PUBLISHED") {
-        toast.success(
-          <>
-            The project has been successfully published.{" "}
-            {timesLeft > 0 && timesLeft <= 10 && (
-              <div>
-                You have {timesLeft} out of {maxDailyPublishesPerUser} daily
-                publications remaining. The counter resets tomorrow.
-              </div>
-            )}
-          </>,
-          { duration: 10000 }
-        );
+        toast.success("The project has been successfully published.", {
+          duration: 10000,
+        });
         break;
       }
 
@@ -819,8 +759,8 @@ const Publish = ({
     setPublishError(undefined);
     setPublishFindings([]);
 
-    // Custom domain checkboxes are disabled on free plan so they are never
-    // submitted — only the staging (wstd.io) domain can appear in formData.
+    // Custom domain checkboxes are disabled for builders so they are never
+    // submitted — only the staging domain can appear in formData.
     const domains = getDomainsFromForm(formData);
 
     if (domains.length === 0) {
@@ -852,12 +792,7 @@ const Publish = ({
         publishButtonRef={buttonRef}
         validationState={validationState}
         validateDisabled={disabled || isPublishInProgress}
-        publishDisabled={
-          hasSelectedDomains === false ||
-          disabled ||
-          (restrictedFeatures.size > 0 && hasCustomDomainsSelected) ||
-          userPublishCount >= maxDailyPublishesPerUser
-        }
+        publishDisabled={hasSelectedDomains === false || disabled}
         publishInProgress={isPublishInProgress}
         publishPending={
           isPublishInProgress && (countdown === undefined || countdown === 0)
@@ -1051,40 +986,6 @@ const PublishStatic = ({
   );
 };
 
-const useCanAddDomain = () => {
-  const { load, data } = trpcClient.domain.countTotalDomains.useQuery();
-  const { maxDomainsAllowedPerUser } = useStore($permissions);
-  const project = useStore($project);
-  const activeDomainsCount = project?.domainsVirtual.filter(
-    (domain) => domain.status === "ACTIVE" && domain.verified
-  ).length;
-  useEffect(() => {
-    if (project?.id !== undefined) {
-      load({ projectId: project.id });
-    }
-  }, [load, activeDomainsCount, project?.id]);
-  const canAddDomain = data
-    ? data.success && data.data < maxDomainsAllowedPerUser
-    : true;
-  return { canAddDomain, maxDomainsAllowedPerUser };
-};
-
-const useUserPublishCount = () => {
-  const { load, data } = trpcClient.project.userPublishCount.useQuery();
-  const { maxDailyPublishesPerUser } = useStore($permissions);
-  const project = useStore($project);
-  useEffect(() => {
-    if (project?.id !== undefined) {
-      load({ projectId: project.id });
-    }
-  }, [load, project?.id]);
-  return {
-    userPublishCount: data?.success ? data.data : 0,
-    maxDailyPublishesPerUser:
-      data?.success && "limit" in data ? data.limit : maxDailyPublishesPerUser,
-  };
-};
-
 const refreshProject = async () => {
   const result = await nativeClient.domain.project.query(
     {
@@ -1102,118 +1003,6 @@ const refreshProject = async () => {
   toast.error(result.error);
 };
 
-const buttonLinkClass = css({
-  all: "unset",
-  cursor: "pointer",
-  ...textVariants.link,
-}).toString();
-
-const UpgradeBanner = ({ hasCustomDomains }: { hasCustomDomains: boolean }) => {
-  const restrictedFeatures = useStore($restrictedFeatures);
-  const { canAddDomain } = useCanAddDomain();
-  const { userPublishCount, maxDailyPublishesPerUser } = useUserPublishCount();
-  if (userPublishCount >= maxDailyPublishesPerUser) {
-    return (
-      <PanelBanner>
-        <Text variant="regularBold">
-          Upgrade to publish more than {maxDailyPublishesPerUser} times per day:
-        </Text>
-        <LinkButton
-          color="primary"
-          href="https://webstudio.is/pricing"
-          target="_blank"
-        >
-          Upgrade
-        </LinkButton>
-      </PanelBanner>
-    );
-  }
-
-  // Only show Pro feature upgrade banner if custom domains are available
-  // Free tier users can still publish to staging domain with Pro features
-  if (restrictedFeatures.size > 0 && hasCustomDomains) {
-    return (
-      <PanelBanner>
-        <img
-          src={cmsUpgradeBanner}
-          alt="Upgrade for CMS"
-          width={rawTheme.spacing[28]}
-          style={{ aspectRatio: "4.1" }}
-        />
-        <Text variant="regularBold">Following Pro features are used:</Text>
-        <Text as="ul" color="destructive" css={{ paddingLeft: "1em" }}>
-          {Array.from(restrictedFeatures).map(
-            ([message, { navigate, view, info } = {}], index) => (
-              <li key={index}>
-                <Flex align="center" gap="1">
-                  {navigate ? (
-                    <button
-                      className={buttonLinkClass}
-                      type="button"
-                      onClick={() => {
-                        $selectedPageId.set(navigate.pageId);
-                        selectInstance(navigate.instanceSelector);
-                        if (view === "pageSettings") {
-                          setActiveSidebarPanel("pages");
-                          $editingPageId.set(navigate.pageId);
-                        }
-                      }}
-                    >
-                      {message}
-                    </button>
-                  ) : (
-                    message
-                  )}
-                  {info && (
-                    <Tooltip variant="wrapped" content={info}>
-                      <SmallIconButton icon={<HelpIcon />} />
-                    </Tooltip>
-                  )}
-                </Flex>
-              </li>
-            )
-          )}
-        </Text>
-        <Text>
-          You can delete these features or upgrade to publish to custom domains.
-        </Text>
-        <Flex align="center" gap={1}>
-          <UpgradeIcon />
-          <Link
-            color="inherit"
-            target="_blank"
-            href="https://webstudio.is/pricing"
-          >
-            Upgrade to Pro
-          </Link>
-        </Flex>
-      </PanelBanner>
-    );
-  }
-  if (canAddDomain === false) {
-    return (
-      <PanelBanner>
-        <Text variant="regular">
-          <Text variant="regularBold" inline>
-            Upgrade to a Pro account
-          </Text>{" "}
-          to add unlimited domains and publish to each domain individually.
-        </Text>
-        <Flex align="center" gap={1}>
-          <UpgradeIcon />
-          <Link
-            color="inherit"
-            target="_blank"
-            href="https://webstudio.is/pricing"
-          >
-            Upgrade to Pro
-          </Link>
-        </Flex>
-      </PanelBanner>
-    );
-  }
-};
-
 const Content = (props: {
   projectId: Project["id"];
   onExportClick: () => void;
@@ -1222,7 +1011,6 @@ const Content = (props: {
   isPublishing: boolean;
   setIsPublishing: (isPublishing: boolean) => void;
 }) => {
-  const restrictedFeatures = useStore($restrictedFeatures);
   const [newDomains, setNewDomains] = useState(new Set<string>());
   const [isAddingDomain, setIsAddingDomain] = useState(false);
 
@@ -1233,18 +1021,11 @@ const Content = (props: {
   }
   const projectState = "idle";
 
-  const { userPublishCount, maxDailyPublishesPerUser } = useUserPublishCount();
-
   const hasUnpublishedDomains = project.domainsVirtual.some(
     (domain) =>
       domain.verified &&
       domain.status === "ACTIVE" &&
       domain.latestBuildVirtual == null
-  );
-
-  // Check if any custom domains exist (active and verified)
-  const hasCustomDomains = project.domainsVirtual.some(
-    (domain) => domain.status === "ACTIVE" && domain.verified
   );
 
   return (
@@ -1317,7 +1098,6 @@ const Content = (props: {
             }}
           />
           {isAddingDomain && <Separator />}
-          <UpgradeBanner hasCustomDomains={hasCustomDomains} />
           {hasUnpublishedDomains && (
             <PanelBanner>
               <Flex align="center" gap="1">
@@ -1333,9 +1113,7 @@ const Content = (props: {
           <Publish
             project={project}
             refresh={refreshProject}
-            timesLeft={maxDailyPublishesPerUser - userPublishCount}
             disabled={false}
-            restrictedFeatures={restrictedFeatures}
             validationState={props.validationState}
             onValidationStateChange={props.onValidationStateChange}
             isPublishing={props.isPublishing}

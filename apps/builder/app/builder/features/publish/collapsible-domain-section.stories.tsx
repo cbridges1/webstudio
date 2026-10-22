@@ -7,13 +7,10 @@ import {
   InputField,
   Label,
   Separator,
-  SmallIconButton,
   IconButton,
   Tooltip,
   ScrollArea,
-  PanelBanner,
   Link,
-  LinkButton,
   Select,
   TextArea,
   Checkbox,
@@ -29,9 +26,7 @@ import {
   AlertIcon,
   CopyIcon,
   GearIcon,
-  UpgradeIcon,
   InfoCircleIcon,
-  HelpIcon,
 } from "@webstudio-is/icons";
 import { CollapsibleDomainSection } from "./collapsible-domain-section";
 
@@ -328,94 +323,6 @@ export const PublishButton = () => (
           Publish
         </Button>
       </Flex>
-    </Flex>
-  </StorySection>
-);
-
-// Story: Upgrade banners
-export const UpgradeBanners = () => (
-  <StorySection title="Upgrade Banners">
-    <Flex direction="column" gap="5" css={{ width: theme.spacing[33] }}>
-      <Text variant="labels">Publish limit exceeded</Text>
-      <PanelBanner>
-        <Text variant="regularBold">
-          Upgrade to publish more than 1 time per day:
-        </Text>
-        <LinkButton color="primary" href="#">
-          Upgrade
-        </LinkButton>
-      </PanelBanner>
-
-      <Text variant="labels">Restricted pro features</Text>
-      <PanelBanner>
-        <Text variant="regularBold">Following Pro features are used:</Text>
-        <Text as="ul" color="destructive" css={{ paddingLeft: "1em" }}>
-          <li>
-            <Flex align="center" gap="1">
-              <button
-                style={{
-                  all: "unset",
-                  cursor: "pointer",
-                  textDecoration: "underline",
-                }}
-                type="button"
-              >
-                Dynamic path
-              </button>
-            </Flex>
-          </li>
-          <li>
-            <Flex align="center" gap="1">
-              Resource variable
-              <Tooltip
-                variant="wrapped"
-                content="Used in Blog Post page for fetching CMS data"
-              >
-                <SmallIconButton icon={<HelpIcon />} />
-              </Tooltip>
-            </Flex>
-          </li>
-          <li>Redirect</li>
-          <li>Custom contact email</li>
-        </Text>
-        <Text>
-          You can delete these features or upgrade to publish to custom domains.
-        </Text>
-        <Flex align="center" gap={1}>
-          <UpgradeIcon />
-          <Link color="inherit" href="#">
-            Upgrade to Pro
-          </Link>
-        </Flex>
-      </PanelBanner>
-
-      <Text variant="labels">Domain limit reached</Text>
-      <PanelBanner>
-        <Text variant="regular">
-          <Text variant="regularBold" inline>
-            Upgrade to a Pro account
-          </Text>{" "}
-          to add unlimited domains and publish to each domain individually.
-        </Text>
-        <Flex align="center" gap={1}>
-          <UpgradeIcon />
-          <Link color="inherit" href="#">
-            Upgrade to Pro
-          </Link>
-        </Flex>
-      </PanelBanner>
-
-      <Text variant="labels">Unpublished domain reminder</Text>
-      <PanelBanner>
-        <Flex align="center" gap="1">
-          <InfoCircleIcon color={cssVar("--foreground-primary")} />
-          <Text variant="regularBold">Don&apos;t forget to publish</Text>
-        </Flex>
-        <Text>
-          You have a custom domain that hasn&apos;t been published yet. Hit
-          publish to make it live.
-        </Text>
-      </PanelBanner>
     </Flex>
   </StorySection>
 );

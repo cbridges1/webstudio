@@ -19,7 +19,6 @@ import { createId } from "@webstudio-is/sdk";
 import {
   type AppContext,
   AuthorizationError,
-  getPlanFeaturesByOwnerId,
 } from "@webstudio-is/trpc-interface/index.server";
 import { softDeleteProject } from "./project";
 import { defaultRole, type Role } from "@webstudio-is/trpc-interface/authorize";
@@ -29,7 +28,6 @@ import {
   NOTIFICATION_TTL_MS,
 } from "../shared/notification-schema";
 import { create as createNotification } from "./notification";
-import { getExtraPaidSeats } from "@webstudio-is/plans/index.server";
 
 export type Workspace = Database["public"]["Tables"]["Workspace"]["Row"];
 
@@ -37,11 +35,8 @@ export type WorkspaceWithRelation = Workspace & {
   /** The current user's relation to the workspace: "own" for owners */
   role: Role | "own";
   /**
-   * True when the workspace owner has lost workspace access for members.
-   * Fires when either:
-   *   - owner's plan no longer grants workspaces (`maxWorkspaces <= 1`), or
-   *   - `actualMembers > paidSeats` (owner has more members than paid seats).
-   * Members lose project access but workspace data stays intact.
+   * Upstream: true when the owner's plan no longer covers its members.
+   * selfhost: there are no plans, so this is always false.
    */
   isDowngraded: boolean;
 };
@@ -241,44 +236,11 @@ export const findMany = async (userId: string, context: AppContext) => {
     )
     .orderBy(asc(workspaceTable.createdAt));
 
-  // For member workspaces, check whether the owner still grants workspace access.
-  // Two conditions downgrade: plan no longer includes workspaces
-  // (`maxWorkspaces <= 1`), or owner has more members than paid seats
-  // (`actualMembers > paidSeats`). Collect unique owner IDs and batch-check.
-  const ownerIds = [...new Set(memberOf.map((w) => w.userId))];
-  const downgradedOwners = new Set<string>();
-
-  if (ownerIds.length > 0) {
-    // Use allSettled so a single owner's check failure doesn't
-    // break the entire workspace list. Failed checks default to not-downgraded.
-    const checks = await Promise.allSettled(
-      ownerIds.map(async (ownerId) => {
-        const plan = await getPlanFeaturesByOwnerId(ownerId, context);
-        if (plan.maxWorkspaces <= 1) {
-          return { ownerId, isDowngraded: true };
-        }
-        const [memberCount, extraSeats] = await Promise.all([
-          countAllMembers(ownerId, context),
-          getExtraPaidSeats(ownerId, context),
-        ]);
-        // seatsIncluded is the number of non-owner member slots included in
-        // the plan. The owner is not counted — consistent with the billing
-        // formula used at invite time and at invoice renewal.
-        const paidSeats = plan.seatsIncluded + (extraSeats ?? 0);
-        return { ownerId, isDowngraded: memberCount > paidSeats };
-      })
-    );
-    for (const result of checks) {
-      if (result.status === "fulfilled" && result.value.isDowngraded) {
-        downgradedOwners.add(result.value.ownerId);
-      }
-    }
-  }
-
   const memberWithRelation: WorkspaceWithRelation[] = memberOf.map((w) => ({
     ...w,
     role: relationByWorkspaceId.get(w.id) ?? defaultRole,
-    isDowngraded: downgradedOwners.has(w.userId),
+    // selfhost: no plans, so an owner never loses workspace access.
+    isDowngraded: false,
   }));
 
   // Owned workspaces first (default on top), then member workspaces
@@ -314,69 +276,6 @@ export const assertWorkspaceOwner = async (
 ) => {
   const userId = assertUser(context);
   return await assertWorkspaceOwnerByUserId(workspaceId, userId, context);
-};
-
-export const assertWorkspaceOwnerPlan = async (
-  workspaceId: string,
-  context: AppContext
-) => {
-  const workspace = await assertWorkspaceOwner(workspaceId, context);
-  return {
-    workspace,
-    plan: await getPlanFeaturesByOwnerId(workspace.userId, context),
-  };
-};
-
-/**
- * Count all current members (non-removed) plus pending invites across all
- * non-deleted workspaces owned by userId.
- * The owner is NOT counted.
- * Pending invites are included because seats are billed at invite time.
- */
-export const countAllMembers = async (
-  userId: string,
-  context: AppContext
-): Promise<number> => {
-  const workspaces = await context.db
-    .select({ id: workspaceTable.id })
-    .from(workspaceTable)
-    .where(
-      and(
-        eq(workspaceTable.userId, userId),
-        eq(workspaceTable.isDeleted, false)
-      )
-    );
-
-  if (workspaces.length === 0) {
-    return 0;
-  }
-
-  const workspaceIds = workspaces.map((w) => w.id);
-
-  const [members, pendingCount] = await Promise.all([
-    // Fetch all userIds so we can deduplicate — the same person may be a
-    // member of several of the owner's workspaces but counts as one seat.
-    context.db
-      .select({ userId: workspaceMember.userId })
-      .from(workspaceMember)
-      .where(
-        and(
-          inArray(workspaceMember.workspaceId, workspaceIds),
-          isNull(workspaceMember.removedAt)
-        )
-      ),
-    context.db.$count(
-      notification,
-      and(
-        eq(notification.type, "workspaceInvite"),
-        eq(notification.senderId, userId),
-        eq(notification.status, "pending")
-      )
-    ),
-  ]);
-
-  const uniqueMembers = new Set(members.map((row) => row.userId));
-  return uniqueMembers.size + pendingCount;
 };
 
 const findUserIdByEmail = async (email: string, context: AppContext) =>

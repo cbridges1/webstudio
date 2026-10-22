@@ -28,11 +28,9 @@ import {
   keyframes,
   Text,
   InputField,
-  Link,
   IconButton,
   Checkbox,
   Grid,
-  PanelBanner,
   cssVar,
   declareCssVar,
 } from "@webstudio-is/design-system";
@@ -41,7 +39,6 @@ import {
   EllipsesIcon,
   PlusIcon,
   InfoCircleIcon,
-  UpgradeIcon,
 } from "@webstudio-is/icons";
 import { CopyToClipboard } from "~/shared/copy-to-clipboard";
 import { useIds } from "../form-utils";
@@ -49,25 +46,6 @@ import type { BuilderMode } from "../nano-states";
 
 const Item = (props: ComponentProps<typeof Flex>) => (
   <PanelContent as={Flex} direction="column" gap="1" {...props} />
-);
-
-const UpgradeLink = () => (
-  <Flex align="center" gap={1}>
-    <UpgradeIcon />
-    <Link color="inherit" target="_blank" href="https://webstudio.is/pricing">
-      Upgrade
-    </Link>
-  </Flex>
-);
-
-export const ShareLinkSecurityNotice = () => (
-  <PanelBanner variant="warning">
-    <Text>
-      Sharing links over insecure channels can expose project access. Upgrade to
-      the Team plan for safer collaboration.
-    </Text>
-    <UpgradeLink />
-  </PanelBanner>
 );
 
 const PermissionTooltip = ({
@@ -88,23 +66,6 @@ const PermissionTooltip = ({
   >
     <InfoCircleIcon color={cssVar("--foreground-secondary")} tabIndex={0} />
   </Tooltip>
-);
-
-const PermissionTooltipContent = ({
-  children,
-  upgrade = false,
-}: {
-  children: ReactNode;
-  upgrade?: boolean;
-}) => (
-  <Flex direction="column">
-    {children}
-    {upgrade && (
-      <Box css={{ mt: theme.spacing[2] }}>
-        <UpgradeLink />
-      </Box>
-    )}
-  </Flex>
 );
 
 const getApiPermissionDescription = ({
@@ -133,7 +94,6 @@ export const __testing__ = { getApiPermissionDescription };
 type PermissionProps = {
   title: string;
   description: ReactNode;
-  upgrade?: boolean;
   checked: boolean;
   disabled?: boolean;
   onCheckedChange: (checked: boolean) => void;
@@ -141,7 +101,6 @@ type PermissionProps = {
 const Permission = ({
   title,
   description,
-  upgrade = false,
   checked,
   disabled = false,
   onCheckedChange,
@@ -159,11 +118,7 @@ const Permission = ({
       <Label disabled={disabled} htmlFor={id}>
         {title}
       </Label>
-      <PermissionTooltip title={title}>
-        <PermissionTooltipContent upgrade={upgrade}>
-          {description}
-        </PermissionTooltipContent>
-      </PermissionTooltip>
+      <PermissionTooltip title={title}>{description}</PermissionTooltip>
     </Flex>
   );
 };
@@ -217,18 +172,11 @@ const Capability = ({
 type MenuProps = {
   name: string;
   value: LinkOptions;
-  allowAdditionalPermissions: boolean;
   onChange: (value: LinkOptionsUpdate) => void;
   onDelete: () => void;
 };
 
-const Menu = ({
-  name,
-  allowAdditionalPermissions,
-  value,
-  onChange,
-  onDelete,
-}: MenuProps) => {
+const Menu = ({ name, value, onChange, onDelete }: MenuProps) => {
   const ids = useIds([
     "name",
     "canClone",
@@ -262,22 +210,16 @@ const Menu = ({
 
   const renderApiCapability = (role: Role) => {
     const canUseApi = draftLink.canUseApi === true;
-    const isApiForbidden = !allowAdditionalPermissions && canUseApi === false;
-    const description = (
-      <PermissionTooltipContent upgrade={!allowAdditionalPermissions}>
-        {getApiPermissionDescription({
-          canPublish: draftLink.canPublish,
-          role,
-        })}
-      </PermissionTooltipContent>
-    );
+    const description = getApiPermissionDescription({
+      canPublish: draftLink.canPublish,
+      role,
+    });
 
     return (
       <Capability
         id={ids.canUseApi}
         title="API"
         checked={canUseApi}
-        disabled={isApiForbidden}
         onCheckedChange={(canUseApi) => updateDraftLink({ canUseApi })}
         description={description}
       />
@@ -368,41 +310,25 @@ const Menu = ({
                 id={ids.canClone}
                 title="Can clone"
                 checked={draftLink.canClone}
-                disabled={!allowAdditionalPermissions}
                 onCheckedChange={(canClone) => updateDraftLink({ canClone })}
-                description={
-                  <PermissionTooltipContent
-                    upgrade={!allowAdditionalPermissions}
-                  >
-                    Allows viewers to clone the project from this share link.
-                  </PermissionTooltipContent>
-                }
+                description="Allows viewers to clone the project from this share link."
               />
               <Capability
                 id={ids.canCopy}
                 title="Can copy"
                 checked={draftLink.canCopy}
-                disabled={!allowAdditionalPermissions}
                 onCheckedChange={(canCopy) => updateDraftLink({ canCopy })}
-                description={
-                  <PermissionTooltipContent
-                    upgrade={!allowAdditionalPermissions}
-                  >
-                    Allows viewers to copy project content from this share link.
-                  </PermissionTooltipContent>
-                }
+                description="Allows viewers to copy project content from this share link."
               />
               {renderApiCapability("viewers")}
             </>
           )}
 
           <Permission
-            disabled={!allowAdditionalPermissions}
             onCheckedChange={handleCheckedChange("editors")}
             checked={draftLink.relation === "editors"}
             title={roleLabels.editors}
             description={roleDescriptions.editors}
-            upgrade={!allowAdditionalPermissions}
           />
           {renderAdvanced(
             "editors",
@@ -411,17 +337,10 @@ const Menu = ({
                 id={ids.canPublish}
                 title="Can publish"
                 checked={draftLink.canPublish}
-                disabled={!allowAdditionalPermissions}
                 onCheckedChange={(canPublish) =>
                   updateDraftLink({ canPublish })
                 }
-                description={
-                  <PermissionTooltipContent
-                    upgrade={!allowAdditionalPermissions}
-                  >
-                    Allows editors to publish from this share link.
-                  </PermissionTooltipContent>
-                }
+                description="Allows editors to publish from this share link."
               />
               {renderApiCapability("editors")}
             </>
@@ -435,12 +354,10 @@ const Menu = ({
           {renderAdvanced("builders", renderApiCapability("builders"))}
 
           <Permission
-            disabled={!allowAdditionalPermissions}
             onCheckedChange={handleCheckedChange("administrators")}
             checked={draftLink.relation === "administrators"}
             title={roleLabels.administrators}
             description={roleDescriptions.administrators}
-            upgrade={!allowAdditionalPermissions}
           />
           {renderAdvanced(
             "administrators",
@@ -493,7 +410,6 @@ type SharedLinkItemType = {
   onChange: (value: LinkOptions) => void;
   onDelete: () => void;
   builderUrl: (props: { authToken: string; mode: BuilderMode }) => string;
-  allowAdditionalPermissions: boolean;
 };
 
 const relationToMode: Record<Role, BuilderMode> = {
@@ -508,7 +424,6 @@ const SharedLinkItem = ({
   onChange,
   onDelete,
   builderUrl,
-  allowAdditionalPermissions,
 }: SharedLinkItemType) => {
   const [currentLink, setCurrentLink] = useState(value);
   const currentLinkRef = useRef(value);
@@ -549,7 +464,6 @@ const SharedLinkItem = ({
         value={currentLink}
         onChange={updateCurrentLink}
         onDelete={onDelete}
-        allowAdditionalPermissions={allowAdditionalPermissions}
       />
     </PanelContent>
   );
@@ -562,8 +476,6 @@ type ShareProjectProps = {
   onCreate: () => void;
   builderUrl: SharedLinkItemType["builderUrl"];
   isPending: boolean;
-  allowAdditionalPermissions: boolean;
-  isFreePlan: boolean;
 };
 
 const collapsibleContentHeight = declareCssVar(
@@ -594,8 +506,6 @@ export const ShareProject = ({
   onCreate,
   builderUrl,
   isPending,
-  allowAdditionalPermissions,
-  isFreePlan,
 }: ShareProjectProps) => {
   const items = links.map((link) => (
     <Fragment key={link.token}>
@@ -608,7 +518,6 @@ export const ShareProject = ({
         }}
         builderUrl={builderUrl}
         value={link}
-        allowAdditionalPermissions={allowAdditionalPermissions}
       />
       <Separator />
     </Fragment>
@@ -638,13 +547,6 @@ export const ShareProject = ({
       aria-busy={isPending}
       css={{ width: theme.spacing[33] }}
     >
-      {isFreePlan && (
-        <>
-          <ShareLinkSecurityNotice />
-          <Separator />
-        </>
-      )}
-
       <Collapsible.Root open={items.length > 0}>
         <Collapsible.Content className={collapsibleStyle()}>
           {items}

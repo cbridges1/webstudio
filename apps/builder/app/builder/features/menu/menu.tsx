@@ -1,6 +1,5 @@
 import { useStore } from "@nanostores/react";
 import {
-  theme,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -27,12 +26,10 @@ import {
   $authToken,
   $authTokenPermissions,
   $isDesignMode,
-  $purchases,
 } from "~/shared/nano-states";
 import { emitCommand } from "~/builder/shared/commands";
 import { MenuButton } from "./menu-button";
 import { $openProjectSettings } from "~/shared/nano-states/project-settings";
-import { UpgradeIcon } from "@webstudio-is/icons";
 import { $settings, setSetting } from "~/builder/shared/client-settings";
 import { help } from "~/shared/help";
 import { ColorSchemeMenu } from "~/shared/color-scheme-menu";
@@ -72,7 +69,6 @@ const ViewMenuItem = () => {
 };
 
 export const Menu = ({ defaultOpen }: { defaultOpen?: boolean } = {}) => {
-  const purchases = useStore($purchases);
   const authPermit = useStore($authPermit);
   const authTokenPermission = useStore($authTokenPermissions);
   const authToken = useStore($authToken);
@@ -297,21 +293,6 @@ export const Menu = ({ defaultOpen }: { defaultOpen?: boolean } = {}) => {
             ))}
           </DropdownMenuSubContent>
         </DropdownMenuSub>
-
-        {purchases.length === 0 && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onSelect={() => {
-                window.open("https://webstudio.is/pricing");
-              }}
-              css={{ gap: theme.spacing[3] }}
-            >
-              <UpgradeIcon />
-              <div>Upgrade to Pro</div>
-            </DropdownMenuItem>
-          </>
-        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

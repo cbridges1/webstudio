@@ -1,7 +1,7 @@
 {
   "name": "@webstudio-is/plans",
   "version": "0.0.0-webstudio-version",
-  "description": "Plan features and billing logic for Webstudio",
+  "description": "Plan features for Webstudio (selfhost: everything unlimited)",
   "author": "Webstudio <github@webstudio.is>",
   "homepage": "https://webstudio.is",
   "license": "AGPL-3.0-or-later",

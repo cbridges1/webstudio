@@ -66,7 +66,6 @@ const data = {
   user,
   templates: projects,
   planFeatures,
-  purchases: [],
   publisherHost: "https://wstd.work",
   projects,
   role: "own" as const,

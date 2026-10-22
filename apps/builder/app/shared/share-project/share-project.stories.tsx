@@ -116,8 +116,6 @@ const ShareProjectPopover = ({
       <PopoverContent>
         <ShareProjectComponent
           {...props}
-          allowAdditionalPermissions={false}
-          isFreePlan={true}
           isPending={false}
           builderUrl={builderUrl}
         />

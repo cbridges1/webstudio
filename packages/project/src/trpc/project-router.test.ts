@@ -61,7 +61,7 @@ describe("userPublishCount", () => {
     const caller = createCaller(createContext());
     const result = await caller.userPublishCount({ projectId: "proj-1" });
 
-    expect(result).toEqual({ success: true, data: 3, limit: 500 });
+    expect(result).toEqual({ success: true, data: 3, limit: 100 });
   });
 
   test("counts publishes for the caller when projectId is omitted", async () => {

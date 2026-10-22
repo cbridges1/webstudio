@@ -12,7 +12,6 @@ import {
   Flex,
   Tooltip,
   InputErrorsTooltip,
-  ProChip,
   TextArea,
   IconButton,
   cssVar,
@@ -23,7 +22,6 @@ import type { ProjectMeta } from "@webstudio-is/sdk";
 import { validateContactEmail } from "@webstudio-is/project-build/contracts";
 import { ImageControl } from "./image-control";
 import { $assets, $project } from "~/shared/sync/data-stores";
-import { $permissions } from "~/shared/nano-states";
 import { $projectSettings } from "~/shared/sync/data-stores";
 import { sectionSpacing } from "./utils";
 import { CodeEditor } from "~/shared/code-editor";
@@ -58,8 +56,6 @@ const saveSetting = <Name extends keyof ProjectMeta>(
 };
 
 export const SectionGeneral = ({ projectId }: { projectId?: string }) => {
-  const { maxContactEmailsPerProject } = useStore($permissions);
-  const allowContactEmail = maxContactEmailsPerProject > 0;
   const projectSettings = useStore($projectSettings);
   const project = useStore($project);
   const assets = useStore($assets);
@@ -76,10 +72,7 @@ export const SectionGeneral = ({ projectId }: { projectId?: string }) => {
     }
   }, [projectSettings?.meta]);
 
-  const contactEmailError = validateContactEmail(
-    meta.contactEmail ?? "",
-    maxContactEmailsPerProject
-  );
+  const contactEmailError = validateContactEmail(meta.contactEmail ?? "");
   const asset = assets.get(meta.faviconAssetId ?? "");
   const favIconUrl = asset ? `${asset.name}` : undefined;
 
@@ -149,7 +142,6 @@ export const SectionGeneral = ({ projectId }: { projectId?: string }) => {
               tabIndex={0}
             />
           </Tooltip>
-          {allowContactEmail === false && <ProChip>Pro</ProChip>}
         </Flex>
         <InputErrorsTooltip
           errors={contactEmailError ? [contactEmailError] : undefined}
@@ -163,10 +155,7 @@ export const SectionGeneral = ({ projectId }: { projectId?: string }) => {
             value={meta.contactEmail ?? ""}
             onChange={(value) => {
               setMeta({ ...meta, contactEmail: value });
-              if (
-                validateContactEmail(value, maxContactEmailsPerProject) ===
-                undefined
-              ) {
+              if (validateContactEmail(value) === undefined) {
                 saveSetting("contactEmail", value);
               }
             }}

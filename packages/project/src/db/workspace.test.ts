@@ -4,9 +4,7 @@ import {
   eq,
   isNull,
   notification,
-  product,
   project,
-  transactionLog,
   workspace,
   workspaceMember,
 } from "@webstudio-is/db";
@@ -19,7 +17,6 @@ import {
   rename,
   remove,
   findMany,
-  countAllMembers,
   addMember,
   updateRole,
   removeMember,
@@ -236,7 +233,7 @@ describe("findMany", () => {
     expect(result.map((w) => w.id)).toEqual([WS2, WS1]);
   });
 
-  test("returns member workspaces with isDowngraded=true when owner plan maxWorkspaces<=1", async () => {
+  test("never downgrades member workspaces (selfhost has no plans)", async () => {
     await seed.workspace(db, { id: WS2, userId: "owner-2" });
     await seed.workspaceMember(db, {
       workspaceId: WS2,
@@ -244,281 +241,10 @@ describe("findMany", () => {
       relation: "editors",
     });
 
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 1,
-    });
-
-    const result = await findMany("user-1", ctx);
+    const result = await findMany("user-1", createContext());
     const member = result.find((w) => w.id === WS2);
     expect(member?.role).toBe("editors");
-    expect(member?.isDowngraded).toBe(true);
-  });
-
-  // The viewer (user-1) owns nothing and is a member of WS2 owned by owner-2.
-  // user-1 is the first of the workspace's members.
-  const setupDowngradeScenario = async (opts: {
-    /** Number of members, user-1 included; given as their ids */
-    members: string[];
-    /** Pending invites owner-2 has sent */
-    pendingInvites: number;
-    /** Extra seats owner-2 bought, or null for no subscription event */
-    transactionLog: { quantity: number } | null;
-  }) => {
-    await seed.workspace(db, { id: WS2, userId: "owner-2" });
-    const memberIds = ["user-1", ...opts.members.slice(1)];
-    for (const userId of memberIds) {
-      await seed.workspaceMember(db, {
-        workspaceId: WS2,
-        userId,
-        relation: "editors",
-      });
-    }
-    for (let index = 0; index < opts.pendingInvites; index += 1) {
-      await seed.user(db, { id: `invitee-${index}` });
-      await db.insert(notification).values({
-        type: "workspaceInvite",
-        recipientId: `invitee-${index}`,
-        senderId: "owner-2",
-        payload: { workspaceId: WS2, relation: "editors" },
-      });
-    }
-    await db
-      .insert(product)
-      .values({ id: "prod-seats", name: "Seats", meta: {} });
-    if (opts.transactionLog !== null) {
-      await db.insert(transactionLog).values({
-        eventId: "evt-seats",
-        userId: "owner-2",
-        productId: "prod-seats",
-        eventData: {
-          type: "customer.subscription.updated",
-          created: 1000,
-          data: {
-            object: {
-              object: "subscription",
-              id: "sub-seats",
-              items: { data: [{ quantity: opts.transactionLog.quantity }] },
-            },
-          },
-        },
-      });
-    }
-  };
-
-  // ---- extraSeats from subscription (quantity present) ----
-
-  test("downgraded when members > seatsIncluded + extraSeats (with subscription)", async () => {
-    // 3 members + 1 pending = 4 total, seatsIncluded=1, quantity=1 → paidSeats=2 < 4
-    await setupDowngradeScenario({
-      members: ["m-1", "m-2", "m-3"],
-      pendingInvites: 1,
-      transactionLog: {
-        quantity: 1,
-      },
-    });
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 5,
-      seatsIncluded: 1,
-    });
-    const result = await findMany("user-1", ctx);
-    expect(result.find((w) => w.id === WS2)?.isDowngraded).toBe(true);
-  });
-
-  test("not downgraded when members === seatsIncluded + extraSeats (boundary with subscription)", async () => {
-    // 3 members, seatsIncluded=2, quantity=1 → paidSeats=3, 3 === 3
-    await setupDowngradeScenario({
-      members: ["m-1", "m-2", "m-3"],
-      pendingInvites: 0,
-      transactionLog: {
-        quantity: 1,
-      },
-    });
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 5,
-      seatsIncluded: 2,
-    });
-    const result = await findMany("user-1", ctx);
-    expect(result.find((w) => w.id === WS2)?.isDowngraded).toBe(false);
-  });
-
-  test("not downgraded when members < seatsIncluded + extraSeats (well under with subscription)", async () => {
-    // 1 member, seatsIncluded=2, quantity=2 → paidSeats=4, 1 < 4
-    await setupDowngradeScenario({
-      members: ["m-1"],
-      pendingInvites: 0,
-      transactionLog: {
-        quantity: 2,
-      },
-    });
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 5,
-      seatsIncluded: 2,
-    });
-    const result = await findMany("user-1", ctx);
-    expect(result.find((w) => w.id === WS2)?.isDowngraded).toBe(false);
-  });
-
-  test("not downgraded when extra seats save you from exceeding seatsIncluded", async () => {
-    // 3 members, seatsIncluded=2, quantity=2 → paidSeats=4, 3 < 4
-    await setupDowngradeScenario({
-      members: ["m-1", "m-2", "m-3"],
-      pendingInvites: 0,
-      transactionLog: {
-        quantity: 2,
-      },
-    });
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 5,
-      seatsIncluded: 2,
-    });
-    const result = await findMany("user-1", ctx);
-    expect(result.find((w) => w.id === WS2)?.isDowngraded).toBe(false);
-  });
-
-  // ---- extraSeats = null (no subscription event in TransactionLog) ----
-
-  test("not downgraded when members < seatsIncluded and extraSeats is null", async () => {
-    // 1 member, seatsIncluded=2, no subscription event → paidSeats=2, 1 < 2
-    await setupDowngradeScenario({
-      members: ["m-1"],
-      pendingInvites: 0,
-      transactionLog: null,
-    });
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 5,
-      seatsIncluded: 2,
-    });
-    const result = await findMany("user-1", ctx);
-    expect(result.find((w) => w.id === WS2)?.isDowngraded).toBe(false);
-  });
-
-  test("not downgraded when members === seatsIncluded and extraSeats is null", async () => {
-    // 2 members, seatsIncluded=2, no subscription event → paidSeats=2, 2 === 2
-    await setupDowngradeScenario({
-      members: ["m-1", "m-2"],
-      pendingInvites: 0,
-      transactionLog: null,
-    });
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 5,
-      seatsIncluded: 2,
-    });
-    const result = await findMany("user-1", ctx);
-    expect(result.find((w) => w.id === WS2)?.isDowngraded).toBe(false);
-  });
-
-  test("downgraded when members > seatsIncluded and extraSeats is null", async () => {
-    // 3 members, seatsIncluded=2, no subscription event → paidSeats=2, 3 > 2
-    await setupDowngradeScenario({
-      members: ["m-1", "m-2", "m-3"],
-      pendingInvites: 0,
-      transactionLog: null,
-    });
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 5,
-      seatsIncluded: 2,
-    });
-    const result = await findMany("user-1", ctx);
-    expect(result.find((w) => w.id === WS2)?.isDowngraded).toBe(true);
-  });
-
-  // ---- pending invites count toward members ----
-
-  test("downgraded when members + pending > paidSeats", async () => {
-    // 2 members + 1 pending = 3 total, seatsIncluded=2, no extra seats → 3 > 2
-    await setupDowngradeScenario({
-      members: ["m-1", "m-2"],
-      pendingInvites: 1,
-      transactionLog: null,
-    });
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 5,
-      seatsIncluded: 2,
-    });
-    const result = await findMany("user-1", ctx);
-    expect(result.find((w) => w.id === WS2)?.isDowngraded).toBe(true);
-  });
-
-  test("not downgraded when members + pending === paidSeats", async () => {
-    // 1 member + 1 pending = 2 total, seatsIncluded=2, no extra seats → 2 === 2
-    await setupDowngradeScenario({
-      members: ["m-1"],
-      pendingInvites: 1,
-      transactionLog: null,
-    });
-    const ctx = createContext();
-    ctx.getOwnerPlanFeatures = async () => ({
-      ...defaultPlanFeatures,
-      maxWorkspaces: 5,
-      seatsIncluded: 2,
-    });
-    const result = await findMany("user-1", ctx);
-    expect(result.find((w) => w.id === WS2)?.isDowngraded).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// countAllMembers
-// ---------------------------------------------------------------------------
-
-describe("countAllMembers", () => {
-  test("returns 0 when user has no workspaces", async () => {
-    const count = await countAllMembers("user-1", createContext());
-    expect(count).toBe(0);
-  });
-
-  test("returns sum of active members + pending invites", async () => {
-    await seedOwnWorkspace();
-    for (const userId of ["m1", "m2", "m3"]) {
-      await seed.workspaceMember(db, { workspaceId: WS1, userId });
-    }
-    // Removed members don't count.
-    await seed.workspaceMember(db, {
-      workspaceId: WS1,
-      userId: "m4",
-      removedAt: new Date().toISOString(),
-    });
-    for (const recipientId of ["i1", "i2"]) {
-      await seed.user(db, { id: recipientId });
-      await db.insert(notification).values({
-        type: "workspaceInvite",
-        recipientId,
-        senderId: "user-1",
-        payload: { workspaceId: WS1, relation: "editors" },
-      });
-    }
-
-    const count = await countAllMembers("user-1", createContext());
-    expect(count).toBe(5);
-  });
-
-  test("deduplicates same member across multiple workspaces", async () => {
-    // "user-a" is in two workspaces — should count as 1, not 2.
-    await seed.workspace(db, { id: WS1, userId: "user-1" });
-    await seed.workspace(db, { id: WS2, userId: "user-1" });
-    await seed.workspaceMember(db, { workspaceId: WS1, userId: "user-a" });
-    await seed.workspaceMember(db, { workspaceId: WS2, userId: "user-a" });
-
-    const count = await countAllMembers("user-1", createContext());
-    expect(count).toBe(1);
+    expect(member?.isDowngraded).toBe(false);
   });
 });
 

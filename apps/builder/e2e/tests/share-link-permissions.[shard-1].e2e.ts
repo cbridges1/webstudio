@@ -21,7 +21,6 @@ import { waitForSyncStatus } from "../flows/sync-status";
 import { createContentModeProject } from "../fixtures/content-mode-suite";
 import { newBrowserContext, newIsolatedPage, test } from "../test";
 import { measure } from "../perf";
-import { e2ePaidPlanName } from "../plans";
 
 const ownerEmail = "share-link-e2e@webstudio.test";
 const baselineText = "Initial content";
@@ -83,7 +82,6 @@ test.beforeAll(async ({ browser }) => {
     context: ownerContext,
     email: ownerEmail,
     title: "Share Link E2E",
-    devPlan: e2ePaidPlanName,
     assetNamePrefix: "share-link-",
     editorToken: "share-link-e2e-editor-token",
     builderToken: "share-link-e2e-builder-token",

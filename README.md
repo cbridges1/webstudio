@@ -18,7 +18,7 @@ is a pnpm workspace, and `npm run bootstrap` fetches the pinned version for you.
 
 ```sh
 npm run bootstrap   # install dependencies and build the workspace packages the dev server loads
-npm run dev         # Postgres in Docker, migrations, then the builder
+npm run dev         # Postgres in Docker, migrations, then the builder and Drizzle Studio
 ```
 
 In a second terminal, create an account. There is no public sign-up.
@@ -27,7 +27,9 @@ In a second terminal, create an account. There is no public sign-up.
 npm run cli   # pick "Users — add a user"; passwords need 12+ characters
 ```
 
-Then open http://localhost:5173 and sign in with that username and password. Everything is plain
+Then open http://localhost:5173 and sign in with that username and password. `npm run dev` also
+starts Drizzle Studio on the same database at https://local.drizzle.studio?port=4984
+(`DRIZZLE_STUDIO_PORT` changes the port; `LOCAL_DEV_STUDIO=false` skips it). Ctrl+C stops both. Everything is plain
 HTTP: TLS and domain mapping belong to whatever hosts the builder.
 
 ### Dev CLI
@@ -39,13 +41,15 @@ HTTP: TLS and domain mapping belong to whatever hosts the builder.
 | Setup                   | Starts the local Postgres in Docker and applies migrations                 |
 | Reset                   | Deletes the local database, then runs Setup                                |
 | Destroy                 | Stops Postgres and deletes the local database, with every user and project |
+| Drizzle Studio          | Browses the database in Drizzle Studio until Ctrl+C                        |
 | Users — add a user      | Creates an account with its default workspace                              |
 | List users              | Shows each account, its email and whether it can sign in                   |
 | Set a password          | Replaces a user's password                                                 |
 | Disable / Enable a user | Blocks or allows sign-in; the user's projects stay                         |
 
 An email is optional, but only accounts with one can accept workspace invites. Sign-in allows 5
-attempts per minute from one address. The account actions use `DATABASE_URL` (the environment
+attempts per minute from one address. If the local database isn't running, the account actions
+offer to start it (Setup) first. The account actions and Drizzle Studio use `DATABASE_URL` (the environment
 first, then `apps/builder/.env.development`, then `apps/builder/.env`).
 
 For scripts, the same account actions are available without prompts:

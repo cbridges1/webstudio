@@ -1,6 +1,7 @@
 export {
   planFeatures,
   defaultPlanFeatures,
-  parsePlansEnv,
+  unlimited,
+  isUnlimited,
 } from "./plan-features";
-export type { PlanFeatures, Purchase, PlanConfig } from "./plan-features";
+export type { PlanFeatures, Purchase } from "./plan-features";

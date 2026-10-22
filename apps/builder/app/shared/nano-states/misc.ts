@@ -5,11 +5,7 @@ import {
   $workspaces,
 } from "~/dashboard/workspace/workspace-stores";
 import type { AuthPermit } from "@webstudio-is/trpc-interface/index.server";
-import {
-  defaultPlanFeatures,
-  type PlanFeatures,
-  type Purchase,
-} from "@webstudio-is/plans";
+import { defaultPlanFeatures, type PlanFeatures } from "@webstudio-is/plans";
 import type { Role } from "@webstudio-is/project";
 import type { User } from "~/shared/db/user.server";
 import { toast, type Placement } from "@webstudio-is/design-system";
@@ -297,7 +293,6 @@ export const $hoveredInstanceSelector = atom<undefined | InstanceSelector>(
 export const $planFeatures = atom<PlanFeatures>(defaultPlanFeatures);
 
 export { $workspaceRole, $workspaces };
-export const $purchases = atom<Array<Purchase>>([]);
 
 export const $user = atom<User | undefined>();
 
@@ -307,11 +302,9 @@ export const $user = atom<User | undefined>();
  */
 export const setSharedStores = (data: {
   planFeatures: PlanFeatures;
-  purchases: Array<Purchase>;
   role: Role | "own";
 }) => {
   $planFeatures.set(data.planFeatures);
-  $purchases.set(data.purchases);
   $workspaceRole.set(data.role);
 };
 
@@ -424,10 +417,8 @@ export const toggleBuilderMode = (mode: BuilderMode) => {
 
 export const setBuilderMode = (mode: BuilderMode | null) => {
   if (mode === "content" && !$isContentModeAllowed.get()) {
-    // This is content link from a non pro user, we don't allow content mode for such links
-    toast.info(
-      "Content mode is not available for this link. The link’s author must have a Pro plan."
-    );
+    // Content mode isn't allowed for this link.
+    toast.info("Content mode is not available for this link.");
 
     $builderMode.set("preview");
     return;

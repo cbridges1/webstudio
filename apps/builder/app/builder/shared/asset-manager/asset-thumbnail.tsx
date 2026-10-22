@@ -35,7 +35,7 @@ import {
 } from "@webstudio-is/sdk";
 import type { MimeCategory } from "@webstudio-is/sdk";
 import { draggable } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
-import { $authPermit, $permissions } from "~/shared/nano-states";
+import { $authPermit } from "~/shared/nano-states";
 import { canConfigureContentCollections } from "../assets/content-collections";
 import { replaceAsset } from "~/builder/shared/assets";
 import { validateFiles } from "~/builder/shared/assets/asset-upload";
@@ -236,7 +236,6 @@ export const AssetThumbnail = ({
       setSettingsOpen(false);
     }
   }, [canMutate, settingsBlocked]);
-  const { canDownloadAssets } = useStore($permissions);
   const { asset } = assetContainer;
   const getDragItems = interactions.getDragItems;
   const { basename, ext } = getAssetDisplayNameParts(asset);
@@ -331,7 +330,7 @@ export const AssetThumbnail = ({
                     }
                   : {}),
               }),
-          ...(authPermit !== "view" && canDownloadAssets ? { download } : {}),
+          ...(authPermit !== "view" ? { download } : {}),
         };
 
   const handleReplaceFile = (event: React.ChangeEvent<HTMLInputElement>) => {

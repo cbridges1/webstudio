@@ -16,9 +16,9 @@ import {
   Flex,
   theme,
   Text,
-  ProChip,
+  Chip,
 } from "@webstudio-is/design-system";
-import { ChevronDownIcon, UpgradeIcon } from "@webstudio-is/icons";
+import { ChevronDownIcon } from "@webstudio-is/icons";
 import type { WorkspaceWithRelation } from "@webstudio-is/project";
 import { useNavigate, useLocation } from "@remix-run/react";
 import { useStore } from "@nanostores/react";
@@ -163,7 +163,7 @@ export const WorkspaceSelector = ({
     name: workspace.name,
     suffix: workspace.isDowngraded ? (
       <Flex css={{ marginInlineStart: theme.spacing[4], flexShrink: 0 }}>
-        <ProChip>Suspended</ProChip>
+        <Chip>Suspended</Chip>
       </Flex>
     ) : undefined,
   });
@@ -236,21 +236,6 @@ export const WorkspaceSelector = ({
           <DropdownMenuItem withIndicator onSelect={() => setLeaveOpen(true)}>
             Leave
           </DropdownMenuItem>
-        )}
-        {permissions.canCreateWorkspace === false && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onSelect={() => {
-                window.open("https://webstudio.is/pricing");
-              }}
-            >
-              <Flex align="center" gap="1">
-                <UpgradeIcon />
-                <Text truncate>Upgrade</Text>
-              </Flex>
-            </DropdownMenuItem>
-          </>
         )}
       </WorkspaceDropdown>
       <CreateWorkspaceDialog

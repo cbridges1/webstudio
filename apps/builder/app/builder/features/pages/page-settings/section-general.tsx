@@ -9,18 +9,14 @@ import {
   InputField,
   Label,
   Link,
-  LinkButton,
-  ProChip,
   Select,
   Text,
   Tooltip,
-  theme,
 } from "@webstudio-is/design-system";
 import { isLiteralExpression } from "@webstudio-is/expression";
 import { documentTypes, type Pages } from "@webstudio-is/sdk";
 import { HomeIcon, InfoCircleIcon } from "@webstudio-is/icons";
 import { BindableExpressionControl } from "~/builder/shared/bindable-expression";
-import { $permissions } from "~/shared/nano-states";
 import { $pageRootScope } from "../page-utils";
 import type {
   PageSettingsErrors,
@@ -42,13 +38,11 @@ const PathField = ({
   disabled?: boolean;
   onChange: (value: string) => void;
 }) => {
-  const { allowDynamicData } = useStore($permissions);
   const id = useId();
   return (
     <Grid gap={1}>
       <Flex align="center" gap={1}>
         <Label htmlFor={id}>Path</Label>
-        {allowDynamicData === false && <ProChip>PRO</ProChip>}
         <Tooltip
           content={
             <>
@@ -57,24 +51,6 @@ const PathField = ({
                 be made optional using :name?, or have a wildcard such as /* or
                 /:name* to store whole remaining part at the end of the URL.
               </Text>
-              {allowDynamicData === false && (
-                <>
-                  <br />
-                  <Text>
-                    To make the path dynamic and use it with CMS, you can use
-                    parameters and other features. You can publish to staging
-                    for free; upgrade to Pro to publish to custom domains.
-                  </Text>
-                  <LinkButton
-                    color="primary"
-                    css={{ marginTop: theme.spacing[5], width: "100%" }}
-                    target="_blank"
-                    href="https://webstudio.is/pricing"
-                  >
-                    Upgrade
-                  </LinkButton>
-                </>
-              )}
             </>
           }
           variant="wrapped"
@@ -197,13 +173,11 @@ const RedirectField = ({
   onChange: (value: string) => void;
 }) => {
   const id = useId();
-  const { allowDynamicData } = useStore($permissions);
   const { variableValues, scope, aliases } = useStore($pageRootScope);
   return (
     <Grid gap={1}>
       <Flex align="center" gap={1}>
         <Label htmlFor={id}>Redirect </Label>
-        {allowDynamicData === false && <ProChip>PRO</ProChip>}
         <Tooltip
           content={
             <>
@@ -211,24 +185,6 @@ const RedirectField = ({
                 Redirect value can be a path or an expression that returns a
                 path for dynamic response handling.
               </Text>
-              {allowDynamicData === false && (
-                <>
-                  <br />
-                  <Text>
-                    Redirects are a Pro publishing feature. You can publish to
-                    staging for free; upgrade to Pro to publish to custom
-                    domains.
-                  </Text>
-                  <LinkButton
-                    color="primary"
-                    css={{ marginTop: theme.spacing[5], width: "100%" }}
-                    target="_blank"
-                    href="https://webstudio.is/pricing"
-                  >
-                    Upgrade
-                  </LinkButton>
-                </>
-              )}
             </>
           }
           variant="wrapped"

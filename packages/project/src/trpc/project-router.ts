@@ -9,8 +9,6 @@ import {
   getPlanFeaturesByOwnerId,
   getProjectOwnerId,
 } from "@webstudio-is/trpc-interface/index.server";
-import { defaultPlanFeatures } from "@webstudio-is/plans";
-import { getExtraPaidSeats } from "@webstudio-is/plans/index.server";
 import { projectTitle } from "../shared/project-schema";
 import { marketplaceApprovalStatus } from "../shared/marketplace-schema";
 import {
@@ -131,10 +129,6 @@ export const projectRouter = router({
           ownerId = await getProjectOwnerId(input.projectId, ctx);
           const plan = await getPlanFeaturesByOwnerId(ownerId, ctx);
           limit = plan.maxDailyPublishesPerUser;
-          if (limit > defaultPlanFeatures.maxDailyPublishesPerUser) {
-            const extraSeats = await getExtraPaidSeats(ownerId, ctx);
-            limit *= 1 + plan.seatsIncluded + (extraSeats ?? 0);
-          }
         }
 
         const result = maybeOne(

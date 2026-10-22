@@ -30,7 +30,6 @@ import {
   InputErrorsTooltip,
   InputField,
   Label,
-  ProChip,
   ScrollArea,
   Select,
   SplitView,
@@ -50,10 +49,7 @@ import {
   ExpressionEditor,
   formatValue,
 } from "~/builder/shared/expression-editor";
-import {
-  $permissions,
-  $variableValuesByInstanceSelector,
-} from "~/shared/nano-states";
+import { $variableValuesByInstanceSelector } from "~/shared/nano-states";
 import { $dataSources } from "~/shared/sync/data-stores";
 import { $resources, $instances, $props } from "~/shared/sync/data-stores";
 import {
@@ -206,7 +202,6 @@ const TypeField = ({
   value: VariableType;
   onChange: (value: VariableType) => void;
 }) => {
-  const { allowDynamicData } = useStore($permissions);
   const optionsList: Array<{
     value: VariableType;
     disabled?: boolean;
@@ -238,7 +233,6 @@ const TypeField = ({
       label: (
         <Flex direction="row" gap="2" align="center">
           Resource
-          {allowDynamicData === false && <ProChip>Pro</ProChip>}
         </Flex>
       ),
       description:
@@ -249,7 +243,6 @@ const TypeField = ({
       label: (
         <Flex direction="row" gap="2" align="center">
           GraphQL
-          {allowDynamicData === false && <ProChip>Pro</ProChip>}
         </Flex>
       ),
       description:
@@ -260,7 +253,6 @@ const TypeField = ({
       label: (
         <Flex direction="row" gap="2" align="center">
           System resource
-          {allowDynamicData === false && <ProChip>Pro</ProChip>}
         </Flex>
       ),
       description: "A system resource is a configuration for Webstudio data.",

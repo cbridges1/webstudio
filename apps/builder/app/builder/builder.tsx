@@ -46,7 +46,7 @@ import { useSyncPageUrl } from "~/shared/pages";
 import { useMount, useUnmount } from "~/shared/hook-utils/use-mount";
 import { subscribeCommands } from "~/builder/shared/commands";
 import { ProjectSettings } from "~/shared/project-settings";
-import type { PlanFeatures, Purchase } from "@webstudio-is/plans";
+import type { PlanFeatures } from "@webstudio-is/plans";
 import {
   $activeSidebarPanel,
   $dataLoadingState,
@@ -262,7 +262,6 @@ export type BuilderProps = {
   role: Role | "own";
   authTokenPermissions: TokenPermissions;
   planFeatures: PlanFeatures;
-  purchases: Array<Purchase>;
   stagingUsername: string;
   stagingPassword: string;
 };

@@ -27,7 +27,6 @@ import {
   $authPermit,
   $isContentMode,
   $isDesignMode,
-  $permissions,
 } from "~/shared/nano-states";
 import { $project } from "~/shared/sync/data-stores";
 import { $openProjectSettings } from "~/shared/nano-states/project-settings";
@@ -150,7 +149,6 @@ export const FormFields = ({
 }) => {
   const project = useStore($project);
   const pages = useStore($pages);
-  const { allowAuth } = useStore($permissions);
   const isDesignMode = useStore($isDesignMode);
 
   if (pages === undefined) {
@@ -212,7 +210,6 @@ export const FormFields = ({
               values={values}
               errors={errors}
               onChange={onChange}
-              showUpgrade={allowAuth === false}
               showErrors={showAuthErrors}
             />
           </CollapsibleSection>

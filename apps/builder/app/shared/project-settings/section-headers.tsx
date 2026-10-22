@@ -1,16 +1,7 @@
 import { useState } from "react";
 import { useStore } from "@nanostores/react";
 import { ZodError } from "zod";
-import {
-  Flex,
-  Grid,
-  LinkButton,
-  ProChip,
-  Text,
-  Tooltip,
-  cssVar,
-  theme,
-} from "@webstudio-is/design-system";
+import { Flex, Grid, Text, Tooltip, cssVar } from "@webstudio-is/design-system";
 import { InfoCircleIcon } from "@webstudio-is/icons";
 import {
   customResponseHeader,
@@ -20,7 +11,6 @@ import {
 } from "@webstudio-is/sdk";
 import { validatePathnamePattern } from "@webstudio-is/wsauth";
 import { $pages, $projectSettings } from "~/shared/sync/data-stores";
-import { $permissions } from "~/shared/nano-states";
 import { executeRuntimeMutation } from "~/shared/instance-utils/data";
 import {
   ProjectSettingsDeleteRuleButton,
@@ -41,7 +31,6 @@ export const SectionHeaders = ({
     args: Parameters<typeof executeRuntimeMutation>[0]
   ) => ReturnType<typeof executeRuntimeMutation>;
 } = {}) => {
-  const { allowDynamicData } = useStore($permissions);
   const settings = useStore($projectSettings);
   const pages = useStore($pages);
   const [saveError, setSaveError] = useState("");
@@ -91,7 +80,6 @@ export const SectionHeaders = ({
     <Grid gap={3} css={sectionSpacing}>
       <Flex align="center" gap={1}>
         <Text variant="titles">Headers</Text>
-        {allowDynamicData === false && <ProChip>Pro</ProChip>}
         <Tooltip
           variant="wrapped"
           content={
@@ -111,23 +99,6 @@ export const SectionHeaders = ({
                 be configured here. Cookie, connection, and response-body
                 framing headers are also unavailable. Publish to apply changes.
               </Text>
-              {allowDynamicData === false && (
-                <>
-                  <br />
-                  <Text>
-                    Custom headers on a custom domain require Pro. Defaults and
-                    staging are free.
-                  </Text>
-                  <LinkButton
-                    color="primary"
-                    css={{ marginTop: theme.spacing[5], width: "100%" }}
-                    href="https://webstudio.is/pricing"
-                    target="_blank"
-                  >
-                    Upgrade
-                  </LinkButton>
-                </>
-              )}
             </>
           }
         >

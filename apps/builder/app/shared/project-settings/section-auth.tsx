@@ -3,10 +3,7 @@ import {
   Button,
   Flex,
   Grid,
-  LinkButton,
-  ProChip,
   Text,
-  theme,
   Tooltip,
   cssVar,
 } from "@webstudio-is/design-system";
@@ -18,7 +15,6 @@ import {
   type WsAuthRoute,
 } from "@webstudio-is/wsauth";
 import { validateBasicAuthCredentials } from "@webstudio-is/project-build/runtime";
-import { $permissions } from "~/shared/nano-states";
 import { $pages, $projectSettings } from "~/shared/sync/data-stores";
 import { getExistingRoutePaths, sectionSpacing } from "./utils";
 import { executeRuntimeMutation } from "~/shared/instance-utils/data";
@@ -43,7 +39,6 @@ const saveAuthRoutes = (authRoutes: WsAuthRoute[]) => {
 };
 
 export const SectionAuth = () => {
-  const { allowAuth } = useStore($permissions);
   const pages = useStore($pages);
   const projectSettings = useStore($projectSettings);
   const [authRoutes, setAuthRoutes] = useState(() => {
@@ -93,7 +88,6 @@ export const SectionAuth = () => {
     <Grid gap={3} css={sectionSpacing}>
       <Flex align="center" gap={1}>
         <Text variant="titles">Authentication</Text>
-        {allowAuth === false && <ProChip>PRO</ProChip>}
         <Tooltip
           content={
             <>
@@ -106,23 +100,6 @@ export const SectionAuth = () => {
                 Routes use the same syntax as page paths, including :params and
                 * wildcards.
               </Text>
-              {allowAuth === false && (
-                <>
-                  <br />
-                  <Text>
-                    Authentication is a Pro feature. You can publish to staging
-                    for free; upgrade to Pro to publish to custom domains.
-                  </Text>
-                  <LinkButton
-                    color="primary"
-                    css={{ marginTop: theme.spacing[5], width: "100%" }}
-                    target="_blank"
-                    href="https://webstudio.is/pricing"
-                  >
-                    Upgrade
-                  </LinkButton>
-                </>
-              )}
             </>
           }
           variant="wrapped"

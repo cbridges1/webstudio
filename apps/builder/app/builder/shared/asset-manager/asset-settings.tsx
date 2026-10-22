@@ -52,11 +52,7 @@ import {
   TrashIcon,
 } from "@webstudio-is/icons";
 import { hyphenateProperty } from "@webstudio-is/css-engine";
-import {
-  $authPermit,
-  $editingPageId,
-  $permissions,
-} from "~/shared/nano-states";
+import { $authPermit, $editingPageId } from "~/shared/nano-states";
 import { $assets, $project } from "~/shared/sync/data-stores";
 import { $styleSourceSelections } from "~/shared/sync/data-stores";
 import { $openProjectSettings } from "~/shared/nano-states/project-settings";
@@ -335,7 +331,6 @@ const AssetSettingsContent = ({
   canPersistChanges: (expectedAssetName?: string) => boolean;
   unavailableDestinationFolderIds?: ReadonlySet<string>;
 }) => {
-  const { canDownloadAssets } = useStore($permissions);
   const { size, meta, id } = asset;
   const { ext } = getAssetDisplayNameParts(asset);
   const [filenameError, setFilenameError] = useState<string>();
@@ -463,8 +458,6 @@ const AssetSettingsContent = ({
   if (authPermit === "view") {
     downloadError =
       "Unavailable in View mode. Switch to Edit to download assets.";
-  } else if (canDownloadAssets === false) {
-    downloadError = "Upgrade to Pro to download assets.";
   }
 
   const isImage = asset.type === "image";

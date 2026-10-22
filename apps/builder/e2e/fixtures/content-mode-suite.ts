@@ -7,7 +7,6 @@ type ContentModeProjectOptions = {
   context: BrowserContext;
   email?: string;
   title?: string;
-  devPlan?: string;
   assetNamePrefix?: string;
   editorToken?: string;
   builderToken?: string;
@@ -17,7 +16,6 @@ export const createContentModeProject = async ({
   context,
   email = "content-mode-e2e@webstudio.test",
   title = "Content Mode E2E",
-  devPlan,
   assetNamePrefix,
   editorToken,
   builderToken,
@@ -32,7 +30,6 @@ export const createContentModeProject = async ({
           page: ownerPage,
           email,
           title,
-          devPlan,
         })
     );
 

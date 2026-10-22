@@ -13,16 +13,10 @@ import {
   DialogClose,
   Flex,
   toast,
-  PanelBanner,
-  Link,
-  rawTheme,
 } from "@webstudio-is/design-system";
-import { UpgradeIcon } from "@webstudio-is/icons";
 import { nativeClient, trpcClient } from "~/shared/trpc/trpc-client";
 import { $project } from "~/shared/sync/data-stores";
-import { $permissions } from "~/shared/nano-states";
 import { sectionSpacing } from "./utils";
-import cmsUpgradeBanner from "../cms-upgrade-banner.svg?url";
 
 const formatPublishDate = (date: string) => {
   try {
@@ -41,7 +35,6 @@ export const SectionBackups = ({
 }: {
   projectId?: string;
 }) => {
-  const { canRestoreBackups } = useStore($permissions);
   const { data, load } = trpcClient.project.publishedBuilds.useQuery();
   const project = useStore($project);
   const projectId = projectIdProp ?? project?.id ?? "";
@@ -93,7 +86,7 @@ export const SectionBackups = ({
           <Button
             color="primary"
             css={{ justifySelf: "start" }}
-            disabled={canRestoreBackups === false || options.length === 0}
+            disabled={options.length === 0}
           >
             Restore
           </Button>
@@ -124,27 +117,6 @@ export const SectionBackups = ({
           </PanelContent>
         </DialogContent>
       </Dialog>
-      {canRestoreBackups === false && (
-        <PanelBanner>
-          <img
-            src={cmsUpgradeBanner}
-            alt="Upgrade for backups"
-            width={rawTheme.spacing[28]}
-            style={{ aspectRatio: "4.1" }}
-          />
-          <Text variant="regularBold">Upgrade to restore from backups</Text>
-          <Flex align="center" gap={1}>
-            <UpgradeIcon />
-            <Link
-              color="inherit"
-              target="_blank"
-              href="https://webstudio.is/pricing"
-            >
-              Upgrade to Pro
-            </Link>
-          </Flex>
-        </PanelBanner>
-      )}
     </Grid>
   );
 };
