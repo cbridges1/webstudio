@@ -8,10 +8,7 @@
     "build": "pnpm -r --filter='!./fixtures/*' build",
     "webstudio": "node packages/cli/local.js",
     "dts": "pnpm -r dts",
-    "dev": "pnpm --filter=@webstudio-is/builder dev:local",
     "bootstrap": "npx --yes pnpm@9.14.4 install && pnpm --filter \"@webstudio-is/builder^...\" build",
-    "users": "pnpm --silent --filter=@webstudio-is/builder users",
-    "cli": "tsx --conditions=webstudio cli/index.ts",
     "test:selfhost": "pnpm --filter=@webstudio-is/builder exec vitest run --project core-server app/services/better-auth.server app/shared/published-domain && pnpm --filter=@webstudio-is/db test",
     "evaluations": "pnpm --filter webstudio evaluations",
     "lint": "oxlint --deny-warnings",
@@ -57,7 +54,6 @@
     "pre-commit": "./node_modules/.bin/nano-staged"
   },
   "devDependencies": {
-    "@clack/prompts": "^0.10.0",
     "@modelcontextprotocol/sdk": "^1.10.0",
     "@radix-ui/react-tooltip": "^1.2.4",
     "@storybook/addon-actions": "^8.6.4",

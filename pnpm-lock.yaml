@@ -28,9 +28,6 @@ importers:
 
   .:
     devDependencies:
-      '@clack/prompts':
-        specifier: ^0.10.0
-        version: 0.10.0
       '@modelcontextprotocol/sdk':
         specifier: ^1.10.0
         version: 1.29.0(zod@4.4.3)

@@ -1,10 +1,7 @@
-import { createReadStream, existsSync } from "node:fs";
-import { join } from "node:path";
-import { createReadableStreamFromReadable } from "@remix-run/node";
 import type { LoaderFunctionArgs } from "@remix-run/server-runtime";
 import env from "~/env/env.server";
 import { getMimeTypeByFilename, decodePathFragment } from "@webstudio-is/sdk";
-import { fileUploadPath } from "~/shared/asset-client";
+import { readStoredAsset } from "~/shared/asset-client";
 
 // this route used as proxy for videos to cloudflare endpoint or serve local files
 // https://developers.cloudflare.com/fundamentals/get-started/reference/cdn-cgi-endpoint/
@@ -44,9 +41,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return fetch(name);
   }
 
-  const filePath = join(process.cwd(), fileUploadPath, name);
+  const stored = await readStoredAsset(name);
 
-  if (existsSync(filePath) === false) {
+  if (stored === undefined) {
     throw new Response("Not found", {
       status: 404,
     });
@@ -54,13 +51,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const contentType = getMimeTypeByFilename(name);
 
-  return new Response(
-    createReadableStreamFromReadable(createReadStream(filePath)),
-    {
-      headers: {
-        "content-type": contentType,
-        "accept-ranges": "bytes",
-      },
-    }
-  );
+  return new Response(stored.body, {
+    headers: {
+      "content-type": contentType,
+      "accept-ranges": "bytes",
+    },
+  });
 };

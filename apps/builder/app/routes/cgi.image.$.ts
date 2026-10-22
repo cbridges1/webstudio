@@ -1,13 +1,10 @@
-import { createReadStream, existsSync } from "node:fs";
-import { join } from "node:path";
 import { z } from "zod";
-import { createReadableStreamFromReadable } from "@remix-run/node";
 import type { LoaderFunctionArgs } from "@remix-run/server-runtime";
 import { wsImageLoader } from "@webstudio-is/image";
 import { decodePathFragment } from "@webstudio-is/sdk";
 import env from "~/env/env.server";
 import { getImageNameAndType } from "~/builder/shared/assets/asset-utils";
-import { fileUploadPath } from "~/shared/asset-client";
+import { readStoredAsset } from "~/shared/asset-client";
 
 const imageParams = z.object({
   width: z.string().transform((value) => Math.round(parseFloat(value))),
@@ -103,9 +100,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (URL.canParse(name)) {
     return fetch(name);
   }
-  const filePath = join(process.cwd(), fileUploadPath, name);
+  const stored = await readStoredAsset(name);
 
-  if (existsSync(filePath) === false) {
+  if (stored === undefined) {
     throw new Response("Not found", {
       status: 404,
     });
@@ -113,12 +110,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const [contentType] = getImageNameAndType(name) ?? ["image/png"];
 
-  return new Response(
-    createReadableStreamFromReadable(createReadStream(filePath)),
-    {
-      headers: {
-        "content-type": contentType,
-      },
-    }
-  );
+  return new Response(stored.body, {
+    headers: {
+      "content-type": contentType,
+    },
+  });
 };

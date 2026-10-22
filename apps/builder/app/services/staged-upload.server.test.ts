@@ -6,7 +6,8 @@ import {
 } from "@webstudio-is/protocol";
 import { __testing__ } from "./staged-upload.server";
 
-const { createStagedUploadServer, createStagedUploadStore } = __testing__;
+const { createStagedUploadServer, createStagedUploadStore, removeUpload } =
+  __testing__;
 
 const createRequest = (headers: Record<string, string> = {}) =>
   new Request(new URL(stagedUploadPath, "https://example.com"), { headers });
@@ -124,5 +125,52 @@ describe("staged upload server", () => {
     });
 
     expect(store).toHaveProperty("useTags", false);
+  });
+
+  test("addresses S3-compatible storage with path-style URLs", () => {
+    const store = createStagedUploadStore({
+      S3_ACCESS_KEY_ID: "access-key",
+      S3_BUCKET: "bucket",
+      S3_ENDPOINT: "http://localhost:9000",
+      S3_REGION: "us-east-1",
+      S3_SECRET_ACCESS_KEY: "secret-key",
+    });
+
+    expect(store).toHaveProperty("client.config.forcePathStyle", true);
+  });
+
+  test("deletes a completed S3 upload's objects when aborting it fails", async () => {
+    const store = createStagedUploadStore({
+      S3_ACCESS_KEY_ID: "access-key",
+      S3_BUCKET: "bucket",
+      S3_ENDPOINT: "http://localhost:9000",
+      S3_REGION: "us-east-1",
+      S3_SECRET_ACCESS_KEY: "secret-key",
+    });
+    const deleted: unknown[] = [];
+    Object.assign(store, {
+      remove: async () => {
+        throw Object.assign(
+          new Error("The specified multipart upload does not exist."),
+          {
+            Code: "NoSuchUpload",
+          }
+        );
+      },
+      client: {
+        deleteObjects: async (input: unknown) => {
+          deleted.push(input);
+        },
+      },
+    });
+
+    await removeUpload(store, "upload-1");
+
+    expect(deleted).toEqual([
+      {
+        Bucket: "bucket",
+        Delete: { Objects: [{ Key: "upload-1" }, { Key: "upload-1.info" }] },
+      },
+    ]);
   });
 });

@@ -1,7 +1,0 @@
-services:
-  db:
-    volumes:
-      - builder-db:/var/lib/postgresql/data
-
-volumes:
-  builder-db:

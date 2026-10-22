@@ -1,10 +1,11 @@
-// selfhost: manages username/password accounts from the command line, for scripts
-// (selfhost.sh) and automation. `npm run cli` offers the same actions interactively.
+// selfhost: manages username/password accounts from the command line, for scripts and
+// automation. knowbra-webstudio runs it (`npm run selfhost -- user ...`); its `npm run cli`
+// offers the same actions interactively.
 // There is no public sign-up: an admin creates every account. Passwords are hashed and
 // checked by Better Auth, with the same configuration the builder uses
 // (app/services/better-auth.server.ts).
 //
-// Usage (from the repository root): npm run users -- <command>
+// Usage (from apps/builder): pnpm users <command>
 //   add <username> [--email <email>]  Create a user, its default workspace and a password
 //   set-password <username>           Replace the password and sign the user out of Better Auth
 //   disable <username>                Block sign-in

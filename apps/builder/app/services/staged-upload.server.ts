@@ -72,6 +72,9 @@ const createStagedUploadStore = (
         endpoint,
         region,
         bucket,
+        // selfhost: path-style URLs (<endpoint>/<bucket>/<key>), as the asset uploader
+        // uses. S3-compatible stores such as RustFS don't serve <bucket>.<endpoint>.
+        forcePathStyle: true,
         credentials: {
           accessKeyId,
           secretAccessKey,
@@ -169,11 +172,42 @@ export const readStagedUploadText = async ({
   return await readText(await datastore.read(uploadId));
 };
 
+/**
+ * selfhost: removes a staged upload. S3Store.remove aborts the multipart upload first, which
+ * S3 (and RustFS) answers with NoSuchUpload once the upload has completed; @tus/s3-store's
+ * check for that never matches the SDK's error, so it threw before deleting the objects and
+ * every import left its bundle in the bucket. Delete the objects directly in that case.
+ */
+const removeUpload = async (datastore: DataStore, uploadId: string) => {
+  try {
+    await datastore.remove(uploadId);
+  } catch (error) {
+    if (
+      datastore instanceof S3Store &&
+      (error as { Code?: string } | undefined)?.Code === "NoSuchUpload"
+    ) {
+      const { client, bucket } = datastore as unknown as {
+        client: { deleteObjects: (input: unknown) => Promise<unknown> };
+        bucket: string;
+      };
+      await client.deleteObjects({
+        Bucket: bucket,
+        Delete: {
+          Objects: [{ Key: uploadId }, { Key: `${uploadId}.info` }],
+        },
+      });
+      return;
+    }
+    throw error;
+  }
+};
+
 export const removeStagedUpload = async (uploadId: string) => {
-  await stagedUploadServer.datastore.remove(uploadId);
+  await removeUpload(stagedUploadServer.datastore, uploadId);
 };
 
 export const __testing__ = {
   createStagedUploadStore,
+  removeUpload,
   createStagedUploadServer,
 };
