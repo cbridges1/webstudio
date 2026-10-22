@@ -12,7 +12,8 @@ This fork stores everything with Drizzle in plain Postgres, signs in with a user
 (no Google or GitHub app needed), has no pricing model (every feature is available) and shows
 each project's real published address.
 
-It isn't run on its own: **knowbra-webstudio** runs it. That repository holds the stack
+It isn't run on its own: **knowbra-webstudio** (checked out next to this repository) runs it.
+`npm run setup`, `npm run cli` and `npm run dev` work here too; they run the same commands there. That repository holds the stack
 (Postgres and RustFS in Docker, the builder, Drizzle Studio and the deploy service) and the
 commands for it, all plain Node so they work on macOS, Linux and Windows:
 
