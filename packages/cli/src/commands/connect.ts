@@ -1,6 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { cwd } from "node:process";
+import { chdir, cwd } from "node:process";
 import { log } from "@clack/prompts";
 import { getProjectPermissions } from "@webstudio-is/http-client";
 import { x } from "tinyexec";
@@ -14,6 +14,7 @@ import { getStableErrorCode, isMissingApiAccessError } from "../error-codes";
 import { HandledCliError } from "../errors";
 import { isPlainRecord } from "../type-utils";
 import { apiCompatibilityHeaders, getCliCompatibilityMessage } from "./api";
+import { saveShareLink, validateShareLink } from "./link";
 import type {
   CommonYargsArgv,
   StrictYargsOptionsToInterface,
@@ -147,6 +148,32 @@ export type ConnectDependencies = {
   registerCodexServer: (serverCommand: ServerCommand) => Promise<void>;
   verifyProjectAccess: () => Promise<ProjectAccessResult>;
   writeFileAtomic: typeof writeFileAtomic;
+  saveShareLink?: typeof saveShareLink;
+  findBuilderServerCommand?: () => Promise<string | undefined>;
+};
+
+/**
+ * selfhost: a builder that serves its own CLI (/cli/webstudio.json) names the package the
+ * MCP server should run, so the agent always uses the builder's version.
+ */
+export const findBuilderServerCommand = async (): Promise<
+  string | undefined
+> => {
+  try {
+    const { origin } = await resolveApiConnection();
+    const response = await fetch(new URL("/cli/webstudio.json", origin), {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (response.ok === false) {
+      return;
+    }
+    const manifest: unknown = await response.json();
+    return isPlainRecord(manifest) && typeof manifest.package === "string"
+      ? `npx -y ${manifest.package} mcp`
+      : undefined;
+  } catch {
+    return;
+  }
 };
 
 export type ProjectAccessResult = { ok: true } | { ok: false; message: string };
@@ -227,9 +254,18 @@ export const connectOptions = (yargs: CommonYargsArgv) =>
     })
     .option("command", {
       type: "string",
-      default: defaultAgentServerCommand,
+      describe: `Command used by the client to start the Webstudio MCP server over stdio (default: the CLI the builder serves, else ${defaultAgentServerCommand})`,
+    })
+    .option("link", {
+      alias: "l",
+      type: "string",
       describe:
-        "Command used by the client to start the Webstudio MCP server over stdio",
+        "Builder API share link: links the folder first, like init --link",
+    })
+    .option("dir", {
+      type: "string",
+      describe:
+        "Folder to link and connect (created if missing) instead of the current one",
     })
     .option("print", {
       type: "boolean",
@@ -239,6 +275,10 @@ export const connectOptions = (yargs: CommonYargsArgv) =>
     .example(
       "webstudio connect claude",
       "Write .mcp.json so Claude Code can operate the linked project"
+    )
+    .example(
+      'webstudio connect claude --dir my-site --link "<share link>"',
+      "Link a new folder and connect Claude Code in one step"
     )
     .example(
       "webstudio connect codex",
@@ -266,7 +306,6 @@ export const connect = async (
   options: ConnectOptions,
   dependencies: ConnectDependencies = defaultDependencies
 ) => {
-  const serverCommand = options.command ?? defaultAgentServerCommand;
   const client = options.client;
 
   if (client === undefined) {
@@ -279,6 +318,28 @@ export const connect = async (
     return;
   }
 
+  if (options.dir !== undefined) {
+    await mkdir(options.dir, { recursive: true });
+    chdir(options.dir);
+  }
+  if (options.link !== undefined) {
+    const linkError = validateShareLink(options.link);
+    if (linkError !== undefined) {
+      log.error(`${linkError}. Copy it again from the builder.`);
+      throw new HandledCliError();
+    }
+    const { projectId } = await (dependencies.saveShareLink ?? saveShareLink)(
+      options.link
+    );
+    log.step(`Linked project ${projectId} in ${cwd()}`);
+  }
+
+  const serverCommand =
+    options.command ??
+    (await (
+      dependencies.findBuilderServerCommand ?? findBuilderServerCommand
+    )()) ??
+    defaultAgentServerCommand;
   const parsedServerCommand = addClientServerArgs(
     client,
     parseServerCommand(serverCommand)

@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { authorizationToken, eq } from "@webstudio-is/db";
+import { authorizationToken, eq, user } from "@webstudio-is/db";
 import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { PlanRequiredError } from "@webstudio-is/trpc-interface/index.server";
@@ -8,6 +8,7 @@ import {
   getTokenInfo,
   getTokenProjectPermits,
   create,
+  findOrCreateAgentToken,
   update,
   remove,
   __testing__,
@@ -340,5 +341,46 @@ describe("remove", () => {
     );
     expect(result.token).toBe("tok-abc");
     expect(await readToken("tok-abc")).toEqual([]);
+  });
+});
+
+describe("findOrCreateAgentToken", () => {
+  test("creates the user's API link once and reuses it", async () => {
+    await seedProject();
+    await db
+      .update(user)
+      .set({ loginName: "alex" })
+      .where(eq(user.id, "user-1"));
+
+    const first = await findOrCreateAgentToken(
+      { projectId: "proj-1" },
+      createContext()
+    );
+    const second = await findOrCreateAgentToken(
+      { projectId: "proj-1" },
+      createContext()
+    );
+
+    expect(second.token).toBe(first.token);
+    expect(await readToken(first.token)).toEqual([
+      expect.objectContaining({
+        name: "AI agent (alex)",
+        relation: "builders",
+        canUseApi: true,
+      }),
+    ]);
+  });
+
+  test("is only for the project owner", async () => {
+    await seedProject();
+    await seed.user(db, { id: "user-2" });
+    const context = {
+      ...createContext(),
+      authorization: { type: "user", userId: "user-2" },
+    } as unknown as AppContext;
+
+    await expect(
+      findOrCreateAgentToken({ projectId: "proj-1" }, context)
+    ).rejects.toThrow();
   });
 });

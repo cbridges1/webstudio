@@ -3,7 +3,8 @@ import { useDebouncedCallback } from "use-debounce";
 import { builderUrl } from "~/shared/router-utils";
 import { trpcClient } from "../trpc/trpc-client";
 import { ShareProject, type LinkOptions } from "./share-project";
-import { toast } from "@webstudio-is/design-system";
+import { ConnectAgent } from "./connect-agent";
+import { Separator, toast } from "@webstudio-is/design-system";
 
 const normalizeLinks = (links: LinkOptions[]) =>
   links.map((link) => ({
@@ -119,8 +120,15 @@ const useShareProjectContainer = (projectId: string) => {
     updateState !== "idle" ||
     isChangingLink;
 
+  const reload = () => {
+    load({ projectId }, (data) => {
+      setLinks(normalizeLinks(data ?? []));
+    });
+  };
+
   return {
     links,
+    reload,
     handleChange,
     handleDelete,
     handleCreate,
@@ -137,24 +145,28 @@ type ShareButtonProps = {
  * Then remix will not call `trpc.findMany.useQuery` if Popover is closed
  */
 export const ShareProjectContainer = ({ projectId }: ShareButtonProps) => {
-  const { links, handleChange, handleDelete, handleCreate, isPending } =
+  const { links, handleChange, handleDelete, handleCreate, isPending, reload } =
     useShareProjectContainer(projectId);
 
   return (
-    <ShareProject
-      links={links}
-      onChange={handleChange}
-      onDelete={handleDelete}
-      onCreate={handleCreate}
-      isPending={isPending}
-      builderUrl={({ authToken, mode }) =>
-        builderUrl({
-          projectId,
-          origin: window.location.origin,
-          authToken,
-          mode,
-        })
-      }
-    />
+    <>
+      <ShareProject
+        links={links}
+        onChange={handleChange}
+        onDelete={handleDelete}
+        onCreate={handleCreate}
+        isPending={isPending}
+        builderUrl={({ authToken, mode }) =>
+          builderUrl({
+            projectId,
+            origin: window.location.origin,
+            authToken,
+            mode,
+          })
+        }
+      />
+      <Separator />
+      <ConnectAgent projectId={projectId} onLinkCreated={reload} />
+    </>
   );
 };

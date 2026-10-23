@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "webstudio": {
+      "command": "node",
+      "args": ["scripts/knowbra-webstudio.mjs", "mcp"]
+    }
+  }
+}

@@ -398,3 +398,70 @@ test("project access verification classifies local, authorization, and reachabil
     message: expect.stringContaining("could not verify project access"),
   });
 });
+
+test("uses the CLI the builder serves for the MCP server", async () => {
+  const dependencies = {
+    ...createDependencies(linkedProject),
+    findBuilderServerCommand: vi.fn(
+      async () => "npx -y https://builder.example.com/cli/webstudio-abc.tgz mcp"
+    ),
+  };
+  vi.spyOn(log, "success").mockImplementation(() => {});
+
+  await connect({ client: "claude", print: false }, dependencies);
+
+  expect(dependencies.writeFileAtomic).toHaveBeenCalledWith(
+    join(cwd(), ".mcp.json"),
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          webstudio: {
+            command: "npx",
+            args: [
+              "-y",
+              "https://builder.example.com/cli/webstudio-abc.tgz",
+              "mcp",
+            ],
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+});
+
+test("links the folder first when given a share link", async () => {
+  const link = `https://p-${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}.builder.example.com/?authToken=token`;
+  const dependencies = {
+    ...createDependencies(linkedProject),
+    saveShareLink: vi.fn(async () => ({
+      origin: "https://builder.example.com",
+      projectId: "project-1",
+    })),
+    findBuilderServerCommand: vi.fn(async () => undefined),
+  };
+  vi.spyOn(log, "success").mockImplementation(() => {});
+  vi.spyOn(log, "step").mockImplementation(() => {});
+
+  await connect({ client: "claude", print: false, link }, dependencies);
+
+  expect(dependencies.saveShareLink).toHaveBeenCalledWith(link);
+  expect(dependencies.verifyProjectAccess).toHaveBeenCalled();
+});
+
+test("rejects an invalid share link before linking", async () => {
+  const dependencies = {
+    ...createDependencies(linkedProject),
+    saveShareLink: vi.fn(),
+  };
+  vi.spyOn(log, "error").mockImplementation(() => {});
+
+  await expect(
+    connect(
+      { client: "claude", print: false, link: "not a link" },
+      dependencies
+    )
+  ).rejects.toBeInstanceOf(HandledCliError);
+  expect(dependencies.saveShareLink).not.toHaveBeenCalled();
+});

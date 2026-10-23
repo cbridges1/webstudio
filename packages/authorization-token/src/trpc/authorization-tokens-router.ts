@@ -7,7 +7,7 @@ import {
 } from "@webstudio-is/trpc-interface/index.server";
 import { db } from "../db";
 import type { IsEqual } from "type-fest";
-import type { Database } from "@webstudio-is/db";
+import { eq, project as projectTable, type Database } from "@webstudio-is/db";
 
 type Relation =
   Database["public"]["Tables"]["AuthorizationToken"]["Row"]["relation"];
@@ -56,6 +56,25 @@ export const authorizationTokenRouter = router({
     .mutation(async ({ input, ctx }) => {
       try {
         return await db.create(input, ctx);
+      } catch (error) {
+        toTrpcError(error);
+      }
+    }),
+  agentToken: procedure
+    .input(z.object({ projectId: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      try {
+        const token = await db.findOrCreateAgentToken(input, ctx);
+        const [project] = await ctx.db
+          .select({ domain: projectTable.domain })
+          .from(projectTable)
+          .where(eq(projectTable.id, input.projectId));
+        return {
+          token: token.token,
+          name: token.name,
+          // A folder name for the agent's copy of the project.
+          folder: project?.domain ?? "webstudio-project",
+        };
       } catch (error) {
         toTrpcError(error);
       }

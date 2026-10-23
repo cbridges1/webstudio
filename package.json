@@ -10,6 +10,7 @@
     "dts": "pnpm -r dts",
     "dev": "node scripts/knowbra-webstudio.mjs dev",
     "cli": "node scripts/knowbra-webstudio.mjs cli",
+    "mcp": "node scripts/knowbra-webstudio.mjs mcp",
     "setup": "node scripts/knowbra-webstudio.mjs setup",
     "test:selfhost": "pnpm --filter=@webstudio-is/builder exec vitest run --project core-server app/services/better-auth.server app/shared/published-domain && pnpm --filter=@webstudio-is/db test && pnpm --filter=@webstudio-is/deploy test",
     "evaluations": "pnpm --filter webstudio evaluations",

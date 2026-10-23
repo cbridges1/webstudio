@@ -5,6 +5,7 @@ import {
   eq,
   maybeOne,
   one,
+  user,
   type Database,
 } from "@webstudio-is/db";
 import { createId } from "@webstudio-is/sdk";
@@ -201,6 +202,59 @@ export const create = async (
       canUseApi: props.canUseApi,
     })
     .returning();
+};
+
+/**
+ * selfhost: the signed-in user's link for AI agents on this project (Builder role, API on),
+ * created on first use and reused after; it shows in the Share dialog, where it can be
+ * revoked. Like any link, only the project owner can create it.
+ */
+export const findOrCreateAgentToken = async (
+  { projectId }: { projectId: string },
+  context: AppContext
+) => {
+  if (context.authorization.type !== "user") {
+    throw new AuthorizationError("Sign in to connect an AI agent");
+  }
+  const owner = maybeOne(
+    await context.db
+      .select({ username: user.username, loginName: user.loginName })
+      .from(user)
+      .where(eq(user.id, context.authorization.userId))
+  );
+  const name = `AI agent (${owner?.loginName ?? owner?.username ?? "you"})`;
+  const existing = maybeOne(
+    await context.db
+      .select()
+      .from(authorizationToken)
+      .where(
+        and(
+          eq(authorizationToken.projectId, projectId),
+          eq(authorizationToken.name, name),
+          eq(authorizationToken.relation, "builders"),
+          eq(authorizationToken.canUseApi, true)
+        )
+      )
+      .limit(1)
+  );
+  if (existing !== null) {
+    // Same check as creating one: only the owner may hand out this access.
+    const isOwner = await authorizeProject.hasProjectPermit(
+      { projectId, permit: "own" },
+      context
+    );
+    if (isOwner === false) {
+      throw new AuthorizationError(
+        "Only the project owner can connect AI agents"
+      );
+    }
+    return existing;
+  }
+  const [created] = await create(
+    { projectId, relation: "builders", name, canUseApi: true },
+    context
+  );
+  return created;
 };
 
 export const update = async (

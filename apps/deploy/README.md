@@ -17,7 +17,8 @@ builder).
 ## API
 
 Defined in `@webstudio-is/deploy-protocol` (`packages/deploy-protocol`), which the builder uses
-to call it. Every request carries `Authorization: Bearer <DEPLOY_API_KEY>`; the service can sit
+to call it. The full contract, for writing another deployer, is in knowbra-webstudio's
+`docs/deployers.md`. Every request carries `Authorization: Bearer <DEPLOY_API_KEY>`; the service can sit
 behind a path prefix.
 
 | Request              | Does                                                                                       |
