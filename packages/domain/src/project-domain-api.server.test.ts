@@ -116,13 +116,9 @@ const createPublishContext = (
     db,
     authorization: { type: "user", userId: "user-1" },
     deployment: {
-      deploymentTrpc: {
-        publish: {
-          mutate: publish,
-        },
-        unpublish: {
-          mutate: vi.fn().mockResolvedValue({ success: true }),
-        },
+      deployments: {
+        publish,
+        unpublish: vi.fn().mockResolvedValue({ success: true }),
       },
       env: {
         BUILDER_ORIGIN: "https://apps.webstudio.is",
@@ -157,16 +153,13 @@ test("publishes saas project through shared domain service", async () => {
     excludeWstdDomainFromSearch: true,
   });
   expect(publish).toHaveBeenCalledWith({
-    builderOrigin: "https://apps.webstudio.is",
-    githubSha: "sha-1",
+    projectId: "project-1",
     buildId: production.id,
-    branchName: "main",
-    destination: "saas",
-    logProjectName: "Project One - project-1",
+    label: "Project One - project-1",
   });
 });
 
-test("reports local-dev publish when deployment publisher is unavailable", async () => {
+test("reports a deployer's refusal", async () => {
   await seedProject();
 
   await expect(
@@ -177,16 +170,16 @@ test("reports local-dev publish when deployment publisher is unavailable", async
         target: "staging",
       },
       createPublishContext(
-        vi.fn().mockResolvedValue({ success: false, error: "NOT_IMPLEMENTED" })
+        vi.fn().mockResolvedValue({
+          success: false,
+          error: "This project has no deploy target",
+        })
       )
     )
-  ).resolves.toMatchObject({
-    build: { id: expect.any(String) },
-    deploymentNotImplemented: true,
-  });
+  ).rejects.toThrow("This project has no deploy target");
 });
 
-test("publishes static project through shared domain service", async () => {
+test("refuses static downloads without creating a build", async () => {
   await seedProject();
   const publish = vi.fn().mockResolvedValue({ success: true });
 
@@ -198,23 +191,9 @@ test("publishes static project through shared domain service", async () => {
     },
     createPublishContext(publish)
   );
-  expect(result).toMatchObject({ success: true, name: "project.zip" });
-
-  const [production] = await productionBuilds();
-  expect(JSON.parse(production.deployment ?? "")).toEqual({
-    destination: "static",
-    name: "project.zip",
-    assetsDomain: "project.wstd.io",
-    templates: [],
-  });
-  expect(publish).toHaveBeenCalledWith({
-    builderOrigin: "https://apps.webstudio.is",
-    githubSha: "sha-1",
-    buildId: production.id,
-    branchName: "main",
-    destination: "static",
-    logProjectName: "Project One - project-1",
-  });
+  expect(result).toMatchObject({ success: false });
+  expect(await productionBuilds()).toEqual([]);
+  expect(publish).not.toHaveBeenCalled();
 });
 
 test("rejects publishing when dev build has orphan resource references", async () => {
@@ -258,12 +237,10 @@ test("clears publish records even when deployment unpublish fails", async () => 
     db,
     authorization: { type: "user", userId: "user-1" },
     deployment: {
-      deploymentTrpc: {
-        unpublish: {
-          mutate: vi
-            .fn()
-            .mockResolvedValue({ success: false, error: "Cloudflare failed" }),
-        },
+      deployments: {
+        unpublish: vi
+          .fn()
+          .mockResolvedValue({ success: false, error: "Cloudflare failed" }),
       },
       env: { PUBLISHER_HOST: "wstd.io" },
     },

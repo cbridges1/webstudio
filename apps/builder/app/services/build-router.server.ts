@@ -239,7 +239,11 @@ const assertBrowserPatchContext = ({
 const assertRelayPatchContext = (
   authorization: AppContext["authorization"]
 ) => {
-  if (authorization.type !== "service") {
+  // selfhost: a deployer's publish token (scoped to a project) isn't the relay.
+  if (
+    authorization.type !== "service" ||
+    authorization.projectId !== undefined
+  ) {
     throw new AuthorizationError("Collab relay is not authorized");
   }
 };

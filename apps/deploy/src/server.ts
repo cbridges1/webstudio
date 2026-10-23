@@ -4,14 +4,17 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { createHTTPHandler } from "@trpc/server/adapters/standalone";
+import type { z } from "zod";
+import {
+  deployPaths,
+  publishRequest,
+  targetRequest,
+} from "@webstudio-is/deploy-protocol";
 import type { Publisher } from "./publisher";
-import { createRouter } from "./router";
 
-const sameSecret = (given: string | undefined, expected: string) => {
-  if (given === undefined) {
-    return false;
-  }
+const MAX_BODY_BYTES = 1024 * 1024;
+
+const sameSecret = (given: string, expected: string) => {
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
@@ -22,41 +25,88 @@ const sendJson = (res: ServerResponse, status: number, body: unknown) => {
   res.end(JSON.stringify(body));
 };
 
-/**
- * Serves the tRPC API under any path prefix (e.g. TRPC_SERVER_URL=http://deployer:3001/trpc)
- * plus an unauthenticated GET /healthz.
- */
+class BadRequest extends Error {}
+
+const readJson = async <T>(req: IncomingMessage, schema: z.ZodType<T>) => {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_BODY_BYTES) {
+      throw new BadRequest("Request body is too large");
+    }
+    chunks.push(chunk as Buffer);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new BadRequest("Request body isn't JSON");
+  }
+  const parsed = schema.safeParse(json);
+  if (parsed.success === false) {
+    throw new BadRequest(`Invalid request: ${parsed.error.message}`);
+  }
+  return parsed.data;
+};
+
+/** The deploy API (@webstudio-is/deploy-protocol) plus an unauthenticated GET /healthz. */
 export const createDeployerServer = ({
   publisher,
-  token,
+  apiKey,
 }: {
   publisher: Publisher;
-  token: string;
+  apiKey: string;
 }) => {
-  const trpc = createHTTPHandler({
-    router: createRouter(publisher),
-    onError: ({ path, error }) => {
-      console.error(`tRPC ${path ?? "?"}: ${error.message}`);
-    },
-  });
+  const routes: Record<string, (req: IncomingMessage) => Promise<unknown>> = {
+    [`GET ${deployPaths.hosts}`]: async () => ({
+      hosts: await publisher.hosts(),
+    }),
+    [`POST ${deployPaths.validate}`]: async (req) =>
+      publisher.validate((await readJson(req, targetRequest)).target),
+    [`POST ${deployPaths.publish}`]: async (req) =>
+      publisher.publish(await readJson(req, publishRequest)),
+    [`POST ${deployPaths.unpublish}`]: async (req) =>
+      publisher.unpublish((await readJson(req, targetRequest)).target),
+  };
 
-  return createServer((req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
+  return createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    // Served under any prefix, e.g. http://proxy/deploy/v1/publish.
+    const { pathname } = new URL(req.url ?? "/", "http://localhost");
 
-    if (req.method === "GET" && url.pathname === "/healthz") {
+    if (req.method === "GET" && pathname.endsWith(deployPaths.health)) {
       sendJson(res, 200, { ok: true, ...publisher.status() });
       return;
     }
 
-    // The builder sends the shared token as the raw Authorization header value.
-    if (sameSecret(req.headers.authorization, token) === false) {
+    const [scheme, key] = (req.headers.authorization ?? "").split(" ");
+    if (
+      scheme !== "Bearer" ||
+      key === undefined ||
+      sameSecret(key, apiKey) === false
+    ) {
       sendJson(res, 401, { error: "Unauthorized" });
       return;
     }
 
-    // Procedure paths are the last segment: /trpc/deployment.publish -> /deployment.publish
-    const segments = url.pathname.split("/").filter(Boolean);
-    req.url = `/${segments.at(-1) ?? ""}${url.search}`;
-    trpc(req, res);
+    const route = Object.entries(routes).find(([name]) => {
+      const [method, path] = name.split(" ");
+      return req.method === method && pathname.endsWith(path);
+    });
+    if (route === undefined) {
+      sendJson(res, 404, { error: "Not found" });
+      return;
+    }
+
+    try {
+      sendJson(res, 200, await route[1](req));
+    } catch (error) {
+      if (error instanceof BadRequest) {
+        sendJson(res, 400, { error: error.message });
+        return;
+      }
+      console.error(`${route[0]}: ${String(error)}`);
+      sendJson(res, 500, { error: "Internal error" });
+    }
   });
 };

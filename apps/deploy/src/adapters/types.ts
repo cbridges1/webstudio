@@ -3,12 +3,14 @@ import type { z } from "zod";
 export type Log = (line: string) => void;
 
 /**
- * One kind of host. Each project picks a host and its own config and credentials
- * (deploy-targets.json), so every project can deploy to a different account.
+ * One kind of host. Each project's target (set in the builder) picks a host, its config and
+ * the credentials file to use, so every project can deploy to a different account.
  */
 export type HostAdapter<Config = unknown, Credentials = unknown> = {
   id: string;
-  /** Validates the project's `config` from deploy-targets.json. */
+  /** Shown in the builder. */
+  label: string;
+  /** Validates the target's `config`. It comes from the builder, so never trust paths in it. */
   configSchema: z.ZodType<Config>;
   /** Validates the credential file. `undefined` when the host needs none. */
   credentialsSchema?: z.ZodType<Credentials>;

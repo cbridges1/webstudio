@@ -74,6 +74,8 @@ export type Database = {
       TransactionLog: TableTypes<typeof tables.transactionLog>;
       User: TableTypes<typeof tables.user>;
       Workspace: TableTypes<typeof tables.workspace>;
+      Deployer: TableTypes<typeof tables.deployer>;
+      ProjectDeployTarget: TableTypes<typeof tables.projectDeployTarget>;
       WorkspaceMember: TableTypes<typeof tables.workspaceMember>;
       domainsVirtual: { Row: DomainsVirtual };
       latestBuildVirtual: { Row: LatestBuildVirtual };

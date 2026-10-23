@@ -11,6 +11,7 @@ import { notificationRouter } from "./notification-router.server";
 import { workspaceRouter } from "./workspace-router.server";
 import { buildRouter } from "./build-router.server";
 import { apiRouter } from "./api-router.server";
+import { deployersRouter } from "./deployers-router.server";
 
 export const appRouter = router({
   api: apiRouter,
@@ -20,6 +21,7 @@ export const appRouter = router({
   domain: domainRouter,
   project: projectRouter,
   workspace: workspaceRouter,
+  deployers: deployersRouter,
   notification: notificationRouter,
   authorizationToken: authorizationTokenRouter,
   dashboardProject: dashboardProjectRouter,

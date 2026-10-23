@@ -29,6 +29,7 @@ import { SectionAuth } from "./section-auth";
 import { SectionHeaders } from "./section-headers";
 import { SectionRedirects } from "./section-redirects";
 import { SectionPublish } from "./section-publish";
+import { SectionDeploy } from "./section-deploy";
 import { SectionMarketplace } from "./section-marketplace";
 import { SectionBackups } from "./section-backups";
 import { titleCase } from "title-case";
@@ -41,6 +42,7 @@ const sections = new Map<
   ["agents", SectionAgents],
   ["redirects", SectionRedirects],
   ["publish", SectionPublish],
+  ["deploy", SectionDeploy],
   ["marketplace", SectionMarketplace],
   ["backups", SectionBackups],
   ["auth", SectionAuth],

@@ -18,12 +18,19 @@ const POPULATE_BATCH = 1000;
 const UPLOAD_CONCURRENCY = 8;
 
 const configSchema = z.object({
-  /** Hosting site ID, e.g. "my-site" for my-site.web.app. */
-  site: z.string().min(1),
-  /** Public URL when it isn't https://<site>.web.app (e.g. a custom domain). */
-  url: z.string().url().optional(),
-  /** Passed through as the version's hosting config (headers, redirects, cleanUrls, ...). */
-  hostingConfig: z.record(z.string(), z.unknown()).optional(),
+  site: z
+    .string()
+    .min(1)
+    .describe('Hosting site ID, e.g. "my-site" for my-site.web.app'),
+  url: z
+    .string()
+    .url()
+    .optional()
+    .describe("Public URL when it isn't https://<site>.web.app"),
+  hostingConfig: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe("Firebase hosting config: headers, redirects, cleanUrls, ..."),
 });
 
 type Config = z.infer<typeof configSchema>;
@@ -64,6 +71,7 @@ export const createFirebaseAdapter = (
 
   return {
     id: "firebase",
+    label: "Firebase Hosting",
     configSchema,
     credentialsSchema: serviceAccountSchema,
 

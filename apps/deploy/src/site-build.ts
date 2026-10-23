@@ -25,6 +25,35 @@ const killTree = (pid: number) => {
   process.kill(-pid, "SIGKILL");
 };
 
+// Builds run the project's own code (HTML embeds), so they get only what pnpm, npm and the
+// CLI need: no secrets of this service.
+const passedEnv = [
+  "PATH",
+  "Path",
+  "PATHEXT",
+  "HOME",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "SystemRoot",
+  "ComSpec",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "LANG",
+  "PNPM_HOME",
+];
+
+export const createBuildEnv = (source: NodeJS.ProcessEnv = process.env) => {
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of passedEnv) {
+    if (source[name] !== undefined) {
+      env[name] = source[name];
+    }
+  }
+  return { ...env, CI: "1", FORCE_COLOR: "0", NO_COLOR: "1" };
+};
+
 // Workspace fixture whose dependencies are the workspace's SSG runtime packages.
 const SSG_FIXTURE = "ssg-cloudflare-pages";
 
@@ -48,7 +77,7 @@ export const runCommand: RunCommand = (
     log(`$ ${hide([command, ...args].join(" "))}`);
     const child = spawn(command, isWindows ? args.map(quoteForCmd) : args, {
       cwd,
-      env: { ...process.env, CI: "1", FORCE_COLOR: "0", NO_COLOR: "1" },
+      env: createBuildEnv(),
       stdio: ["ignore", "pipe", "pipe"],
       detached: isWindows === false,
       shell: isWindows,
@@ -99,7 +128,7 @@ export const buildStaticSite = async ({
   workDir,
   buildId,
   builderOrigin,
-  serviceToken,
+  builderToken,
   log,
   signal,
   run = runCommand,
@@ -108,7 +137,8 @@ export const buildStaticSite = async ({
   workDir: string;
   buildId: string;
   builderOrigin: string;
-  serviceToken: string;
+  /** Read access to the project, from the publish request. */
+  builderToken: string;
   log: Log;
   signal: AbortSignal;
   run?: RunCommand;
@@ -134,9 +164,9 @@ export const buildStaticSite = async ({
       "--origin",
       builderOrigin,
       "--authToken",
-      serviceToken,
+      builderToken,
     ],
-    { cwd: workDir, log, signal, redact: [serviceToken] }
+    { cwd: workDir, log, signal, redact: [builderToken] }
   );
   await run(cli, ["build", "--template", "ssg", "--template", "internal"], {
     cwd: workDir,

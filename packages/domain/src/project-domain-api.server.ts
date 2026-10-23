@@ -235,75 +235,38 @@ export const publishProject = async (
     },
     context
   );
-  const { deploymentTrpc, env } = context.deployment;
-
-  if (env.BUILDER_ORIGIN === undefined) {
-    throw new Error("Missing env.BUILDER_ORIGIN");
-  }
-
-  const result = await deploymentTrpc.publish.mutate({
-    builderOrigin: env.BUILDER_ORIGIN,
-    githubSha: env.GITHUB_SHA,
+  // selfhost: the project's deployer (its deploy target) builds and deploys it, then
+  // reports the result to the builder.
+  const result = await context.deployment.deployments.publish({
+    projectId: project.id,
     buildId: build.id,
-    branchName: env.GITHUB_REF_NAME,
-    destination: publishedDeploymentDestination,
-    logProjectName: `${project.title} - ${project.id}`,
+    label: `${project.title} - ${project.id}`,
   });
-
-  const deploymentNotImplemented =
-    result.success === false && result.error === "NOT_IMPLEMENTED";
-  if (result.success === false && deploymentNotImplemented === false) {
-    throw new Error(String(result.error ?? "Publish failed"));
+  if (result.success === false) {
+    throw new Error(result.error);
   }
 
-  return { build, project, deploymentNotImplemented };
+  return { build, project, deploymentNotImplemented: false };
 };
 
+/**
+ * selfhost: no service packages a static download (upstream's closed SaaS did), so the
+ * Export dialog's download fails here. Export with the Webstudio CLI instead.
+ */
 export const publishStaticProject = async (
-  {
-    projectId,
-    templates,
-    name = `${projectId}-${createId("nano")}.zip`,
-  }: {
+  _input: {
     projectId: string;
     templates: z.infer<typeof templateSchema>[];
     name?: string;
   },
-  context: AppContext
-) => {
-  const project = await projectApi.loadById(projectId, context);
-  const build = await createProductionBuild(
-    {
-      projectId,
-      deployment: {
-        destination: "static",
-        name,
-        assetsDomain: project.domain,
-        templates,
-      },
-    },
-    context
-  );
-
-  const { deploymentTrpc, env } = context.deployment;
-
-  if (env.BUILDER_ORIGIN === undefined) {
-    throw new Error("Missing env.BUILDER_ORIGIN");
-  }
-
-  const result = await deploymentTrpc.publish.mutate({
-    builderOrigin: env.BUILDER_ORIGIN,
-    githubSha: env.GITHUB_SHA,
-    buildId: build.id,
-    branchName: env.GITHUB_REF_NAME,
-    destination: "static",
-    logProjectName: `${project.title} - ${project.id}`,
-  });
-
-  return result.success
-    ? { success: true as const, name, build, project }
-    : result;
-};
+  _context: AppContext
+): Promise<
+  { success: true; name: string } | { success: false; error: string }
+> => ({
+  success: false,
+  error:
+    "Static downloads aren't available on this server. Export with the Webstudio CLI instead.",
+});
 
 export const unpublishProjectDomains = async (
   {
@@ -315,11 +278,16 @@ export const unpublishProjectDomains = async (
   },
   context: AppContext
 ) => {
-  const { deploymentTrpc, env } = context.deployment;
+  const { deployments, env } = context.deployment;
 
   for (const domain of domains) {
     const dbDomain = domain.replace(`.${env.PUBLISHER_HOST}`, "");
-    const result = await deploymentTrpc.unpublish.mutate({ domain });
+    // selfhost: the project's own domain stands for its site at its deploy target.
+    // Custom domains point at that site from the user's DNS, so there's nothing to remove.
+    const result =
+      dbDomain === domain
+        ? ({ success: true } as const)
+        : await deployments.unpublish({ projectId });
     await unpublishBuild({ projectId, domain: dbDomain }, context).catch(
       (error) => {
         if (
@@ -331,7 +299,7 @@ export const unpublishProjectDomains = async (
         throw error;
       }
     );
-    if (result.success === false && result.error !== "NOT_IMPLEMENTED") {
+    if (result.success === false) {
       throw new Error(`Failed to unpublish ${domain}: ${result.error}`);
     }
   }

@@ -132,6 +132,8 @@ type AuthInfo =
     }
   | {
       type: "service";
+      /** selfhost: a deployer's publish token, scoped to one project. */
+      projectId?: string;
     };
 
 export const checkProjectPermit = async ({
@@ -149,7 +151,10 @@ export const checkProjectPermit = async ({
   const namespace = "Project";
 
   if (authInfo.type === "service") {
-    return permit === "view";
+    return (
+      permit === "view" &&
+      (authInfo.projectId === undefined || authInfo.projectId === projectId)
+    );
   }
 
   if (authInfo.type === "token") {

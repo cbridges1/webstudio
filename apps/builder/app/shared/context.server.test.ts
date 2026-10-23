@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const env = vi.hoisted(() => ({
   TRPC_SERVER_API_TOKEN: undefined as string | undefined,
+  AUTH_SECRET: "test-auth-secret",
   DATABASE_URL: "postgresql://localhost:5432/webstudio",
   PUBLISHER_HOST: "wstd.work",
 }));
@@ -66,6 +67,7 @@ vi.mock("./router-utils", () => ({
 }));
 
 import { extractAuthFromRequest } from "./context.server";
+import { createPublishToken } from "~/services/publish-token.server";
 
 describe("extractAuthFromRequest", () => {
   beforeEach(() => {
@@ -98,6 +100,31 @@ describe("extractAuthFromRequest", () => {
 
     expect(auth.isServiceCall).toBe(true);
     expect(authenticator.isAuthenticated).not.toHaveBeenCalled();
+  });
+
+  test("accepts a deployer's publish token, scoped to its project", async () => {
+    const token = createPublishToken({ projectId: "p1", buildId: "b1" });
+    const auth = await extractAuthFromRequest(
+      new Request("https://webstudio.is/trpc", {
+        headers: { Authorization: token },
+      })
+    );
+
+    expect(auth.isServiceCall).toBe(true);
+    expect(auth.serviceProjectId).toBe("p1");
+    expect(authenticator.isAuthenticated).not.toHaveBeenCalled();
+  });
+
+  test("ignores a forged publish token", async () => {
+    const token = createPublishToken({ projectId: "p1", buildId: "b1" });
+    const auth = await extractAuthFromRequest(
+      new Request("https://webstudio.is/trpc", {
+        headers: { Authorization: `${token.slice(0, -2)}xx` },
+      })
+    );
+
+    expect(auth.isServiceCall).toBe(false);
+    expect(auth.serviceProjectId).toBeUndefined();
   });
 
   test("prefers an explicit token without reading the cookie session", async () => {

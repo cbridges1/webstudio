@@ -11,13 +11,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@trpc/server": "^10.45.2",
-    "@webstudio-is/db": "workspace:*",
+    "@webstudio-is/deploy-protocol": "workspace:*",
     "tsx": "^4.19.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@trpc/client": "^10.45.2",
     "@types/node": "^22.13.10",
     "typescript": "7.0.2",
     "vitest": "^3.1.2"

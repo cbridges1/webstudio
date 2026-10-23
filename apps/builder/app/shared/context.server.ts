@@ -21,6 +21,11 @@ import { builderAuthenticator } from "~/services/builder-auth.server";
 import { readLoginSessionBloomFilter } from "~/services/session.server";
 import type { BloomFilter } from "~/services/bloom-filter.server";
 import { isBuilder, isCanvas } from "./router-utils";
+import { createDeploymentClient } from "~/services/deployers.server";
+import {
+  isPublishToken,
+  verifyPublishToken,
+} from "~/services/publish-token.server";
 import { parseBuilderUrl } from "@webstudio-is/protocol";
 import {
   apiClient,
@@ -40,9 +45,13 @@ export const extractAuthFromRequest = async (request: Request) => {
     request.headers.get("x-auth-token") ??
     undefined;
 
-  const isServiceCall = isServiceAuthorization(
-    request.headers.get("Authorization")
-  );
+  const authorizationHeader = request.headers.get("Authorization");
+  // selfhost: a deployer syncing a build sends the publish token it was given.
+  const publishToken = isPublishToken(authorizationHeader)
+    ? verifyPublishToken(authorizationHeader)
+    : undefined;
+  const isServiceCall =
+    publishToken !== undefined || isServiceAuthorization(authorizationHeader);
 
   // Explicit credentials always win. In particular, an invalid supplied token
   // must fail during context creation instead of falling back to a potentially
@@ -57,9 +66,21 @@ export const extractAuthFromRequest = async (request: Request) => {
   return {
     authToken,
     isServiceCall,
+    serviceProjectId: publishToken?.projectId,
     sessionData,
   };
 };
+
+/**
+ * selfhost: the builder's own service token or a deployer's publish token. Either way the
+ * request carries no cookies, so it skips CSRF checks.
+ */
+export const isServiceRequestAuthorization = (
+  authorizationHeader: string | null
+) =>
+  isServiceAuthorization(authorizationHeader) ||
+  (isPublishToken(authorizationHeader) &&
+    verifyPublishToken(authorizationHeader) !== undefined);
 
 export const isServiceAuthorization = (authorizationHeader: string | null) => {
   return (
@@ -97,13 +118,14 @@ const createAuthorizationContext = async (
   request: Request,
   db: Db
 ): Promise<AppContext["authorization"]> => {
-  const { authToken, isServiceCall, sessionData } =
+  const { authToken, isServiceCall, serviceProjectId, sessionData } =
     await extractAuthFromRequest(request);
 
   if (isServiceCall) {
     return {
       type: "service",
       isServiceCall: true,
+      projectId: serviceProjectId,
     };
   }
 
@@ -156,11 +178,15 @@ const getRequestOrigin = (urlStr: string) => {
   return url.origin;
 };
 
-const createDeploymentContext = (builderOrigin: string) => {
+const createDeploymentContext = (requestUrl: string, db: Db) => {
   const context: AppContext["deployment"] = {
-    deploymentTrpc: trpcSharedClient.deployment,
+    // selfhost: deployers reach the builder at its main origin, not a project subdomain.
+    deployments: createDeploymentClient({
+      db,
+      builderOrigin: parseBuilderUrl(requestUrl).sourceOrigin,
+    }),
     env: {
-      BUILDER_ORIGIN: getRequestOrigin(builderOrigin),
+      BUILDER_ORIGIN: getRequestOrigin(requestUrl),
       GITHUB_REF_NAME: staticEnv.GITHUB_REF_NAME ?? "undefined",
       GITHUB_SHA: staticEnv.GITHUB_SHA ?? undefined,
       PUBLISHER_HOST: env.PUBLISHER_HOST,
@@ -238,7 +264,7 @@ export const createContext = async (request: Request): Promise<AppContext> => {
   };
 
   const domain = createDomainContext();
-  const deployment = createDeploymentContext(getRequestOrigin(request.url));
+  const deployment = createDeploymentContext(request.url, db);
   const entri = createEntriContext();
   const { planFeatures, purchases } = await resolvePlanInfo(authorization);
   const trpcCache = createTrpcCache();

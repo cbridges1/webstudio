@@ -7,6 +7,7 @@ export type SectionName =
   | "headers"
   | "redirects"
   | "publish"
+  | "deploy"
   | "marketplace"
   | "backups";
 

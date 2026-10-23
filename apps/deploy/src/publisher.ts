@@ -1,74 +1,112 @@
 import { createWriteStream } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  deployReportPath,
+  type DeployReport,
+  type DeployResult,
+  type DeployTarget,
+  type PublishRequest,
+} from "@webstudio-is/deploy-protocol";
 import type { AnyHostAdapter, Log } from "./adapters/types";
-import type { Database } from "./database";
 import { buildStaticSite } from "./site-build";
-import { resolveTarget, TargetError } from "./targets";
+import { describeHosts, resolveTarget, TargetError } from "./targets";
 
 export type PublisherOptions = {
-  db: Database;
   adapters: Map<string, AnyHostAdapter>;
   webstudioDir: string;
-  serviceToken: string;
-  /**
-   * The builder's private address for `webstudio sync`. When unset, the public origin
-   * the builder sends with each publish is used.
-   */
-  builderUrl?: string;
-  publisherHost: string;
-  configPath: string;
   credentialsDir: string;
   jobsDir: string;
   logsDir: string;
   jobTimeoutMs: number;
   keepFailedWorkdirs: boolean;
   buildSite?: typeof buildStaticSite;
+  /** Sends reports to the builder. */
+  fetch?: typeof globalThis.fetch;
+  /** Waits between report attempts (tests skip it). */
+  reportRetryDelayMs?: number;
   consoleLog?: (line: string) => void;
 };
 
-type Job = { buildId: string; projectId: string; builderOrigin: string };
+const REPORT_ATTEMPTS = 5;
 
-type Result = { success: true } | { success: false; error: string };
+const errorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
 
 export const createPublisher = (options: PublisherOptions) => {
   const {
-    db,
     adapters,
     buildSite = buildStaticSite,
+    fetch: request = globalThis.fetch,
+    reportRetryDelayMs = 2000,
     consoleLog = (line) => console.info(line),
   } = options;
   const queued = new Set<string>();
   let chain = Promise.resolve();
   let running: string | undefined;
 
-  const target = (projectId: string) =>
+  const resolve = (target: DeployTarget) =>
     resolveTarget({
-      projectId,
-      configPath: options.configPath,
+      target,
       credentialsDir: options.credentialsDir,
       adapters,
     });
 
-  const fail = async (buildId: string, error: string): Promise<Result> => {
-    // The builder created this build as PENDING before calling us; don't leave it hanging.
-    await db.setPublishStatus(buildId, "FAILED").catch((dbError) => {
-      consoleLog(
-        `[${buildId}] could not mark build FAILED: ${String(dbError)}`
-      );
-    });
-    consoleLog(`[${buildId}] rejected: ${error}`);
-    return { success: false, error };
+  /** Validation problems go back to the caller; anything else is a bug. */
+  const check = async (target: DeployTarget): Promise<DeployResult> => {
+    try {
+      await resolve(target);
+      return { success: true };
+    } catch (error) {
+      if (error instanceof TargetError) {
+        return { success: false, error: error.message };
+      }
+      throw error;
+    }
   };
 
-  const runJob = async (job: Job) => {
+  const report = async (job: PublishRequest, body: DeployReport, log: Log) => {
+    const url = new URL(deployReportPath(job.buildId), job.builder.origin);
+    for (let attempt = 1; attempt <= REPORT_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await request(url, {
+          method: "POST",
+          headers: {
+            Authorization: job.builder.token,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (response.ok) {
+          return;
+        }
+        log(
+          `Report ${body.status} rejected by the builder (${response.status})`
+        );
+        if (response.status < 500) {
+          return;
+        }
+      } catch (error) {
+        log(`Report ${body.status} failed: ${errorMessage(error)}`);
+      }
+      if (attempt < REPORT_ATTEMPTS) {
+        await new Promise((done) =>
+          setTimeout(done, reportRetryDelayMs * attempt)
+        );
+      }
+    }
+    log(
+      `Gave up reporting ${body.status}; the builder will time the publish out`
+    );
+  };
+
+  const runJob = async (job: PublishRequest) => {
     running = job.buildId;
     await mkdir(options.logsDir, { recursive: true });
     const logFile = createWriteStream(
       join(options.logsDir, `${job.buildId}.log`),
-      {
-        flags: "a",
-      }
+      { flags: "a" }
     );
     const log: Log = (line) => {
       logFile.write(`${new Date().toISOString()} ${line}\n`);
@@ -82,42 +120,40 @@ export const createPublisher = (options: PublisherOptions) => {
     );
     let failed = false;
     try {
-      log(`Publishing project ${job.projectId} (build ${job.buildId})`);
-      // Read again: the config may have changed while the job waited.
-      const { adapter, config, credentials } = await target(job.projectId);
+      log(`Publishing ${job.label ?? "build"} (build ${job.buildId})`);
+      // Again: the credentials may have changed while the job waited.
+      const { adapter, config, credentials } = await resolve(job.target);
       await rm(workDir, { recursive: true, force: true });
       await mkdir(options.jobsDir, { recursive: true });
       const buildDir = await buildSite({
         webstudioDir: options.webstudioDir,
         workDir,
         buildId: job.buildId,
-        builderOrigin: job.builderOrigin,
-        serviceToken: options.serviceToken,
+        builderOrigin: job.builder.origin,
+        builderToken: job.builder.token,
         log,
         signal: controller.signal,
       });
-      log(`Deploying with ${adapter.id}`);
+      log(`Deploying to ${adapter.label}`);
       const { url } = await adapter.deploy({
         buildDir,
         config,
         credentials,
         log,
       });
-      await db.setPublishedUrl(job.projectId, url);
-      await db.setPublishStatus(job.buildId, "PUBLISHED");
       log(`Published ${url}`);
+      await report(job, { status: "PUBLISHED", url }, log);
     } catch (error) {
       failed = true;
-      log(`FAILED: ${error instanceof Error ? error.message : String(error)}`);
-      await db.setPublishStatus(job.buildId, "FAILED").catch((dbError) => {
-        log(`Could not mark build FAILED: ${String(dbError)}`);
-      });
+      const message = errorMessage(error);
+      log(`FAILED: ${message}`);
+      await report(job, { status: "FAILED", error: message }, log);
     } finally {
       clearTimeout(timeout);
       if (failed === false || options.keepFailedWorkdirs === false) {
         await rm(workDir, { recursive: true, force: true }).catch(() => {});
       }
-      await new Promise<void>((resolve) => logFile.end(resolve));
+      await new Promise<void>((done) => logFile.end(done));
       queued.delete(job.buildId);
       running = undefined;
     }
@@ -126,42 +162,22 @@ export const createPublisher = (options: PublisherOptions) => {
   return {
     status: () => ({ running, queued: queued.size }),
 
-    /** Validates synchronously so configuration problems show in the Publish dialog. */
-    async publish(input: {
-      buildId: string;
-      builderOrigin: string;
-      destination: "saas" | "static";
-    }): Promise<Result> {
-      if (input.destination === "static") {
-        return fail(
-          input.buildId,
-          "Static download isn't supported here. Use Publish instead."
-        );
+    hosts: () =>
+      describeHosts({ credentialsDir: options.credentialsDir, adapters }),
+
+    validate: check,
+
+    /** Checks the target right away, so problems show in the Publish dialog, then queues. */
+    async publish(job: PublishRequest): Promise<DeployResult> {
+      const result = await check(job.target);
+      if (result.success === false) {
+        consoleLog(`[${job.buildId}] rejected: ${result.error}`);
+        return result;
       }
-      const build = await db.getBuild(input.buildId);
-      if (build === undefined) {
-        return { success: false, error: `Build ${input.buildId} not found` };
-      }
-      // Upstream marks a publish to only the project's own domain as "staging" and one that
-      // includes a custom domain as "production". Each project has exactly one host here, so
-      // both go to the same place.
-      try {
-        await target(build.projectId);
-      } catch (error) {
-        if (error instanceof TargetError) {
-          return fail(input.buildId, error.message);
-        }
-        throw error;
-      }
-      if (queued.has(input.buildId)) {
+      if (queued.has(job.buildId)) {
         return { success: true };
       }
-      queued.add(input.buildId);
-      const job = {
-        buildId: input.buildId,
-        projectId: build.projectId,
-        builderOrigin: options.builderUrl ?? input.builderOrigin,
-      };
+      queued.add(job.buildId);
       chain = chain
         .then(() => runJob(job))
         .catch((error) => {
@@ -172,30 +188,15 @@ export const createPublisher = (options: PublisherOptions) => {
       return { success: true };
     },
 
-    async unpublish({ domain }: { domain: string }): Promise<Result> {
-      const suffix = `.${options.publisherHost}`;
-      if (domain.endsWith(suffix) === false) {
-        // Custom domains are managed by users at their host.
-        return { success: true };
-      }
-      const projectDomain = domain.slice(0, -suffix.length);
-      const projectId = await db.findProjectIdByDomain(projectDomain);
-      if (projectId === undefined) {
-        return {
-          success: false,
-          error: `No project with domain ${projectDomain}`,
-        };
-      }
+    async unpublish(target: DeployTarget): Promise<DeployResult> {
+      const log: Log = (line) => consoleLog(`[unpublish] ${line}`);
       try {
-        const { adapter, config, credentials } = await target(projectId);
-        const log: Log = (line) =>
-          consoleLog(`[unpublish ${projectId}] ${line}`);
+        const { adapter, config, credentials } = await resolve(target);
         await adapter.remove({ config, credentials, log });
-        await db.clearPublishedUrl(projectId);
         return { success: true };
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        consoleLog(`[unpublish ${projectId}] FAILED: ${message}`);
+        const message = errorMessage(error);
+        log(`FAILED: ${message}`);
         return { success: false, error: message };
       }
     },

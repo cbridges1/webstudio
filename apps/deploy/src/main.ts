@@ -1,20 +1,14 @@
 import { createAdapters } from "./adapters";
-import { createDb } from "@webstudio-is/db";
-import { createDatabase } from "./database";
 import { loadEnv } from "./env";
 import { createPublisher } from "./publisher";
 import { createDeployerServer } from "./server";
 
 const env = loadEnv();
+const adapters = createAdapters({ sitesDir: env.DEPLOY_SITES_DIR });
 
 const publisher = createPublisher({
-  db: createDatabase(createDb(env.DATABASE_URL, { max: 4 })),
-  adapters: createAdapters(),
+  adapters,
   webstudioDir: env.WEBSTUDIO_DIR,
-  serviceToken: env.TRPC_SERVER_API_TOKEN,
-  builderUrl: env.BUILDER_INTERNAL_URL,
-  publisherHost: env.PUBLISHER_HOST,
-  configPath: env.DEPLOY_CONFIG,
   credentialsDir: env.DEPLOY_CREDENTIALS_DIR,
   jobsDir: env.jobsDir,
   logsDir: env.logsDir,
@@ -22,14 +16,12 @@ const publisher = createPublisher({
   keepFailedWorkdirs: env.KEEP_FAILED_WORKDIRS,
 });
 
-const server = createDeployerServer({
-  publisher,
-  token: env.TRPC_SERVER_API_TOKEN,
-});
+const server = createDeployerServer({ publisher, apiKey: env.DEPLOY_API_KEY });
 
 server.listen(env.PORT, env.HOST, () => {
   console.info(`Deployer listening on http://${env.HOST}:${env.PORT}`);
-  console.info(`Deploy targets: ${env.DEPLOY_CONFIG}`);
+  console.info(`Hosts: ${[...adapters.keys()].join(", ")}`);
+  console.info(`Credentials: ${env.DEPLOY_CREDENTIALS_DIR}`);
 });
 
 const shutdown = (signal: string) => {

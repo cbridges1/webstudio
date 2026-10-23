@@ -1,6 +1,9 @@
 import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
 import type { ActionFunctionArgs } from "@remix-run/server-runtime";
-import { createContext, isServiceAuthorization } from "~/shared/context.server";
+import {
+  createContext,
+  isServiceRequestAuthorization,
+} from "~/shared/context.server";
 import { appRouter } from "~/services/trcp-router.server";
 import { preventCrossOriginCookie } from "~/services/no-cross-origin-cookie";
 import { getTrpcResponseMeta } from "~/services/trpc-response-meta.server";
@@ -12,7 +15,7 @@ import { ensureApiCsrf } from "~/services/api-auth.server";
 export const config = { maxDuration: 60 };
 
 const isServiceRequest = (request: Request) => {
-  return isServiceAuthorization(request.headers.get("Authorization"));
+  return isServiceRequestAuthorization(request.headers.get("Authorization"));
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {

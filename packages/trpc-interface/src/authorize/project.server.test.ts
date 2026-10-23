@@ -408,6 +408,22 @@ describe("checkProjectPermit — service auth", () => {
     expect(allowed).toBe(true);
   });
 
+  test("a publish token's service auth views only its project", async () => {
+    const projectId = uid();
+    const authInfo = { type: "service" as const, projectId };
+    expect(
+      await checkProjectPermit({ projectId, permit: "view", authInfo, db })
+    ).toBe(true);
+    expect(
+      await checkProjectPermit({
+        projectId: uid(),
+        permit: "view",
+        authInfo,
+        db,
+      })
+    ).toBe(false);
+  });
+
   test("service auth denies edit", async () => {
     const projectId = uid();
     const allowed = await checkProjectPermit({

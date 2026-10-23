@@ -1,0 +1,26 @@
+{
+  "name": "@webstudio-is/deploy-protocol",
+  "version": "0.0.0",
+  "description": "selfhost: the HTTP API between the builder and a deploy service (apps/deploy)",
+  "author": "Webstudio <github@webstudio.is>",
+  "homepage": "https://webstudio.is",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@webstudio-is/tsconfig": "workspace:*"
+  },
+  "exports": {
+    ".": {
+      "webstudio": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "sideEffects": false
+}

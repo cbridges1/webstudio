@@ -207,19 +207,8 @@ export const remove = async (
     return createErrorResponse(error);
   }
 
-  const deploymentResult = await context.deployment.deploymentTrpc.unpublish
-    .mutate({
-      domain: domain.domain,
-    })
-    .catch((error) => createErrorResponse(error));
-
-  if (
-    deploymentResult.success === false &&
-    deploymentResult.error !== "NOT_IMPLEMENTED"
-  ) {
-    return deploymentResult;
-  }
-
+  // selfhost: a project's site lives at one host; a custom domain points at it from the
+  // user's DNS, so removing the domain leaves the site deployed.
   await unpublishBuild(
     { projectId: props.projectId, domain: domain.domain },
     context

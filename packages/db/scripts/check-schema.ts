@@ -67,6 +67,21 @@ const intendedChanges: Array<{ key: string; reason: string }> = [
   { key: "constraint AuthVerification.*", reason: "Better Auth tables" },
   { key: "constraint AuthRateLimit.*", reason: "Better Auth tables" },
   { key: "index Auth*", reason: "Better Auth tables" },
+  { key: "column Deployer.*", reason: "deployers added in the builder" },
+  { key: "constraint Deployer.*", reason: "deployers added in the builder" },
+  { key: "index Deployer_*", reason: "deployers added in the builder" },
+  {
+    key: "column ProjectDeployTarget.*",
+    reason: "each project's deploy target",
+  },
+  {
+    key: "constraint ProjectDeployTarget.*",
+    reason: "each project's deploy target",
+  },
+  {
+    key: "index ProjectDeployTarget_*",
+    reason: "each project's deploy target",
+  },
 ];
 
 const isIntended = (key: string) =>

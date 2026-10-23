@@ -37,6 +37,11 @@ type AuthorizationContext =
        * Allow service 2 service communications to skip authorization for view calls
        */
       isServiceCall: boolean;
+      /**
+       * selfhost: set for a deployer's publish token, which can view only this project.
+       * Unset: the builder's own TRPC_SERVER_API_TOKEN.
+       */
+      projectId?: string;
     }
   | {
       type: "anonymous";
@@ -56,8 +61,25 @@ type EntriContext = {
   };
 };
 
+type DeployResult = { success: true } | { success: false; error: string };
+
+/**
+ * selfhost: sends publishes to the deployer the project's deploy target names (set in
+ * the project's settings). Implemented by the builder (deployers.server.ts).
+ */
+export type DeploymentClient = {
+  /** Fails right away when the project has no usable target or the deployer refuses. */
+  publish(input: {
+    projectId: string;
+    buildId: string;
+    label: string;
+  }): Promise<DeployResult>;
+  /** Removes the project's site from its host. */
+  unpublish(input: { projectId: string }): Promise<DeployResult>;
+};
+
 type DeploymentContext = {
-  deploymentTrpc: TrpcInterfaceClient["deployment"];
+  deployments: DeploymentClient;
   env: {
     BUILDER_ORIGIN: string;
     GITHUB_REF_NAME: string;

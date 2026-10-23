@@ -14,10 +14,8 @@ const createContext = (overrides: Partial<AppContext> = {}): AppContext =>
       Promise.resolve({ maxDomainsAllowedPerUser: 5, maxWorkspaces: 20 }),
     domain: {},
     deployment: {
-      deploymentTrpc: {
-        unpublish: {
-          mutate: () => Promise.resolve({ success: true }),
-        },
+      deployments: {
+        unpublish: () => Promise.resolve({ success: true }),
       },
       env: {
         BUILDER_ORIGIN: "https://apps.webstudio.is",
@@ -233,41 +231,28 @@ const seedAttachedDomain = async () => {
   });
 };
 
-const deploymentWith = (
-  unpublish: (input: { domain: string }) => Promise<unknown>
-) =>
-  ({
-    deploymentTrpc: {
-      publish: {
-        mutate: () => Promise.resolve({ success: true }),
-      },
-      unpublish: { mutate: unpublish },
-    },
-    env: {
-      BUILDER_ORIGIN: "https://apps.webstudio.is",
-      GITHUB_REF_NAME: "main",
-      GITHUB_SHA: undefined,
-      PUBLISHER_HOST: "wstd.io",
-    },
-  }) as unknown as AppContext["deployment"];
-
 describe("remove", () => {
-  test("unpublishes, detaches, and marks an unreferenced domain inactive", async () => {
+  test("detaches and marks an unreferenced domain inactive", async () => {
     await seedAttachedDomain();
-    let unpublishedDomain: string | undefined;
+    let unpublished = false;
 
     const result = await remove(
       { projectId: "proj-1", domainId: "domain-id-1" },
       createContext({
-        deployment: deploymentWith(({ domain }) => {
-          unpublishedDomain = domain;
-          return Promise.resolve({ success: true });
-        }),
+        deployment: {
+          deployments: {
+            unpublish: () => {
+              unpublished = true;
+              return Promise.resolve({ success: true });
+            },
+          },
+        } as unknown as AppContext["deployment"],
       })
     );
 
     expect(result).toEqual({ success: true });
-    expect(unpublishedDomain).toBe("example.com");
+    // The site stays deployed; only the domain is detached.
+    expect(unpublished).toBe(false);
     expect(await db.select().from(projectDomain)).toEqual([]);
     expect(await db.select().from(domain)).toEqual([
       expect.objectContaining({
@@ -298,22 +283,6 @@ describe("remove", () => {
     expect(await db.select().from(domain)).toEqual([
       expect.objectContaining({ id: "domain-id-1", status: "ACTIVE" }),
     ]);
-  });
-
-  test("does not detach when unpublish fails", async () => {
-    await seedAttachedDomain();
-
-    const result = await remove(
-      { projectId: "proj-1", domainId: "domain-id-1" },
-      createContext({
-        deployment: deploymentWith(() =>
-          Promise.resolve({ success: false, error: "Cloudflare failed" })
-        ),
-      })
-    );
-
-    expect(result).toEqual({ success: false, error: "Cloudflare failed" });
-    expect(await db.select().from(projectDomain)).toHaveLength(1);
   });
 
   test("reports an unknown domain", async () => {

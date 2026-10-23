@@ -262,6 +262,9 @@ importers:
       '@webstudio-is/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@webstudio-is/deploy-protocol':
+        specifier: workspace:*
+        version: link:../../packages/deploy-protocol
       '@webstudio-is/design-system':
         specifier: workspace:*
         version: link:../../packages/design-system
@@ -545,12 +548,9 @@ importers:
 
   apps/deploy:
     dependencies:
-      '@trpc/server':
-        specifier: ^10.45.2
-        version: 10.45.2
-      '@webstudio-is/db':
+      '@webstudio-is/deploy-protocol':
         specifier: workspace:*
-        version: link:../../packages/db
+        version: link:../../packages/deploy-protocol
       tsx:
         specifier: ^4.19.3
         version: 4.23.15
@@ -558,9 +558,6 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
-      '@trpc/client':
-        specifier: ^10.45.2
-        version: 10.45.2(@trpc/server@10.45.2)
       '@types/node':
         specifier: ^22.13.10
         version: 22.13.10
@@ -570,6 +567,7 @@ importers:
       vitest:
         specifier: ^3.1.2
         version: 3.1.2(@types/debug@4.1.12)(@types/node@22.13.10)(@vitest/browser@3.1.2)(jiti@2.4.2)(jsdom@20.0.3)(lightningcss@1.31.1)(msw@2.13.2(@types/node@22.13.10)(typescript@7.0.2))(tsx@4.23.15)(yaml@2.9.0)
+
 
   fixtures/react-router-cloudflare:
     dependencies:
@@ -1777,6 +1775,16 @@ importers:
       vitest:
         specifier: ^3.1.2
         version: 3.1.2(@types/debug@4.1.12)(@types/node@22.13.10)(@vitest/browser@3.1.2)(jiti@2.4.2)(jsdom@20.0.3)(lightningcss@1.31.1)(msw@2.13.2(@types/node@22.13.10)(typescript@7.0.2))(tsx@4.19.3)(yaml@2.9.0)
+
+  packages/deploy-protocol:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@webstudio-is/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
 
   packages/design-system:
     dependencies:

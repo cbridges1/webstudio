@@ -15,6 +15,12 @@ describe("getPublishUrl", () => {
     ).toBe("https://example.wstd.io/blog/my-post");
   });
 
+  test("keeps a host with a port", () => {
+    expect(
+      getPublishUrl({ domain: "localhost:56950", pathname: "/" }).toString()
+    ).toBe("https://localhost:56950/");
+  });
+
   test("falls back to root when pathname is empty", () => {
     expect(
       getPublishUrl({

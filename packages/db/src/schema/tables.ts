@@ -141,7 +141,7 @@ export const project = pgTable(
       .notNull(),
     tags: text().array(),
     workspaceId: uuid(),
-    // selfhost: address of the published site, written by the deploy service.
+    // selfhost: address of the published site, reported by the deploy service.
     // Each project deploys to its own host, so `<domain>.<PUBLISHER_HOST>` is only
     // the fallback before the first deploy.
     publishedUrl: text(),
@@ -179,6 +179,67 @@ export const project = pgTable(
     })
       .onUpdate("cascade")
       .onDelete("set null"),
+  ]
+);
+
+// selfhost: deploy services a workspace's projects publish through, added by the
+// workspace's admins. `apiKey` is what the builder sends to the service; it never
+// leaves the server.
+export const deployer = pgTable(
+  "Deployer",
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid().notNull(),
+    name: text().notNull(),
+    url: text().notNull(),
+    apiKey: text().notNull(),
+    /** The builder's address as the service reaches it. Null: the builder's own origin. */
+    builderUrl: text(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("Deployer_workspaceId_idx").on(table.workspaceId),
+    foreignKey({
+      columns: [table.workspaceId],
+      foreignColumns: [workspace.id],
+      name: "Deployer_workspaceId_fkey",
+    })
+      .onUpdate("cascade")
+      .onDelete("cascade"),
+  ]
+);
+
+// selfhost: where Publish sends a project: one of its workspace's deployers and a
+// target there (a host, its settings and the name of a credentials file the deployer
+// holds). Removing the deployer removes the targets that use it.
+export const projectDeployTarget = pgTable(
+  "ProjectDeployTarget",
+  {
+    projectId: text().primaryKey(),
+    deployerId: uuid().notNull(),
+    host: text().notNull(),
+    config: jsonb().$type<Json>().notNull(),
+    credentials: text(),
+    updatedAt: timestamptz("updatedAt")
+      .default(sql`now()`)
+      .notNull(),
+  },
+  (table) => [
+    index("ProjectDeployTarget_deployerId_idx").on(table.deployerId),
+    foreignKey({
+      columns: [table.projectId],
+      foreignColumns: [project.id],
+      name: "ProjectDeployTarget_projectId_fkey",
+    })
+      .onUpdate("cascade")
+      .onDelete("cascade"),
+    foreignKey({
+      columns: [table.deployerId],
+      foreignColumns: [deployer.id],
+      name: "ProjectDeployTarget_deployerId_fkey",
+    })
+      .onUpdate("cascade")
+      .onDelete("cascade"),
   ]
 );
 

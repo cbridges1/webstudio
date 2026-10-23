@@ -1,17 +1,22 @@
-// Calls the server the way the builder does: tRPC v10 httpBatchLink with the raw token in
-// `Authorization` (packages/trpc-interface/src/shared/client.ts).
+// Calls the server the way the builder does, through @webstudio-is/deploy-protocol's client.
 import type { AddressInfo } from "node:net";
-import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+  createDeployServiceClient,
+  type PublishRequest,
+} from "@webstudio-is/deploy-protocol";
 import type { Publisher } from "./publisher";
-import { CUSTOM_DOMAINS_UNSUPPORTED, type DeployerRouter } from "./router";
 import { createDeployerServer } from "./server";
 
-const token = "t".repeat(40);
+const apiKey = "k".repeat(40);
 const published: unknown[] = [];
 
 const publisher = {
   status: () => ({ running: undefined, queued: 0 }),
+  hosts: async () => [
+    { id: "directory", label: "Folder", config: {}, credentials: null },
+  ],
+  validate: async () => ({ success: true as const }),
   publish: async (input: unknown) => {
     published.push(input);
     return { success: true as const };
@@ -20,7 +25,7 @@ const publisher = {
   idle: async () => {},
 } as unknown as Publisher;
 
-const server = createDeployerServer({ publisher, token });
+const server = createDeployerServer({ publisher, apiKey });
 let origin: string;
 
 beforeAll(async () => {
@@ -31,69 +36,70 @@ afterAll(() => {
   server.close();
 });
 
-const client = (authorization: string) =>
-  createTRPCProxyClient<DeployerRouter>({
-    links: [
-      httpBatchLink({
-        url: `${origin}/trpc`,
-        headers: () => ({
-          Authorization: authorization,
-          "x-api-client": "service",
-        }),
-      }),
-    ],
-  });
-
-const publishInput = {
+const target = { host: "directory", config: { site: "p1" } };
+const publishRequest: PublishRequest = {
   buildId: "b1",
-  builderOrigin: "https://wstd.dev:5181",
-  destination: "saas" as const,
-  branchName: "main",
-  logProjectName: "Project - p1",
+  builder: { origin: "https://builder.example.com", token: "t" },
+  target,
 };
 
 describe("deployer server", () => {
-  test("serves the builder's publish call", async () => {
-    await expect(
-      client(token).deployment.publish.mutate(publishInput)
-    ).resolves.toEqual({
+  test("serves the builder's calls", async () => {
+    const client = createDeployServiceClient({ url: origin, apiKey });
+    expect(await client.publish(publishRequest)).toEqual({ success: true });
+    expect(published).toEqual([publishRequest]);
+    expect(await client.unpublish(target)).toEqual({
+      success: false,
+      error: "nope",
+    });
+    expect(await client.validate(target)).toEqual({ success: true });
+    expect(await client.hosts()).toEqual({
       success: true,
+      data: {
+        hosts: [
+          { id: "directory", label: "Folder", config: {}, credentials: null },
+        ],
+      },
     });
-    expect(published).toEqual([publishInput]);
   });
 
-  test("passes unpublish errors through", async () => {
-    await expect(
-      client(token).deployment.unpublish.mutate({ domain: "x.wstd.work" })
-    ).resolves.toEqual({ success: false, error: "nope" });
+  test("works behind a path prefix", async () => {
+    const client = createDeployServiceClient({
+      url: `${origin}/deploy/`,
+      apiKey,
+    });
+    expect(await client.validate(target)).toEqual({ success: true });
   });
 
-  test("answers every domain procedure with a clear message", async () => {
-    const api = client(token);
-    const expected = { success: false, error: CUSTOM_DOMAINS_UNSUPPORTED };
-    await expect(
-      api.domain.create.mutate({ domain: "a.com", txtRecord: "t" })
-    ).resolves.toEqual(expected);
-    await expect(
-      api.domain.refresh.mutate({ domain: "a.com" })
-    ).resolves.toEqual(expected);
-    await expect(
-      api.domain.getStatus.query({ domain: "a.com" })
-    ).resolves.toEqual(expected);
+  test("rejects a wrong API key", async () => {
+    const client = createDeployServiceClient({ url: origin, apiKey: "wrong" });
+    expect(await client.publish(publishRequest)).toEqual({
+      success: false,
+      error: "The deploy service rejected its API key",
+    });
   });
 
-  test("rejects a wrong or missing token", async () => {
-    await expect(
-      client("wrong").deployment.publish.mutate(publishInput)
-    ).rejects.toThrow();
-    const response = await fetch(`${origin}/trpc/deployment.publish?batch=1`, {
+  test("rejects an invalid request", async () => {
+    const response = await fetch(`${origin}/v1/publish`, {
       method: "POST",
-      body: "{}",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ buildId: "b1" }),
     });
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(400);
   });
 
-  test("health check needs no token", async () => {
+  test("reports an unreachable service", async () => {
+    const client = createDeployServiceClient({
+      url: "http://127.0.0.1:1",
+      apiKey,
+    });
+    const result = await client.validate(target);
+    expect(result.success === false && result.error).toMatch(
+      /^Can't reach the deploy service/
+    );
+  });
+
+  test("health check needs no key", async () => {
     const response = await fetch(`${origin}/healthz`);
     expect(await response.json()).toEqual({ ok: true, queued: 0 });
   });
