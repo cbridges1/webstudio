@@ -23,7 +23,8 @@ npm run cli     # add users, Drizzle Studio, stop/reset/destroy the containers
 npm run dev     # the builder, Drizzle Studio and the deploy service
 ```
 
-This repository keeps the code, its tests and the e2e runner:
+This repository keeps the code, its tests and the e2e runner. The deploy service that makes
+Publish work is `apps/deploy`: a separate process from the builder, run by knowbra-webstudio.
 
 ```sh
 npm run test:selfhost      # tests for this fork's changes
