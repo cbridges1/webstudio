@@ -52,7 +52,12 @@ export type AccountSummary = {
   username: string;
   email: string | null;
   disabled: boolean;
+  /** Better Auth's admin role: sets up the deployer. */
+  admin: boolean;
 };
+
+const hasAdminRole = (role: string | null) =>
+  (role ?? "").split(",").some((name) => name.trim() === "admin");
 
 export const createUserAccounts = ({
   db,
@@ -110,6 +115,7 @@ export const createUserAccounts = ({
           loginName: user.loginName,
           email: user.email,
           banned: user.banned,
+          role: user.role,
         })
         .from(user)
         .where(isNotNull(user.loginName))
@@ -118,6 +124,7 @@ export const createUserAccounts = ({
         username: row.loginName ?? "",
         email: row.email,
         disabled: row.banned === true,
+        admin: hasAdminRole(row.role),
       }));
     },
 
@@ -199,6 +206,15 @@ export const createUserAccounts = ({
       await db
         .update(user)
         .set({ banned: false, banReason: null, banExpires: null })
+        .where(eq(user.id, id));
+    },
+
+    /** Gives or takes Better Auth's admin role (app admins set up the deployer). */
+    setAdmin: async (username: string, admin: boolean) => {
+      const { id } = await getUser(username);
+      await db
+        .update(user)
+        .set({ role: admin ? "admin" : "user" })
         .where(eq(user.id, id));
     },
   };

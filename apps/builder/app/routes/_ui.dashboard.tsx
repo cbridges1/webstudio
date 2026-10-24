@@ -33,6 +33,7 @@ import { createContext } from "~/shared/context.server";
 import { isDowngradedForMember } from "~/dashboard/workspace/utils";
 import { loadWorkspacesForDashboard } from "~/dashboard/workspace/loader.server";
 import type { DashboardData } from "~/dashboard/shared/types";
+import { isAppAdmin } from "~/services/deployers.server";
 
 export const meta = () => {
   const metas: ReturnType<MetaFunction> = [];
@@ -118,10 +119,12 @@ const loadDashboardData = async (request: Request) => {
     : await dashboardProjectCaller(context).findMany(findManyInput);
 
   const notifications = await notificationApi.list(context);
+  const isAdmin = await isAppAdmin(context.db, user.id);
 
   return {
     context,
     user,
+    isAdmin,
     origin: sourceOrigin,
     planFeatures,
     projects,
@@ -174,6 +177,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const {
     context,
     user,
+    isAdmin,
     planFeatures,
     origin,
     projects,
@@ -188,6 +192,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return json(
     {
       user,
+      isAdmin,
       projects,
       planFeatures,
       publisherHost: env.PUBLISHER_HOST,

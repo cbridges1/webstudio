@@ -64,6 +64,7 @@ const projects = [
 
 const data = {
   user,
+  isAdmin: false,
   templates: projects,
   planFeatures,
   publisherHost: "https://wstd.work",

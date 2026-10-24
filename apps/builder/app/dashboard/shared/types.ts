@@ -6,6 +6,8 @@ import type { Notifications } from "~/shared/polly/types";
 
 export type DashboardData = {
   user: User;
+  /** selfhost: has Better Auth's admin role (sets up the deployer). */
+  isAdmin: boolean;
   projects: Array<DashboardProject>;
   planFeatures: PlanFeatures;
   publisherHost: string;

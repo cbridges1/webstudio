@@ -1,5 +1,4 @@
-// selfhost: where Publish sends this project: one of its workspace's deployers and a
-// target there. The deployer describes its hosts (settings and credentials as JSON Schema),
+// selfhost: where Publish sends this project: a target on the deployer. The deployer describes its hosts (settings and credentials as JSON Schema),
 // so this form works for any host it offers. Credentials are write-only: the builder keeps
 // them encrypted and only shows whose they are.
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -23,10 +22,9 @@ import { $project } from "~/shared/sync/data-stores";
 import { sectionSpacing } from "./utils";
 
 type Settings = {
-  canManageDeployers: boolean;
-  deployers: { id: string; name: string }[];
+  hasDeployer: boolean;
+  canManageDeployer: boolean;
   target: {
-    deployerId: string;
     host: string;
     config: Record<string, unknown>;
     credentials:
@@ -117,7 +115,6 @@ export const SectionDeploy = ({
   const project = useStore($project);
   const projectId = projectIdProp ?? project?.id ?? "";
   const [settings, setSettings] = useState<Settings>();
-  const [deployerId, setDeployerId] = useState<string>();
   const [hosts, setHosts] = useState<HostInfo[]>();
   const [hostId, setHostId] = useState<string>();
   const [values, setValues] = useState<Record<string, unknown>>({});
@@ -128,7 +125,7 @@ export const SectionDeploy = ({
   const fileInput = useRef<HTMLInputElement>(null);
 
   const loadSettings = useCallback(async () => {
-    const result = await nativeClient.deployers.projectSettings.query({
+    const result = await nativeClient.deployer.projectSettings.query({
       projectId,
     });
     if (result.success === false) {
@@ -143,21 +140,22 @@ export const SectionDeploy = ({
       return;
     }
     loadSettings()
-      .then(({ target, deployers }) => {
-        setDeployerId(target?.deployerId ?? deployers[0]?.id);
+      .then(({ target }) => {
         setHostId(target?.host);
         setValues(target?.config ?? {});
       })
       .catch((error: Error) => setError(error.message));
   }, [projectId, loadSettings]);
 
+  const hasDeployer = settings?.hasDeployer === true;
+
   useEffect(() => {
-    if (deployerId === undefined) {
+    if (projectId === "" || hasDeployer === false) {
       return;
     }
     setHosts(undefined);
-    nativeClient.deployers.projectHosts
-      .query({ projectId, deployerId })
+    nativeClient.deployer.projectHosts
+      .query({ projectId })
       .then((result) => {
         if (result.success === false) {
           setError(result.error);
@@ -172,7 +170,7 @@ export const SectionDeploy = ({
         );
       })
       .catch((error: Error) => setError(error.message));
-  }, [projectId, deployerId]);
+  }, [projectId, hasDeployer]);
 
   const host = hosts?.find((host) => host.id === hostId);
   // Saved credentials belong to the saved host.
@@ -187,12 +185,11 @@ export const SectionDeploy = ({
     setMessage(undefined);
     let target = null;
     if (remove === false) {
-      if (deployerId === undefined || host === undefined) {
+      if (host === undefined) {
         return;
       }
       try {
         target = {
-          deployerId,
           host: host.id,
           config: toConfig(fields, values),
           // Nothing pasted keeps the saved credentials.
@@ -208,7 +205,7 @@ export const SectionDeploy = ({
     }
     setIsSaving(true);
     try {
-      const result = await nativeClient.deployers.setProjectTarget.mutate({
+      const result = await nativeClient.deployer.setProjectTarget.mutate({
         projectId,
         target,
       });
@@ -236,28 +233,16 @@ export const SectionDeploy = ({
           Where Publish sends this project. The deployer builds the site and
           uploads it to the host.
         </Text>
-        {settings?.deployers.length === 0 && (
+        {settings?.hasDeployer === false && (
           <Text>
-            This workspace has no deployers yet.{" "}
-            {settings.canManageDeployers
-              ? "Add one in the dashboard: workspace menu → Deployers."
-              : "Ask a workspace admin to add one."}
+            No deployer is set up yet.{" "}
+            {settings.canManageDeployer
+              ? "Set it in the dashboard: profile menu → Deployer."
+              : "Ask an admin to set one up."}
           </Text>
         )}
-        {settings !== undefined && settings.deployers.length > 0 && (
+        {settings?.hasDeployer === true && (
           <>
-            <Grid gap={1}>
-              <Label>Deployer</Label>
-              <Select
-                options={settings.deployers}
-                getLabel={(deployer) => deployer.name}
-                getValue={(deployer) => deployer.id}
-                value={settings.deployers.find(
-                  (deployer) => deployer.id === deployerId
-                )}
-                onChange={(deployer) => setDeployerId(deployer.id)}
-              />
-            </Grid>
             {hosts === undefined && error === undefined && (
               <Text color="subtle">Asking the deployer for its hosts…</Text>
             )}

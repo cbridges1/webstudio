@@ -10,7 +10,10 @@
 //   set-password <username>           Replace the password and sign the user out of Better Auth
 //   disable <username>                Block sign-in
 //   enable <username>                 Allow sign-in again
-//   list                              List username accounts and whether they can sign in
+//   make-admin <username>             Make an app admin (sets up the deployer)
+//   remove-admin <username>           Make a regular user again
+//   list                              List username accounts, whether they can sign in and
+//                                     which are admins
 // The password is prompted for without echo, or read from stdin with --password-stdin.
 // Users who will be invited to workspaces need a real email: invites match it exactly.
 import { createInterface } from "node:readline";
@@ -97,7 +100,7 @@ const main = async () => {
   if (command === "list") {
     for (const row of await accounts.list()) {
       console.info(
-        `${row.username}\t${row.email ?? "(no email)"}\t${row.disabled ? "disabled" : "active"}`
+        `${row.username}\t${row.email ?? "(no email)"}\t${row.disabled ? "disabled" : "active"}${row.admin ? "\tadmin" : ""}`
       );
     }
     return;
@@ -105,7 +108,7 @@ const main = async () => {
 
   if (rawUsername === undefined) {
     die(
-      "usage: users <add|set-password|disable|enable> <username> [--email <email>] | users list"
+      "usage: users <add|set-password|disable|enable|make-admin|remove-admin> <username> [--email <email>] | users list"
     );
   }
   const username = normalizeUsername(rawUsername);
@@ -142,6 +145,14 @@ const main = async () => {
     case "enable":
       await accounts.enable(username);
       console.info(`Enabled ${username}.`);
+      return;
+    case "make-admin":
+      await accounts.setAdmin(username, true);
+      console.info(`${username} is now an admin.`);
+      return;
+    case "remove-admin":
+      await accounts.setAdmin(username, false);
+      console.info(`${username} is no longer an admin.`);
       return;
   }
   die(`unknown command: ${command}`);

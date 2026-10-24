@@ -28,7 +28,6 @@ import { RenameWorkspaceDialog } from "./rename-workspace-dialog";
 import { ManageMembersDialog } from "./manage-members-dialog";
 import { DeleteWorkspaceDialog } from "./delete-workspace-dialog";
 import { LeaveWorkspaceDialog } from "./leave-workspace-dialog";
-import { DeployersDialog } from "./deployers-dialog";
 
 export type WorkspaceDropdownItem = {
   id: string;
@@ -155,12 +154,8 @@ export const WorkspaceSelector = ({
   const [inviteOpen, setInviteOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
-  const [deployersOpen, setDeployersOpen] = useState(false);
 
   const isOwner = currentWorkspace?.userId === userId;
-  const isAdmin =
-    currentWorkspace?.role === "own" ||
-    currentWorkspace?.role === "administrators";
   const isSuspended = currentWorkspace?.isDowngraded === true;
 
   const toDropdownItem = (workspace: WorkspaceWithRelation) => ({
@@ -229,13 +224,6 @@ export const WorkspaceSelector = ({
         >
           Members
         </DropdownMenuItem>
-        <DropdownMenuItem
-          withIndicator
-          disabled={isSuspended || isAdmin === false}
-          onSelect={() => setDeployersOpen(true)}
-        >
-          Deployers
-        </DropdownMenuItem>
         {isOwner ? (
           <DropdownMenuItem
             withIndicator
@@ -270,12 +258,6 @@ export const WorkspaceSelector = ({
             userId={userId}
             isOpen={inviteOpen}
             onOpenChange={setInviteOpen}
-          />
-          <DeployersDialog
-            key={`deployers-${currentWorkspace.id}`}
-            workspace={currentWorkspace}
-            isOpen={deployersOpen}
-            onOpenChange={setDeployersOpen}
           />
           <DeleteWorkspaceDialog
             workspace={currentWorkspace}

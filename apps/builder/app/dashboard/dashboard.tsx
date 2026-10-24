@@ -196,6 +196,7 @@ export const Dashboard = () => {
 
   const {
     user,
+    isAdmin,
     publisherHost,
     projectToClone,
     projects,
@@ -247,7 +248,7 @@ export const Dashboard = () => {
           }}
         >
           <Header variant="aside">
-            <ProfileMenu user={user} />
+            <ProfileMenu user={user} isAdmin={isAdmin} />
             <NotificationPopover
               renderTrigger={(props) => <IconButton color="ghost" {...props} />}
             />

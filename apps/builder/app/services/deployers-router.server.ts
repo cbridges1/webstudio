@@ -1,4 +1,4 @@
-// selfhost: workspace deployers and project deploy targets (deployers.server.ts).
+// selfhost: the deployer and project deploy targets (deployers.server.ts).
 import { z } from "zod";
 import {
   createErrorResponse,
@@ -7,18 +7,15 @@ import {
 } from "@webstudio-is/trpc-interface/index.server";
 import {
   checkDeployer,
-  createDeployer,
   deployerInput,
   listDeployerHosts,
-  listDeployers,
+  loadDeployerSettings,
   loadProjectDeploySettings,
   projectTargetInput,
   removeDeployer,
+  saveDeployer,
   setProjectDeployTarget,
-  updateDeployer,
 } from "./deployers.server";
-
-const apiKey = z.string().trim().min(1, "Enter the deployer's API key");
 
 const respond = async <T>(run: () => Promise<T>) => {
   try {
@@ -28,37 +25,24 @@ const respond = async <T>(run: () => Promise<T>) => {
   }
 };
 
-export const deployersRouter = router({
-  list: procedure
-    .input(z.object({ workspaceId: z.string() }))
-    .query(({ input, ctx }) => respond(() => listDeployers(input, ctx))),
+export const deployerRouter = router({
+  settings: procedure.query(({ ctx }) =>
+    respond(() => loadDeployerSettings(ctx))
+  ),
 
-  create: procedure
-    .input(deployerInput.extend({ workspaceId: z.string(), apiKey }))
-    .mutation(({ input, ctx }) => respond(() => createDeployer(input, ctx))),
+  save: procedure
+    .input(deployerInput)
+    .mutation(({ input, ctx }) => respond(() => saveDeployer(input, ctx))),
 
-  update: procedure
-    .input(
-      deployerInput.extend({
-        deployerId: z.string(),
-        apiKey: z.string().trim().optional(),
-      })
-    )
-    .mutation(({ input, ctx }) => respond(() => updateDeployer(input, ctx))),
+  remove: procedure.mutation(({ ctx }) => respond(() => removeDeployer(ctx))),
 
-  remove: procedure
-    .input(z.object({ deployerId: z.string() }))
-    .mutation(({ input, ctx }) => respond(() => removeDeployer(input, ctx))),
-
-  check: procedure
-    .input(z.object({ deployerId: z.string() }))
-    .mutation(async ({ input, ctx }) => {
-      try {
-        return await checkDeployer(input, ctx);
-      } catch (error) {
-        return createErrorResponse(error);
-      }
-    }),
+  check: procedure.mutation(async ({ ctx }) => {
+    try {
+      return await checkDeployer(ctx);
+    } catch (error) {
+      return createErrorResponse(error);
+    }
+  }),
 
   projectSettings: procedure
     .input(z.object({ projectId: z.string() }))
@@ -67,7 +51,7 @@ export const deployersRouter = router({
     ),
 
   projectHosts: procedure
-    .input(z.object({ projectId: z.string(), deployerId: z.string() }))
+    .input(z.object({ projectId: z.string() }))
     .query(async ({ input, ctx }) => {
       try {
         return await listDeployerHosts(input, ctx);

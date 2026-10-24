@@ -36,7 +36,12 @@ describe("user accounts", () => {
 
     expect(created.username).toBe("alice");
     expect(await accounts.list()).toEqual([
-      { username: "alice", email: "alice@example.com", disabled: false },
+      {
+        username: "alice",
+        email: "alice@example.com",
+        disabled: false,
+        admin: false,
+      },
     ]);
     expect(
       await db
@@ -44,6 +49,20 @@ describe("user accounts", () => {
         .from(workspace)
         .where(eq(workspace.userId, created.id))
     ).toEqual([{ name: "My workspace", isDefault: true }]);
+  });
+
+  test("makes and unmakes app admins", async () => {
+    const { accounts } = setup();
+    const { id } = await accounts.add({ username: "alice", password });
+    await accounts.setAdmin("alice", true);
+    expect(await accounts.list()).toMatchObject([{ admin: true }]);
+    const [row] = await db.select().from(user).where(eq(user.id, id));
+    expect(row.role).toBe("admin");
+    await accounts.setAdmin("alice", false);
+    expect(await accounts.list()).toMatchObject([{ admin: false }]);
+    await expect(accounts.setAdmin("nobody", true)).rejects.toThrow(
+      AccountError
+    );
   });
 
   test("keeps the placeholder email out of User.email", async () => {

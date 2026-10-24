@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+/** An unset or empty variable is undefined. */
+const optional = <Schema extends z.ZodTypeAny>(schema: Schema) =>
+  z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    schema.optional()
+  );
+
 const environment = z.object({
   // Authentication
   // selfhost: username/password sign-in (Better Auth)
@@ -19,6 +26,12 @@ const environment = z.object({
   AUTH_SECRET: z.string().optional(),
   // selfhost: encrypts projects' deploy credentials; deployers that read them share it.
   DEPLOY_CREDENTIALS_KEY: z.string().optional(),
+  // selfhost: the deploy service Publish uses. Set, it replaces the one an app admin sets
+  // in the dashboard (profile menu → Deployer), which then can't be changed there.
+  DEPLOYER_URL: optional(z.string().url()),
+  DEPLOYER_API_KEY: optional(z.string()),
+  // The builder's address as the deploy service reaches it (default: the builder's origin).
+  DEPLOYER_BUILDER_URL: optional(z.string().url()),
 
   // DEPLOYMENT_ENVIRONMENT development | preview | production
   DEPLOYMENT_ENVIRONMENT: z
@@ -85,6 +98,9 @@ const rawEnv = {
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
   AUTH_SECRET: process.env.AUTH_SECRET,
   DEPLOY_CREDENTIALS_KEY: process.env.DEPLOY_CREDENTIALS_KEY,
+  DEPLOYER_URL: process.env.DEPLOYER_URL,
+  DEPLOYER_API_KEY: process.env.DEPLOYER_API_KEY,
+  DEPLOYER_BUILDER_URL: process.env.DEPLOYER_BUILDER_URL,
   DEPLOYMENT_ENVIRONMENT: process.env.DEPLOYMENT_ENVIRONMENT,
   DEPLOYMENT_URL: process.env.DEPLOYMENT_URL,
   TRPC_SERVER_URL: process.env.TRPC_SERVER_URL,
@@ -160,6 +176,11 @@ if (env.AUTH_RATE_LIMIT === "false") {
       "AUTH_RATE_LIMIT=false: sign-in attempts are not rate-limited"
     );
   }
+}
+
+// selfhost: the deploy service refuses requests without its key.
+if (env.DEPLOYER_URL !== undefined && env.DEPLOYER_API_KEY === undefined) {
+  throw new Error("DEPLOYER_API_KEY must be set with DEPLOYER_URL");
 }
 
 export type ServerEnv = typeof env;

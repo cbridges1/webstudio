@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, useState } from "react";
 import { ChevronDownIcon } from "@webstudio-is/icons";
 import {
   DropdownMenu,
@@ -17,6 +17,7 @@ import { useNavigate } from "@remix-run/react";
 import { logoutPath } from "~/shared/router-utils";
 import type { User } from "~/shared/db/user.server";
 import { ColorSchemeMenu } from "~/shared/color-scheme-menu";
+import { DeployerDialog } from "./deployer-dialog";
 
 const getAvatarLetter = (title?: string) => {
   return (title || "X").charAt(0).toLocaleUpperCase();
@@ -57,26 +58,47 @@ const ProfileButton = forwardRef<
   );
 });
 
-export const ProfileMenu = ({ user }: { user: User }) => {
+export const ProfileMenu = ({
+  user,
+  isAdmin,
+}: {
+  user: User;
+  /** selfhost: app admins set up the deployer. */
+  isAdmin: boolean;
+}) => {
   const navigate = useNavigate();
   const nameOrEmail = user.username ?? user.email ?? defaultUserName;
+  const [deployerOpen, setDeployerOpen] = useState(false);
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <ProfileButton image={user.image || undefined} name={nameOrEmail} />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" sideOffset={4} width="regular">
-        <DropdownMenuLabel>
-          {user.username ?? defaultUserName}
-          <Text>{user.email}</Text>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <ColorSchemeMenu />
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => navigate(logoutPath())}>
-          Sign out
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <ProfileButton image={user.image || undefined} name={nameOrEmail} />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" sideOffset={4} width="regular">
+          <DropdownMenuLabel>
+            {user.username ?? defaultUserName}
+            <Text>{user.email}</Text>
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          <ColorSchemeMenu />
+          <DropdownMenuSeparator />
+          {isAdmin && (
+            <>
+              <DropdownMenuItem onSelect={() => setDeployerOpen(true)}>
+                Deployer
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          <DropdownMenuItem onSelect={() => navigate(logoutPath())}>
+            Sign out
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {isAdmin && (
+        <DeployerDialog isOpen={deployerOpen} onOpenChange={setDeployerOpen} />
+      )}
+    </>
   );
 };

@@ -1,13 +1,15 @@
-// selfhost: deployers and deploy targets.
+// selfhost: the deployer and projects' deploy targets.
 //
-// A deployer is a deploy service (apps/deploy, or anything speaking
-// @webstudio-is/deploy-protocol) that a workspace's admins add with its URL and API key.
-// Each project picks one of its workspace's deployers and a target there (a host, its
-// settings and its credentials). Credentials are stored encrypted with
-// DEPLOY_CREDENTIALS_KEY (@webstudio-is/deploy-protocol/credentials) and never sent: the
-// deployer reads them from this database. Publish sends the build to that deployer with a
-// token scoped to the project (publish-token.server.ts); the deployer reports the result back
-// to /rest/deployments/<buildId>.
+// The deployer is the one deploy service (apps/deploy, or anything speaking
+// @webstudio-is/deploy-protocol's REST API) every project publishes through. It comes from
+// the builder's environment (DEPLOYER_URL, DEPLOYER_API_KEY, DEPLOYER_BUILDER_URL) or, when
+// that isn't set, from what an app admin (a user with Better Auth's "admin" role) saves in
+// the dashboard. Each project picks a target there (a host, its settings and its
+// credentials). Credentials are stored encrypted with DEPLOY_CREDENTIALS_KEY
+// (@webstudio-is/deploy-protocol/credentials) and never sent: the deployer reads them from
+// this database. Publish sends the build with a token scoped to the project
+// (publish-token.server.ts); the deployer reports the result back to
+// /rest/deployments/<buildId>.
 import {
   createDeployServiceClient,
   deployCredentials,
@@ -17,16 +19,13 @@ import {
   type DeployTarget,
 } from "@webstudio-is/deploy-protocol";
 import {
-  and,
   build,
   deployer,
   eq,
-  isNull,
   maybeOne,
   project,
   projectDeployTarget,
-  workspace,
-  workspaceMember,
+  user,
   type Db,
   type Json,
 } from "@webstudio-is/db";
@@ -49,127 +48,143 @@ import env from "~/env/env.server";
 
 const NO_TARGET =
   "This project has no deploy target. Choose one in Project settings → Deploy.";
+const NO_DEPLOYER =
+  "No deployer is set up. An admin sets it in the dashboard: profile menu → Deployer.";
 
-type DeployerRow = typeof deployer.$inferSelect;
+type Deployer = {
+  /** "env": from the builder's environment, which the app can't change. */
+  source: "env" | "app";
+  url: string;
+  apiKey: string;
+  /** The builder's address as the deployer reaches it. Null: the builder's own origin. */
+  builderUrl: string | null;
+};
+
+/** The environment's deployer, else the one saved in the app, else undefined. */
+const loadDeployer = async (db: Db): Promise<Deployer | undefined> => {
+  if (env.DEPLOYER_URL !== undefined) {
+    return {
+      source: "env",
+      url: env.DEPLOYER_URL,
+      apiKey: env.DEPLOYER_API_KEY ?? "",
+      builderUrl: env.DEPLOYER_BUILDER_URL ?? null,
+    };
+  }
+  const row = maybeOne(await db.select().from(deployer));
+  return row === null
+    ? undefined
+    : {
+        source: "app",
+        url: row.url,
+        apiKey: row.apiKey,
+        builderUrl: row.builderUrl,
+      };
+};
+
+const requireDeployer = async (db: Db) => {
+  const found = await loadDeployer(db);
+  if (found === undefined) {
+    throw new Error(NO_DEPLOYER);
+  }
+  return found;
+};
+
+const clientFor = (found: Deployer) =>
+  createDeployServiceClient({ url: found.url, apiKey: found.apiKey });
 
 export const deployerInput = z.object({
-  name: z.string().trim().min(1).max(100),
   url: z.string().trim().url(),
+  /** Empty or missing keeps the saved key. */
+  apiKey: z.string().trim().optional(),
   /** The builder's address as the deployer reaches it. Empty: the builder's own origin. */
   builderUrl: z.union([z.string().trim().url(), z.literal("")]).optional(),
 });
 
+/** Users with Better Auth's admin role (roles are comma-separated). */
+export const isAppAdmin = async (db: Db, userId: string) => {
+  const row = maybeOne(
+    await db.select({ role: user.role }).from(user).where(eq(user.id, userId))
+  );
+  return (row?.role ?? "").split(",").some((role) => role.trim() === "admin");
+};
+
+const assertAppAdmin = async (context: AppContext) => {
+  if (
+    context.authorization.type !== "user" ||
+    (await isAppAdmin(context.db, context.authorization.userId)) === false
+  ) {
+    throw new AuthorizationError("Only admins can set up the deployer");
+  }
+};
+
+// App admins: the deployer.
+
 /** What the browser may see: never the API key, only its last characters. */
-const toPublicDeployer = (row: DeployerRow) => ({
-  id: row.id,
-  workspaceId: row.workspaceId,
-  name: row.name,
-  url: row.url,
-  builderUrl: row.builderUrl,
-  apiKeyEnding: row.apiKey.slice(-4),
-  createdAt: row.createdAt,
-});
-
-export type PublicDeployer = ReturnType<typeof toPublicDeployer>;
-
-const clientFor = (row: DeployerRow) =>
-  createDeployServiceClient({ url: row.url, apiKey: row.apiKey });
-
-const assertUser = (context: AppContext) => {
-  if (context.authorization.type !== "user") {
-    throw new AuthorizationError("Only signed-in users can manage deployers");
+export const loadDeployerSettings = async (context: AppContext) => {
+  await assertAppAdmin(context);
+  const found = await loadDeployer(context.db);
+  if (found === undefined) {
+    return { source: "none" as const };
   }
-  return context.authorization.userId;
+  return {
+    source: found.source,
+    url: found.url,
+    builderUrl: found.builderUrl,
+    apiKeyEnding: found.apiKey.slice(-4),
+  };
 };
 
-/** Owners and administrators of the workspace. */
-const isWorkspaceAdmin = async (
-  db: Db,
-  workspaceId: string,
-  userId: string
-) => {
-  const owned = maybeOne(
-    await db
-      .select({ id: workspace.id })
-      .from(workspace)
-      .where(
-        and(
-          eq(workspace.id, workspaceId),
-          eq(workspace.userId, userId),
-          eq(workspace.isDeleted, false)
-        )
-      )
-  );
-  if (owned !== null) {
-    return true;
-  }
-  const member = maybeOne(
-    await db
-      .select({ relation: workspaceMember.relation })
-      .from(workspaceMember)
-      .innerJoin(workspace, eq(workspace.id, workspaceMember.workspaceId))
-      .where(
-        and(
-          eq(workspaceMember.workspaceId, workspaceId),
-          eq(workspaceMember.userId, userId),
-          isNull(workspaceMember.removedAt),
-          eq(workspace.isDeleted, false)
-        )
-      )
-  );
-  return member?.relation === "administrators";
-};
+export type DeployerSettings = Awaited<ReturnType<typeof loadDeployerSettings>>;
 
-const assertWorkspaceAdmin = async (
-  workspaceId: string,
-  context: AppContext
-) => {
-  const userId = assertUser(context);
-  if ((await isWorkspaceAdmin(context.db, workspaceId, userId)) === false) {
-    throw new AuthorizationError(
-      "Only the workspace's owner and admins can manage its deployers"
+const assertNotFromEnv = () => {
+  if (env.DEPLOYER_URL !== undefined) {
+    throw new Error(
+      "The deployer is set by the builder's environment (DEPLOYER_URL), so it can't be changed here"
     );
   }
 };
 
-const loadDeployer = async (deployerId: string, db: Db) => {
-  const row = maybeOne(
-    await db.select().from(deployer).where(eq(deployer.id, deployerId))
-  );
-  if (row === null) {
-    throw new Error("Deployer not found");
+export const saveDeployer = async (
+  input: z.infer<typeof deployerInput>,
+  context: AppContext
+) => {
+  await assertAppAdmin(context);
+  assertNotFromEnv();
+  const current = maybeOne(await context.db.select().from(deployer));
+  const apiKey = input.apiKey || current?.apiKey;
+  if (apiKey === undefined) {
+    throw new Error("Enter the deployer's API key");
   }
-  return row;
+  const values = {
+    url: input.url,
+    apiKey,
+    builderUrl: input.builderUrl || null,
+  };
+  if (current === null) {
+    await context.db.insert(deployer).values(values);
+  } else {
+    await context.db
+      .update(deployer)
+      .set(values)
+      .where(eq(deployer.id, current.id));
+  }
+  return await loadDeployerSettings(context);
 };
 
-/** A project's workspace; projects from before workspaces use the owner's default one. */
-const loadProjectWorkspaceId = async (projectId: string, db: Db) => {
-  const row = maybeOne(
-    await db
-      .select({ workspaceId: project.workspaceId, userId: project.userId })
-      .from(project)
-      .where(eq(project.id, projectId))
-  );
-  if (row === null) {
-    throw new Error("Project not found");
-  }
-  if (row.workspaceId !== null || row.userId === null) {
-    return row.workspaceId;
-  }
-  const fallback = maybeOne(
-    await db
-      .select({ id: workspace.id })
-      .from(workspace)
-      .where(
-        and(
-          eq(workspace.userId, row.userId),
-          eq(workspace.isDefault, true),
-          eq(workspace.isDeleted, false)
-        )
-      )
-  );
-  return fallback?.id ?? null;
+/** Projects keep their targets for when a deployer is set up again. */
+export const removeDeployer = async (context: AppContext) => {
+  await assertAppAdmin(context);
+  assertNotFromEnv();
+  await context.db.delete(deployer);
 };
+
+/** Calls the deployer: its hosts when it answers, its error when it doesn't. */
+export const checkDeployer = async (context: AppContext) => {
+  await assertAppAdmin(context);
+  return await clientFor(await requireDeployer(context.db)).hosts();
+};
+
+// Project admins: where a project deploys.
 
 const assertProjectAdmin = async (projectId: string, context: AppContext) => {
   const allowed = await authorizeProject.hasProjectPermit(
@@ -183,102 +198,7 @@ const assertProjectAdmin = async (projectId: string, context: AppContext) => {
   }
 };
 
-/** The deployer, if it belongs to the project's workspace. */
-const loadProjectDeployer = async (
-  projectId: string,
-  deployerId: string,
-  db: Db
-) => {
-  const row = await loadDeployer(deployerId, db);
-  if (row.workspaceId !== (await loadProjectWorkspaceId(projectId, db))) {
-    throw new Error("That deployer belongs to another workspace");
-  }
-  return row;
-};
-
-// Workspace admins: the deployers a workspace's projects can use.
-
-export const listDeployers = async (
-  { workspaceId }: { workspaceId: string },
-  context: AppContext
-) => {
-  await assertWorkspaceAdmin(workspaceId, context);
-  const rows = await context.db
-    .select()
-    .from(deployer)
-    .where(eq(deployer.workspaceId, workspaceId))
-    .orderBy(deployer.createdAt);
-  return rows.map(toPublicDeployer);
-};
-
-export const createDeployer = async (
-  input: z.infer<typeof deployerInput> & {
-    workspaceId: string;
-    apiKey: string;
-  },
-  context: AppContext
-) => {
-  await assertWorkspaceAdmin(input.workspaceId, context);
-  const [row] = await context.db
-    .insert(deployer)
-    .values({
-      workspaceId: input.workspaceId,
-      name: input.name,
-      url: input.url,
-      apiKey: input.apiKey,
-      builderUrl: input.builderUrl || null,
-    })
-    .returning();
-  return toPublicDeployer(row);
-};
-
-export const updateDeployer = async (
-  input: z.infer<typeof deployerInput> & {
-    deployerId: string;
-    /** Empty or missing keeps the current key. */
-    apiKey?: string;
-  },
-  context: AppContext
-) => {
-  const current = await loadDeployer(input.deployerId, context.db);
-  await assertWorkspaceAdmin(current.workspaceId, context);
-  const [row] = await context.db
-    .update(deployer)
-    .set({
-      name: input.name,
-      url: input.url,
-      builderUrl: input.builderUrl || null,
-      ...(input.apiKey ? { apiKey: input.apiKey } : {}),
-    })
-    .where(eq(deployer.id, input.deployerId))
-    .returning();
-  return toPublicDeployer(row);
-};
-
-/** Also removes the deploy targets that use it. */
-export const removeDeployer = async (
-  { deployerId }: { deployerId: string },
-  context: AppContext
-) => {
-  const current = await loadDeployer(deployerId, context.db);
-  await assertWorkspaceAdmin(current.workspaceId, context);
-  await context.db.delete(deployer).where(eq(deployer.id, deployerId));
-};
-
-/** Calls the deployer: its hosts when it answers, its error when it doesn't. */
-export const checkDeployer = async (
-  { deployerId }: { deployerId: string },
-  context: AppContext
-) => {
-  const row = await loadDeployer(deployerId, context.db);
-  await assertWorkspaceAdmin(row.workspaceId, context);
-  return await clientFor(row).hosts();
-};
-
-// Project admins: where a project deploys.
-
 export const projectTargetInput = deployTarget.extend({
-  deployerId: z.string(),
   /** New credentials; null removes them, undefined keeps the saved ones. */
   credentials: deployCredentials.nullable().optional(),
 });
@@ -308,19 +228,9 @@ export const loadProjectDeploySettings = async (
   context: AppContext
 ) => {
   await assertProjectAdmin(projectId, context);
-  const workspaceId = await loadProjectWorkspaceId(projectId, context.db);
-  const deployers =
-    workspaceId === null
-      ? []
-      : await context.db
-          .select({ id: deployer.id, name: deployer.name })
-          .from(deployer)
-          .where(eq(deployer.workspaceId, workspaceId))
-          .orderBy(deployer.createdAt);
   const target = maybeOne(
     await context.db
       .select({
-        deployerId: projectDeployTarget.deployerId,
         host: projectDeployTarget.host,
         config: projectDeployTarget.config,
         credentials: projectDeployTarget.credentials,
@@ -328,17 +238,11 @@ export const loadProjectDeploySettings = async (
       .from(projectDeployTarget)
       .where(eq(projectDeployTarget.projectId, projectId))
   );
-  const userId =
-    context.authorization.type === "user"
-      ? context.authorization.userId
-      : undefined;
   return {
-    workspaceId,
-    canManageDeployers:
-      workspaceId !== null &&
-      userId !== undefined &&
-      (await isWorkspaceAdmin(context.db, workspaceId, userId)),
-    deployers,
+    hasDeployer: (await loadDeployer(context.db)) !== undefined,
+    canManageDeployer:
+      context.authorization.type === "user" &&
+      (await isAppAdmin(context.db, context.authorization.userId)),
     target:
       target === null
         ? null
@@ -351,12 +255,11 @@ export const loadProjectDeploySettings = async (
 };
 
 export const listDeployerHosts = async (
-  { projectId, deployerId }: { projectId: string; deployerId: string },
+  { projectId }: { projectId: string },
   context: AppContext
 ) => {
   await assertProjectAdmin(projectId, context);
-  const row = await loadProjectDeployer(projectId, deployerId, context.db);
-  return await clientFor(row).hosts();
+  return await clientFor(await requireDeployer(context.db)).hosts();
 };
 
 /**
@@ -378,11 +281,7 @@ export const setProjectDeployTarget = async (
       .where(eq(projectDeployTarget.projectId, projectId));
     return { success: true };
   }
-  const row = await loadProjectDeployer(
-    projectId,
-    target.deployerId,
-    context.db
-  );
+  const found = await requireDeployer(context.db);
   const previous = maybeOne(
     await context.db
       .select()
@@ -390,7 +289,6 @@ export const setProjectDeployTarget = async (
       .where(eq(projectDeployTarget.projectId, projectId))
   );
   const values = {
-    deployerId: target.deployerId,
     host: target.host,
     config: target.config as Json,
     // Undefined keeps the saved credentials.
@@ -410,7 +308,7 @@ export const setProjectDeployTarget = async (
     .insert(projectDeployTarget)
     .values({ projectId, ...values })
     .onConflictDoUpdate({ target: projectDeployTarget.projectId, set: values });
-  const checked = await clientFor(row).validate({
+  const checked = await clientFor(found).validate({
     projectId,
     target: { host: target.host, config: target.config },
   });
@@ -432,31 +330,24 @@ export const setProjectDeployTarget = async (
 // Publish.
 
 const loadPublishTarget = async (projectId: string, db: Db) => {
+  const found = await loadDeployer(db);
+  if (found === undefined) {
+    return { success: false as const, error: NO_DEPLOYER };
+  }
   const row = maybeOne(
     await db
-      .select({ target: projectDeployTarget, deployer })
+      .select()
       .from(projectDeployTarget)
-      .innerJoin(deployer, eq(deployer.id, projectDeployTarget.deployerId))
       .where(eq(projectDeployTarget.projectId, projectId))
   );
   if (row === null) {
     return { success: false as const, error: NO_TARGET };
   }
-  // The project may have moved to another workspace since its target was chosen.
-  if (
-    row.deployer.workspaceId !== (await loadProjectWorkspaceId(projectId, db))
-  ) {
-    return {
-      success: false as const,
-      error:
-        "This project's deployer belongs to another workspace. Choose a new one in Project settings → Deploy.",
-    };
-  }
   const target: DeployTarget = {
-    host: row.target.host,
-    config: (row.target.config ?? {}) as Record<string, unknown>,
+    host: row.host,
+    config: (row.config ?? {}) as Record<string, unknown>,
   };
-  return { success: true as const, deployer: row.deployer, target };
+  return { success: true as const, deployer: found, target };
 };
 
 /**
@@ -505,7 +396,10 @@ export const createDeploymentClient = ({
           projectId,
           target: resolved.target,
         })
-      : { success: true };
+      : // Without a target nothing was deployed; without a deployer it can't be removed.
+        resolved.error === NO_TARGET
+        ? { success: true }
+        : resolved;
     if (result.success) {
       await db
         .update(project)

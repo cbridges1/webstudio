@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { deployer, projectDeployTarget } from "@webstudio-is/db";
+import { projectDeployTarget } from "@webstudio-is/db";
 import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import {
   credentialsKey,
@@ -19,13 +19,8 @@ const seedTarget = async (credentials: string | null) => {
   const workspaceId = "00000000-0000-4000-8000-000000000001";
   await seed.workspace(db, { id: workspaceId, userId: "owner" });
   await seed.project(db, { id: "project-1", userId: "owner", workspaceId });
-  const [row] = await db
-    .insert(deployer)
-    .values({ workspaceId, name: "Main", url: "http://d", apiKey: "x" })
-    .returning();
   await db.insert(projectDeployTarget).values({
     projectId: "project-1",
-    deployerId: row.id,
     host: "firebase",
     config: { site: "s" },
     credentials,

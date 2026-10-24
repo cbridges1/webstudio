@@ -3,11 +3,11 @@
 The deploy service for our self-hosted Webstudio (selfhost). It makes the builder's **Publish**
 button work: it builds a published build as a static site and uploads it to a host.
 
-It knows nothing about any builder. It has no database, no builder address and no builder
-secret. Workspace admins add it in the builder (dashboard: workspace menu → **Deployers**, with
-its URL and API key), and each project picks a deployer and a target in **Project settings →
-Deploy**. One deploy service can serve several builders and workspaces; one workspace can use
-several deploy services.
+It knows nothing about any builder: it has no builder address and no builder secret. The
+builder is pointed at it (`DEPLOYER_URL` and `DEPLOYER_API_KEY` in the builder's environment, or
+an app admin's dashboard profile menu → **Deployer**), and each project picks a target on it in
+**Project settings → Deploy**. One deploy service can serve several builders; each builder uses
+one deploy service.
 
 It's a separate process from the builder, since site builds run project code (HTML embeds). It
 lives in this workspace only to build sites with this checkout's CLI and SSG packages, so it
@@ -86,7 +86,7 @@ To add a host, write an adapter (`src/adapters/types.ts`: `label`, `configSchema
 | `KEEP_FAILED_WORKDIRS`   | `false`             | Keep a failed job's directory for debugging               |
 
 The service must reach each builder at the `origin` it sends. When it can't (a private network,
-containers), set the deployer's **Builder address** in the builder's Deployers dialog.
+containers), set the builder's `DEPLOYER_BUILDER_URL` (or **Builder address** in its Deployer dialog).
 
 ## Run
 

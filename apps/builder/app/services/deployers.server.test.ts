@@ -5,24 +5,20 @@ vi.hoisted(() => {
   process.env.DEPLOY_CREDENTIALS_KEY = "test-deploy-credentials-key-0123456789";
 });
 
-import {
-  build,
-  deployer,
-  eq,
-  project,
-  projectDeployTarget,
-} from "@webstudio-is/db";
+import { build, eq, project, projectDeployTarget } from "@webstudio-is/db";
 import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import {
-  createDeployer,
+  checkDeployer,
   createDeploymentClient,
-  listDeployers,
+  loadDeployerSettings,
   loadProjectDeploySettings,
   recordDeployReport,
   removeDeployer,
+  saveDeployer,
   setProjectDeployTarget,
 } from "./deployers.server";
+import env from "~/env/env.server";
 import { createPublishToken, verifyPublishToken } from "./publish-token.server";
 import {
   credentialsKey,
@@ -58,6 +54,9 @@ const stubDeployer = (
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  env.DEPLOYER_URL = undefined;
+  env.DEPLOYER_API_KEY = undefined;
+  env.DEPLOYER_BUILDER_URL = undefined;
 });
 
 const target = {
@@ -65,65 +64,98 @@ const target = {
   config: { site: "p1", url: "https://p1.example.com/" },
 };
 
-/** Owner, admin member, viewer member, a project in the workspace and a deployer. */
+/** An app admin, a project owner and their project, and the deployer. */
 const setup = async () => {
   const workspaceId = "00000000-0000-4000-8000-000000000001";
+  await seed.user(db, { id: "admin", role: "admin" });
   await seed.workspace(db, { id: workspaceId, userId: "owner" });
-  await seed.workspaceMember(db, {
-    workspaceId,
-    userId: "admin",
-    relation: "administrators",
-  });
-  await seed.workspaceMember(db, {
-    workspaceId,
-    userId: "viewer",
-    relation: "viewers",
-  });
   await seed.project(db, { id: "project-1", userId: "owner", workspaceId });
-  const created = await createDeployer(
-    {
-      workspaceId,
-      name: "Main",
-      url: "http://deploy.test/",
-      apiKey: "secret-api-key-1234",
-    },
+  await saveDeployer(
+    { url: "http://deploy.test/", apiKey: "secret-api-key-1234" },
     contextFor("admin")
   );
-  return { workspaceId, deployerId: created.id };
 };
 
-describe("workspace deployers", () => {
-  test("admins add and list them without seeing the key", async () => {
-    const { workspaceId } = await setup();
-    expect(await listDeployers({ workspaceId }, contextFor("owner"))).toEqual([
-      expect.objectContaining({
-        name: "Main",
-        url: "http://deploy.test/",
-        apiKeyEnding: "1234",
-      }),
-    ]);
-    const [listed] = await listDeployers({ workspaceId }, contextFor("admin"));
-    expect(listed).not.toHaveProperty("apiKey");
+describe("deployer", () => {
+  test("admins set it without seeing the key", async () => {
+    await setup();
+    expect(await loadDeployerSettings(contextFor("admin"))).toEqual({
+      source: "app",
+      url: "http://deploy.test/",
+      builderUrl: null,
+      apiKeyEnding: "1234",
+    });
+    // A save without a key keeps it.
+    await saveDeployer(
+      { url: "http://deploy2.test/", builderUrl: "http://builder:3000" },
+      contextFor("admin")
+    );
+    expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
+      url: "http://deploy2.test/",
+      builderUrl: "http://builder:3000",
+      apiKeyEnding: "1234",
+    });
   });
 
-  test("other members can't manage them", async () => {
-    const { workspaceId, deployerId } = await setup();
+  test("only admins manage it", async () => {
+    await setup();
+    await expect(loadDeployerSettings(contextFor("owner"))).rejects.toThrow(
+      "Only admins"
+    );
     await expect(
-      listDeployers({ workspaceId }, contextFor("viewer"))
-    ).rejects.toThrow("Only the workspace's owner and admins");
+      saveDeployer({ url: "http://evil.test/" }, contextFor("owner"))
+    ).rejects.toThrow("Only admins");
+    await expect(removeDeployer(contextFor("owner"))).rejects.toThrow(
+      "Only admins"
+    );
+  });
+
+  test("admins have Better Auth's admin role among their roles", async () => {
+    await seed.user(db, { id: "both", role: "user,admin" });
+    await seed.user(db, { id: "superadmin", role: "superadmin" });
+    expect(await loadDeployerSettings(contextFor("both"))).toEqual({
+      source: "none",
+    });
     await expect(
-      removeDeployer({ deployerId }, contextFor("viewer"))
-    ).rejects.toThrow("Only the workspace's owner and admins");
+      loadDeployerSettings(contextFor("superadmin"))
+    ).rejects.toThrow("Only admins");
+  });
+
+  test("the environment's replaces the saved one and can't be changed", async () => {
+    await setup();
+    env.DEPLOYER_URL = "http://env-deploy.test/";
+    env.DEPLOYER_API_KEY = "env-api-key-9876";
+    expect(await loadDeployerSettings(contextFor("admin"))).toEqual({
+      source: "env",
+      url: "http://env-deploy.test/",
+      builderUrl: null,
+      apiKeyEnding: "9876",
+    });
+    await expect(
+      saveDeployer({ url: "http://x.test/" }, contextFor("admin"))
+    ).rejects.toThrow("set by the builder's environment");
+    await expect(removeDeployer(contextFor("admin"))).rejects.toThrow(
+      "set by the builder's environment"
+    );
+    const calls = stubDeployer(() => ({ success: true, data: { hosts: [] } }));
+    await checkDeployer(contextFor("admin"));
+    expect(calls).toEqual([
+      {
+        url: "http://env-deploy.test/v1/hosts",
+        auth: "Bearer env-api-key-9876",
+        body: undefined,
+      },
+    ]);
   });
 });
 
 describe("project deploy target", () => {
   test("is checked with the deployer before it's saved", async () => {
-    const { deployerId } = await setup();
+    await setup();
     const calls = stubDeployer(() => ({ success: false, error: "bad site" }));
     expect(
       await setProjectDeployTarget(
-        { projectId: "project-1", target: { deployerId, ...target } },
+        { projectId: "project-1", target },
         contextFor("owner")
       )
     ).toEqual({ success: false, error: "bad site" });
@@ -138,11 +170,11 @@ describe("project deploy target", () => {
   });
 
   test("is saved and loaded", async () => {
-    const { deployerId, workspaceId } = await setup();
+    await setup();
     stubDeployer();
     expect(
       await setProjectDeployTarget(
-        { projectId: "project-1", target: { deployerId, ...target } },
+        { projectId: "project-1", target },
         contextFor("owner")
       )
     ).toEqual({ success: true });
@@ -152,15 +184,14 @@ describe("project deploy target", () => {
         contextFor("owner")
       )
     ).toEqual({
-      workspaceId,
-      canManageDeployers: true,
-      deployers: [{ id: deployerId, name: "Main" }],
-      target: { deployerId, ...target, credentials: { status: "none" } },
+      hasDeployer: true,
+      canManageDeployer: false,
+      target: { ...target, credentials: { status: "none" } },
     });
   });
 
   test("keeps credentials encrypted for the deployer to read, never sending them", async () => {
-    const { deployerId } = await setup();
+    await setup();
     let accept = true;
     const calls = stubDeployer(() =>
       accept ? { success: true } : { success: false, error: "bad key" }
@@ -174,7 +205,7 @@ describe("project deploy target", () => {
       setProjectDeployTarget(
         {
           projectId: "project-1",
-          target: { deployerId, ...firebase, credentials },
+          target: { ...firebase, credentials },
         },
         contextFor("owner")
       );
@@ -252,13 +283,12 @@ describe("project deploy target", () => {
   });
 
   test("puts back no target when the first check fails", async () => {
-    const { deployerId } = await setup();
+    await setup();
     stubDeployer(() => ({ success: false, error: "no" }));
     await setProjectDeployTarget(
       {
         projectId: "project-1",
         target: {
-          deployerId,
           host: "firebase",
           config: {},
           credentials: { a: 1 },
@@ -269,26 +299,27 @@ describe("project deploy target", () => {
     expect(await db.select().from(projectDeployTarget)).toEqual([]);
   });
 
-  test("goes away with its deployer", async () => {
-    const { deployerId } = await setup();
+  test("stays when the deployer is removed", async () => {
+    await setup();
     stubDeployer();
     await setProjectDeployTarget(
-      { projectId: "project-1", target: { deployerId, ...target } },
+      { projectId: "project-1", target },
       contextFor("owner")
     );
-    await removeDeployer({ deployerId }, contextFor("owner"));
-    expect(await db.select().from(projectDeployTarget)).toEqual([]);
-  });
-
-  test("can't use another workspace's deployer", async () => {
-    const { deployerId } = await setup();
-    await seed.project(db, { id: "project-2", userId: "owner" });
-    await expect(
-      setProjectDeployTarget(
-        { projectId: "project-2", target: { deployerId, ...target } },
+    await removeDeployer(contextFor("admin"));
+    expect(await db.select().from(projectDeployTarget)).toHaveLength(1);
+    expect(
+      await loadProjectDeploySettings(
+        { projectId: "project-1" },
         contextFor("owner")
       )
-    ).rejects.toThrow("That deployer belongs to another workspace");
+    ).toMatchObject({ hasDeployer: false });
+    await expect(
+      setProjectDeployTarget(
+        { projectId: "project-1", target },
+        contextFor("owner")
+      )
+    ).rejects.toThrow("No deployer is set up");
   });
 });
 
@@ -317,11 +348,11 @@ describe("publish", () => {
     )[0].error;
 
   test("sends the build, a scoped token and the target", async () => {
-    const { deployerId } = await setup();
+    await setup();
     await seedBuild();
     const calls = stubDeployer();
     await setProjectDeployTarget(
-      { projectId: "project-1", target: { deployerId, ...target } },
+      { projectId: "project-1", target },
       contextFor("owner")
     );
     const client = createDeploymentClient({
@@ -356,15 +387,15 @@ describe("publish", () => {
   });
 
   test("uses the deployer's builder address when it has one", async () => {
-    const { deployerId } = await setup();
-    await db
-      .update(deployer)
-      .set({ builderUrl: "http://builder:3000" })
-      .where(eq(deployer.id, deployerId));
+    await setup();
+    await saveDeployer(
+      { url: "http://deploy.test/", builderUrl: "http://builder:3000" },
+      contextFor("admin")
+    );
     await seedBuild();
     const calls = stubDeployer();
     await setProjectDeployTarget(
-      { projectId: "project-1", target: { deployerId, ...target } },
+      { projectId: "project-1", target },
       contextFor("owner")
     );
     await createDeploymentClient({ db, builderOrigin: "http://x" }).publish({
@@ -375,6 +406,24 @@ describe("publish", () => {
     expect(calls.at(-1)!.body).toMatchObject({
       builder: { origin: "http://builder:3000" },
     });
+  });
+
+  test("fails the build when no deployer is set up", async () => {
+    await seed.project(db, { id: "project-1", userId: "owner" });
+    await seedBuild();
+    const result = await createDeploymentClient({
+      db,
+      builderOrigin: "http://x",
+    }).publish({
+      projectId: "project-1",
+      buildId: "build-1",
+      label: "Project",
+    });
+    expect(result).toEqual({
+      success: false,
+      error: expect.stringContaining("No deployer is set up"),
+    });
+    expect(await buildError()).toContain("No deployer is set up");
   });
 
   test("fails the build when the project has no target", async () => {
@@ -456,10 +505,10 @@ describe("publish", () => {
   });
 
   test("unpublish removes the site and clears the published link", async () => {
-    const { deployerId } = await setup();
+    await setup();
     const calls = stubDeployer();
     await setProjectDeployTarget(
-      { projectId: "project-1", target: { deployerId, ...target } },
+      { projectId: "project-1", target },
       contextFor("owner")
     );
     await db
