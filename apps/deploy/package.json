@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Implements Webstudio's deployment/domain tRPC service: builds published projects as static sites and deploys each to its own host.",
+  "description": "selfhost: the deploy service. Builds published projects as static sites and deploys each to its own host (@webstudio-is/deploy-protocol).",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "start": "tsx src/main.ts",
@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@webstudio-is/db": "workspace:*",
     "@webstudio-is/deploy-protocol": "workspace:*",
     "tsx": "^4.19.3",
     "zod": "^4.4.3"

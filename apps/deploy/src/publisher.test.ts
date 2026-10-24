@@ -1,6 +1,7 @@
 import {
   mkdtemp,
   mkdir,
+  readdir,
   readFile,
   rm,
   stat,
@@ -9,13 +10,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { z } from "zod";
 import type {
   DeployReport,
   PublishRequest,
 } from "@webstudio-is/deploy-protocol";
 import { createAdapters } from "./adapters";
 import { createPublisher, type PublisherOptions } from "./publisher";
-import { createBuildEnv } from "./site-build";
+import { createBuildEnv } from "@webstudio-is/deploy-protocol/site-build";
 
 let root: string;
 let sitesDir: string;
@@ -55,9 +57,10 @@ const setup = (overrides: Partial<PublisherOptions> = {}) => {
   const publisher = createPublisher({
     adapters: createAdapters({ sitesDir }),
     webstudioDir: "/unused",
-    credentialsDir: join(root, "credentials"),
+    loadCredentials: async () => savedCredentials,
     jobsDir: join(root, "jobs"),
     logsDir: join(root, "logs"),
+    queueDir: join(root, "queue"),
     jobTimeoutMs: 60_000,
     keepFailedWorkdirs: false,
     fetch: builder.fetch,
@@ -82,7 +85,11 @@ const setup = (overrides: Partial<PublisherOptions> = {}) => {
   return { publisher, calls, logs, reports: builder.reports };
 };
 
+/** What the builder's database holds for the project (stands in for credentials.ts). */
+let savedCredentials: Record<string, unknown> | undefined;
+
 const job = (overrides: Partial<PublishRequest> = {}): PublishRequest => ({
+  projectId: "project-1",
   buildId: "build-1",
   builder: { origin: "https://builder.example.com", token: "publish-token" },
   target: {
@@ -150,23 +157,35 @@ describe("publisher", () => {
     expect((await publisher.publish(job())).success).toBe(false);
   });
 
-  test("checks that credentials exist and fit the host", async () => {
+  test("checks the saved credentials fit the host, without quoting them", async () => {
     const { publisher } = setup();
-    const target = {
-      host: "firebase",
-      config: { site: "my-site" },
-      credentials: "main",
+    const request = {
+      projectId: "project-1",
+      target: { host: "firebase", config: { site: "my-site" } },
     };
-    expect(await publisher.validate(target)).toEqual({
+    savedCredentials = undefined;
+    expect(await publisher.validate(request)).toEqual({
       success: false,
-      error: 'Credentials "main" not found',
+      error:
+        "Firebase Hosting needs credentials: add them in Project settings → Deploy",
     });
-    await mkdir(join(root, "credentials"));
-    await writeFile(join(root, "credentials", "main.json"), '{"secret":"x"}');
-    expect(await publisher.validate(target)).toEqual({
+    savedCredentials = {
+      client_email: "not-an-email-secret",
+      private_key: "",
+    };
+    const result = await publisher.validate(request);
+    expect(result).toEqual({
       success: false,
-      error: 'Credentials "main" are not valid for Firebase Hosting',
+      error:
+        "The credentials aren't valid for Firebase Hosting (check client_email, private_key)",
     });
+    expect(JSON.stringify(result)).not.toContain("not-an-email-secret");
+    savedCredentials = {
+      client_email: "deploy@project.iam.gserviceaccount.com",
+      private_key: "-----BEGIN PRIVATE KEY-----",
+    };
+    expect(await publisher.validate(request)).toEqual({ success: true });
+    savedCredentials = undefined;
   });
 
   test("reports a failed site build", async () => {
@@ -225,21 +244,114 @@ describe("publisher", () => {
     ]);
   });
 
+  test("reads the credentials only after the site build", async () => {
+    const events: string[] = [];
+    const { publisher } = setup({
+      adapters: new Map([
+        [
+          "fake",
+          {
+            id: "fake",
+            label: "Fake",
+            configSchema: z.object({}),
+            credentialsSchema: z.object({ token: z.string() }),
+            deploy: async ({
+              credentials,
+            }: {
+              credentials: { token: string };
+            }) => {
+              events.push(`deploy with ${credentials.token}`);
+              return { url: "https://fake.example.com/" };
+            },
+            remove: async () => {},
+          },
+        ],
+      ]),
+      loadCredentials: async () => {
+        events.push("credentials");
+        return { token: "t" };
+      },
+      buildSite: async ({ workDir }) => {
+        events.push("build");
+        const out = join(workDir, "dist", "client");
+        await mkdir(out, { recursive: true });
+        return out;
+      },
+    });
+    await publisher.publish(job({ target: { host: "fake", config: {} } }));
+    await publisher.idle();
+    // The check when queueing, then the build, then the deploy's own read.
+    expect(events).toEqual([
+      "credentials",
+      "build",
+      "credentials",
+      "deploy with t",
+    ]);
+  });
+
+  test("keeps queued publishes on disk and resumes them after a restart", async () => {
+    let release = () => {};
+    const blocked = new Promise<void>((done) => {
+      release = done;
+    });
+    const first = setup({
+      buildSite: async () => {
+        await blocked;
+        throw new Error("the service stopped");
+      },
+    });
+    await first.publisher.publish(job({ buildId: "build-1" }));
+    await first.publisher.publish(job({ buildId: "build-2" }));
+    expect((await readdir(join(root, "queue"))).sort()).toEqual([
+      "build-1.json",
+      "build-2.json",
+    ]);
+    const saved = await stat(join(root, "queue", "build-1.json"));
+    expect(saved.mode & 0o777).toBe(0o600);
+
+    // A new process over the same data directory, before the first finishes anything.
+    await writeFile(join(root, "queue", "junk.json"), "{");
+    const second = setup();
+    expect(await second.publisher.resume()).toBe(2);
+    await second.publisher.idle();
+    expect(second.calls.map((call) => call.buildId)).toEqual([
+      "build-1",
+      "build-2",
+    ]);
+    expect(second.reports.map((report) => report.body.status)).toEqual([
+      "PUBLISHED",
+      "PUBLISHED",
+    ]);
+    expect(await readdir(join(root, "queue"))).toEqual([]);
+    release();
+    await first.publisher.idle();
+  });
+
   test("unpublish removes the site", async () => {
     const { publisher } = setup();
     await publisher.publish(job());
     await publisher.idle();
-    expect(await publisher.unpublish(job().target)).toEqual({ success: true });
+    expect(
+      await publisher.unpublish({
+        projectId: "project-1",
+        target: job().target,
+      })
+    ).toEqual({ success: true });
     await expect(stat(join(sitesDir, "p1"))).rejects.toThrow();
   });
 
-  test("lists hosts with their settings and usable credentials", async () => {
+  test("lists hosts with their settings and credentials schemas", async () => {
     const { publisher } = setup();
-    const hosts = await publisher.hosts();
-    expect(hosts.map((host) => [host.id, host.credentials])).toEqual([
-      ["directory", null],
-      ["firebase", []],
+    const hosts = publisher.hosts();
+    expect(hosts.map((host) => [host.id, host.credentials === null])).toEqual([
+      ["directory", true],
+      ["firebase", false],
     ]);
+    expect(hosts[1].credentials).toMatchObject({
+      type: "object",
+      required: ["client_email", "private_key"],
+      description: expect.stringContaining("service account"),
+    });
     expect(hosts[0].config).toMatchObject({
       type: "object",
       required: ["site", "url"],

@@ -49,6 +49,8 @@ export type LatestBuildVirtual = {
   createdAt: string;
   publishStatus: Database["public"]["Enums"]["PublishStatus"];
   updatedAt: string;
+  /** selfhost: the deployer's message when the publish failed. */
+  publishError?: string | null;
 };
 
 /**

@@ -1,7 +1,7 @@
 // selfhost: one step to connect an AI agent (Claude Code, Codex, Cursor, VS Code) to this
 // project. It creates (or reuses) the user's agent link and shows one command that runs this
-// builder's own CLI (served at /cli/webstudio.json), links a new folder and registers the
-// Webstudio MCP server there.
+// builder's own CLI (served at /cli/webstudio.json), links the folder it runs in and registers
+// the Webstudio MCP server there.
 import { useState } from "react";
 import {
   Box,
@@ -24,23 +24,19 @@ import { CopyToClipboard } from "../copy-to-clipboard";
 const clients = {
   claude: {
     label: "Claude Code",
-    next: (folder: string) =>
-      `Then run \`cd ${folder} && claude\`, approve the "webstudio" server and ask Claude to use Webstudio MCP.`,
+    next: `Then run \`claude\` in that folder, approve the "webstudio" server and ask Claude to use Webstudio MCP.`,
   },
   codex: {
     label: "Codex",
-    next: (folder: string) =>
-      `Then restart Codex, open it in ${folder} and ask it to use Webstudio MCP.`,
+    next: "Then restart Codex, open it in that folder and ask it to use Webstudio MCP.",
   },
   cursor: {
     label: "Cursor",
-    next: (folder: string) =>
-      `Then open the ${folder} folder in Cursor and enable the webstudio server in MCP settings.`,
+    next: "Then open that folder in Cursor and enable the webstudio server in MCP settings.",
   },
   vscode: {
     label: "VS Code",
-    next: (folder: string) =>
-      `Then open the ${folder} folder in VS Code and start the webstudio server from the MCP view.`,
+    next: "Then open that folder in VS Code and start the webstudio server from the MCP view.",
   },
 } as const;
 
@@ -48,7 +44,7 @@ type Client = keyof typeof clients;
 
 const clientNames = Object.keys(clients) as Client[];
 
-type Connection = { link: string; folder: string; cliPackage: string };
+type Connection = { link: string; cliPackage: string };
 
 const loadConnection = async (projectId: string): Promise<Connection> => {
   const agent = await nativeClient.authorizationToken.agentToken.mutate({
@@ -75,7 +71,6 @@ const loadConnection = async (projectId: string): Promise<Connection> => {
       authToken: agent.token,
       mode: "design",
     }),
-    folder: agent.folder,
     cliPackage: manifest.package,
   };
 };
@@ -122,7 +117,7 @@ export const ConnectAgent = ({
     );
   }
 
-  const command = `npx -y ${connection.cliPackage} connect ${client} --dir ${connection.folder} --link "${connection.link}"`;
+  const command = `npx -y ${connection.cliPackage} connect ${client} --link "${connection.link}"`;
 
   return (
     <PanelContent as={Grid} gap={2} css={{ width: theme.spacing[33] }}>
@@ -137,7 +132,9 @@ export const ConnectAgent = ({
           />
         </Box>
       </Flex>
-      <Text>Run this in a terminal (Node.js 22 or newer):</Text>
+      <Text>
+        Run this in the folder to connect, in a terminal (Node.js 22 or newer):
+      </Text>
       <Flex gap={1} align="start">
         <TextArea
           value={command}
@@ -156,7 +153,7 @@ export const ConnectAgent = ({
           </IconButton>
         </CopyToClipboard>
       </Flex>
-      <Text>{clients[client].next(connection.folder)}</Text>
+      <Text>{clients[client].next}</Text>
       <Text color="subtle">
         The command contains your agent link, which can edit this project: treat
         it like a password. Revoke it by deleting "AI agent" from the links

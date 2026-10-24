@@ -1,23 +1,28 @@
 import { createWriteStream } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   deployReportPath,
+  publishRequest,
   type DeployReport,
   type DeployResult,
-  type DeployTarget,
   type PublishRequest,
+  type TargetRequest,
 } from "@webstudio-is/deploy-protocol";
 import type { AnyHostAdapter, Log } from "./adapters/types";
-import { buildStaticSite } from "./site-build";
+import { buildStaticSite } from "@webstudio-is/deploy-protocol/site-build";
 import { describeHosts, resolveTarget, TargetError } from "./targets";
+import type { LoadCredentials } from "./credentials";
 
 export type PublisherOptions = {
   adapters: Map<string, AnyHostAdapter>;
   webstudioDir: string;
-  credentialsDir: string;
+  /** Reads a project's saved credentials from the builder's database. */
+  loadCredentials: LoadCredentials;
   jobsDir: string;
   logsDir: string;
+  /** Queued publishes, one file each, so a restart picks them up again (resume). */
+  queueDir: string;
   jobTimeoutMs: number;
   keepFailedWorkdirs: boolean;
   buildSite?: typeof buildStaticSite;
@@ -45,17 +50,18 @@ export const createPublisher = (options: PublisherOptions) => {
   let chain = Promise.resolve();
   let running: string | undefined;
 
-  const resolve = (target: DeployTarget) =>
+  const resolve = ({ projectId, target }: TargetRequest) =>
     resolveTarget({
+      projectId,
       target,
-      credentialsDir: options.credentialsDir,
       adapters,
+      loadCredentials: options.loadCredentials,
     });
 
   /** Validation problems go back to the caller; anything else is a bug. */
-  const check = async (target: DeployTarget): Promise<DeployResult> => {
+  const check = async (request: TargetRequest): Promise<DeployResult> => {
     try {
-      await resolve(target);
+      await resolve(request);
       return { success: true };
     } catch (error) {
       if (error instanceof TargetError) {
@@ -121,8 +127,6 @@ export const createPublisher = (options: PublisherOptions) => {
     let failed = false;
     try {
       log(`Publishing ${job.label ?? "build"} (build ${job.buildId})`);
-      // Again: the credentials may have changed while the job waited.
-      const { adapter, config, credentials } = await resolve(job.target);
       await rm(workDir, { recursive: true, force: true });
       await mkdir(options.jobsDir, { recursive: true });
       const buildDir = await buildSite({
@@ -134,6 +138,9 @@ export const createPublisher = (options: PublisherOptions) => {
         log,
         signal: controller.signal,
       });
+      // Only now, after the build has run the project's code: read the credentials (they may
+      // also have changed while the job waited).
+      const { adapter, config, credentials } = await resolve(job);
       log(`Deploying to ${adapter.label}`);
       const { url } = await adapter.deploy({
         buildDir,
@@ -154,22 +161,36 @@ export const createPublisher = (options: PublisherOptions) => {
         await rm(workDir, { recursive: true, force: true }).catch(() => {});
       }
       await new Promise<void>((done) => logFile.end(done));
+      await rm(queueFile(job.buildId), { force: true }).catch(() => {});
       queued.delete(job.buildId);
       running = undefined;
     }
   };
 
+  const queueFile = (buildId: string) =>
+    join(options.queueDir, `${encodeURIComponent(buildId)}.json`);
+
+  const enqueue = (job: PublishRequest) => {
+    queued.add(job.buildId);
+    chain = chain
+      .then(() => runJob(job))
+      .catch((error) => {
+        consoleLog(`[${job.buildId}] job crashed: ${String(error)}`);
+        queued.delete(job.buildId);
+        running = undefined;
+      });
+  };
+
   return {
     status: () => ({ running, queued: queued.size }),
 
-    hosts: () =>
-      describeHosts({ credentialsDir: options.credentialsDir, adapters }),
+    hosts: () => describeHosts(adapters),
 
     validate: check,
 
     /** Checks the target right away, so problems show in the Publish dialog, then queues. */
     async publish(job: PublishRequest): Promise<DeployResult> {
-      const result = await check(job.target);
+      const result = await check(job);
       if (result.success === false) {
         consoleLog(`[${job.buildId}] rejected: ${result.error}`);
         return result;
@@ -177,21 +198,52 @@ export const createPublisher = (options: PublisherOptions) => {
       if (queued.has(job.buildId)) {
         return { success: true };
       }
-      queued.add(job.buildId);
-      chain = chain
-        .then(() => runJob(job))
-        .catch((error) => {
-          consoleLog(`[${job.buildId}] job crashed: ${String(error)}`);
-          queued.delete(job.buildId);
-          running = undefined;
-        });
+      // Holds the builder's publish token, so only this service's user can read it.
+      await mkdir(options.queueDir, { recursive: true, mode: 0o700 });
+      await writeFile(queueFile(job.buildId), JSON.stringify(job), {
+        mode: 0o600,
+      });
+      enqueue(job);
       return { success: true };
     },
 
-    async unpublish(target: DeployTarget): Promise<DeployResult> {
+    /**
+     * Queues the publishes a previous run accepted but didn't finish (a restart or a crash).
+     * They run again from the start; one whose publish token has expired fails and the builder
+     * times it out.
+     */
+    async resume() {
+      const files = await readdir(options.queueDir).catch(() => []);
+      let resumed = 0;
+      for (const file of files
+        .filter((name) => name.endsWith(".json"))
+        .sort()) {
+        const path = join(options.queueDir, file);
+        let json: unknown;
+        try {
+          json = JSON.parse(await readFile(path, "utf8"));
+        } catch {
+          json = undefined;
+        }
+        const parsed = publishRequest.safeParse(json);
+        if (parsed.success === false) {
+          consoleLog(`Dropping unreadable queued publish ${file}`);
+          await rm(path, { force: true });
+          continue;
+        }
+        if (queued.has(parsed.data.buildId) === false) {
+          consoleLog(`[${parsed.data.buildId}] resuming a queued publish`);
+          enqueue(parsed.data);
+          resumed += 1;
+        }
+      }
+      return resumed;
+    },
+
+    async unpublish(request: TargetRequest): Promise<DeployResult> {
       const log: Log = (line) => consoleLog(`[unpublish] ${line}`);
       try {
-        const { adapter, config, credentials } = await resolve(target);
+        const { adapter, config, credentials } = await resolve(request);
         await adapter.remove({ config, credentials, log });
         return { success: true };
       } catch (error) {

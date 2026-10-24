@@ -76,6 +76,15 @@ export type DeploymentClient = {
   }): Promise<DeployResult>;
   /** Removes the project's site from its host. */
   unpublish(input: { projectId: string }): Promise<DeployResult>;
+  /**
+   * Starts building a static build's download (Export) in the builder; the build's
+   * publishStatus reports the result.
+   */
+  exportStatic(input: {
+    projectId: string;
+    buildId: string;
+    templates: string[];
+  }): Promise<DeployResult>;
 };
 
 type DeploymentContext = {

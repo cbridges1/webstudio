@@ -1,0 +1,1 @@
+ALTER TABLE "Build" ADD COLUMN "publishError" text;

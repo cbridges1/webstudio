@@ -110,7 +110,8 @@ const seedPublish = async (
 };
 
 const createPublishContext = (
-  publish = vi.fn().mockResolvedValue({ success: true })
+  publish = vi.fn().mockResolvedValue({ success: true }),
+  exportStatic = vi.fn().mockResolvedValue({ success: true })
 ) =>
   ({
     db,
@@ -119,6 +120,7 @@ const createPublishContext = (
       deployments: {
         publish,
         unpublish: vi.fn().mockResolvedValue({ success: true }),
+        exportStatic,
       },
       env: {
         BUILDER_ORIGIN: "https://apps.webstudio.is",
@@ -179,20 +181,30 @@ test("reports a deployer's refusal", async () => {
   ).rejects.toThrow("This project has no deploy target");
 });
 
-test("refuses static downloads without creating a build", async () => {
+test("builds static downloads in the builder", async () => {
   await seedProject();
   const publish = vi.fn().mockResolvedValue({ success: true });
+  const exportStatic = vi.fn().mockResolvedValue({ success: true });
 
   const result = await publishStaticProject(
-    {
-      projectId: "project-1",
-      name: "project.zip",
-      templates: [],
-    },
-    createPublishContext(publish)
+    { projectId: "project-1", templates: ["ssg-vercel"] },
+    createPublishContext(publish, exportStatic)
   );
-  expect(result).toMatchObject({ success: false });
-  expect(await productionBuilds()).toEqual([]);
+
+  const [production] = await productionBuilds();
+  expect(result).toEqual({ success: true, name: `${production.id}.zip` });
+  expect(production.publishStatus).toBe("PENDING");
+  expect(JSON.parse(production.deployment ?? "")).toEqual({
+    destination: "static",
+    name: "project.wstd.io",
+    assetsDomain: "project.wstd.io",
+    templates: ["ssg-vercel"],
+  });
+  expect(exportStatic).toHaveBeenCalledWith({
+    projectId: "project-1",
+    buildId: production.id,
+    templates: ["ssg-vercel"],
+  });
   expect(publish).not.toHaveBeenCalled();
 });
 

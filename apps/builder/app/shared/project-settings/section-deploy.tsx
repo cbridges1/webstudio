@@ -1,7 +1,8 @@
 // selfhost: where Publish sends this project: one of its workspace's deployers and a
-// target there. The deployer describes its hosts (settings as JSON Schema, and the
-// credentials it holds), so this form works for any host it offers.
-import { useEffect, useState } from "react";
+// target there. The deployer describes its hosts (settings and credentials as JSON Schema),
+// so this form works for any host it offers. Credentials are write-only: the builder keeps
+// them encrypted and only shows whose they are.
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
 import {
   Button,
@@ -14,6 +15,7 @@ import {
   Select,
   Text,
   TextArea,
+  theme,
 } from "@webstudio-is/design-system";
 import type { HostInfo } from "@webstudio-is/deploy-protocol";
 import { nativeClient } from "~/shared/trpc/trpc-client";
@@ -27,8 +29,28 @@ type Settings = {
     deployerId: string;
     host: string;
     config: Record<string, unknown>;
-    credentials?: string;
+    credentials:
+      | { status: "none" }
+      | { status: "saved"; account?: string }
+      | { status: "unreadable" };
   } | null;
+};
+
+/** The pasted credentials: undefined when nothing was pasted; throws on invalid JSON. */
+const parseCredentials = (text: string) => {
+  if (text.trim() === "") {
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("The credentials aren't valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("The credentials must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
 };
 
 type Field = {
@@ -99,31 +121,35 @@ export const SectionDeploy = ({
   const [hosts, setHosts] = useState<HostInfo[]>();
   const [hostId, setHostId] = useState<string>();
   const [values, setValues] = useState<Record<string, unknown>>({});
-  const [credentials, setCredentials] = useState<string>();
+  const [credentialsText, setCredentialsText] = useState("");
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [isSaving, setIsSaving] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const loadSettings = useCallback(async () => {
+    const result = await nativeClient.deployers.projectSettings.query({
+      projectId,
+    });
+    if (result.success === false) {
+      throw new Error(result.error);
+    }
+    setSettings(result.data);
+    return result.data;
+  }, [projectId]);
 
   useEffect(() => {
     if (projectId === "") {
       return;
     }
-    nativeClient.deployers.projectSettings
-      .query({ projectId })
-      .then((result) => {
-        if (result.success === false) {
-          setError(result.error);
-          return;
-        }
-        setSettings(result.data);
-        const { target } = result.data;
-        setDeployerId(target?.deployerId ?? result.data.deployers[0]?.id);
+    loadSettings()
+      .then(({ target, deployers }) => {
+        setDeployerId(target?.deployerId ?? deployers[0]?.id);
         setHostId(target?.host);
         setValues(target?.config ?? {});
-        setCredentials(target?.credentials);
       })
       .catch((error: Error) => setError(error.message));
-  }, [projectId]);
+  }, [projectId, loadSettings]);
 
   useEffect(() => {
     if (deployerId === undefined) {
@@ -149,6 +175,11 @@ export const SectionDeploy = ({
   }, [projectId, deployerId]);
 
   const host = hosts?.find((host) => host.id === hostId);
+  // Saved credentials belong to the saved host.
+  const savedCredentials =
+    settings?.target?.host === hostId
+      ? settings?.target?.credentials
+      : undefined;
   const fields = host === undefined ? [] : getFields(host);
 
   const save = async (remove = false) => {
@@ -164,7 +195,11 @@ export const SectionDeploy = ({
           deployerId,
           host: host.id,
           config: toConfig(fields, values),
-          credentials: host.credentials === null ? undefined : credentials,
+          // Nothing pasted keeps the saved credentials.
+          credentials:
+            host.credentials === null
+              ? null
+              : parseCredentials(credentialsText),
         };
       } catch (error) {
         setError(error instanceof Error ? error.message : String(error));
@@ -181,9 +216,8 @@ export const SectionDeploy = ({
         setError(result.error);
         return;
       }
-      setSettings((current) =>
-        current === undefined ? current : { ...current, target }
-      );
+      setCredentialsText("");
+      await loadSettings();
       setMessage(remove ? "Deploy target removed." : "Saved.");
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
@@ -288,20 +322,59 @@ export const SectionDeploy = ({
             })}
             {host?.credentials !== undefined && host.credentials !== null && (
               <Grid gap={1}>
-                <Label>Credentials</Label>
-                {host.credentials.length === 0 ? (
-                  <Text color="subtle">
-                    This deployer holds no credentials for {host.label}. Add a
-                    credentials file on the deployer.
+                <Label htmlFor="deploy-credentials">Credentials</Label>
+                {savedCredentials?.status === "saved" && (
+                  <Text>
+                    Saved
+                    {savedCredentials.account
+                      ? ` for ${savedCredentials.account}`
+                      : ""}
+                    . Paste new ones to replace them.
                   </Text>
-                ) : (
-                  <Select
-                    options={host.credentials}
-                    value={credentials}
-                    placeholder="Choose credentials"
-                    onChange={setCredentials}
-                  />
                 )}
+                {savedCredentials?.status === "unreadable" && (
+                  <Text color="destructive">
+                    The saved credentials can't be read (the server's
+                    DEPLOY_CREDENTIALS_KEY may have changed). Paste them again.
+                  </Text>
+                )}
+                <TextArea
+                  id="deploy-credentials"
+                  rows={4}
+                  value={credentialsText}
+                  placeholder="Paste the JSON, or load the file"
+                  onChange={setCredentialsText}
+                  css={{ fontFamily: theme.fonts.mono }}
+                />
+                <Flex gap={2} align="center">
+                  <Button
+                    color="neutral"
+                    onClick={() => fileInput.current?.click()}
+                  >
+                    Load file…
+                  </Button>
+                  <input
+                    ref={fileInput}
+                    type="file"
+                    accept=".json,application/json"
+                    hidden
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      file
+                        ?.text()
+                        .then(setCredentialsText)
+                        .catch((error: Error) => setError(error.message));
+                    }}
+                  />
+                </Flex>
+                {typeof host.credentials.description === "string" && (
+                  <Text color="subtle">{host.credentials.description}</Text>
+                )}
+                <Text color="subtle">
+                  Stored encrypted in the builder's database, where the deployer
+                  reads them. They can't be viewed again.
+                </Text>
               </Grid>
             )}
             {error && <Text color="destructive">{error}</Text>}

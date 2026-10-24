@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 vi.hoisted(() => {
   process.env.AUTH_SECRET = "test-auth-secret";
+  process.env.DEPLOY_CREDENTIALS_KEY = "test-deploy-credentials-key-0123456789";
 });
 
 import {
@@ -23,6 +24,10 @@ import {
   setProjectDeployTarget,
 } from "./deployers.server";
 import { createPublishToken, verifyPublishToken } from "./publish-token.server";
+import {
+  credentialsKey,
+  decryptCredentials,
+} from "@webstudio-is/deploy-protocol/credentials";
 
 const db = setupTestDb();
 
@@ -126,7 +131,7 @@ describe("project deploy target", () => {
       {
         url: "http://deploy.test/v1/validate",
         auth: "Bearer secret-api-key-1234",
-        body: { target },
+        body: { projectId: "project-1", target },
       },
     ]);
     expect(await db.select().from(projectDeployTarget)).toEqual([]);
@@ -150,8 +155,118 @@ describe("project deploy target", () => {
       workspaceId,
       canManageDeployers: true,
       deployers: [{ id: deployerId, name: "Main" }],
-      target: { deployerId, ...target, credentials: undefined },
+      target: { deployerId, ...target, credentials: { status: "none" } },
     });
+  });
+
+  test("keeps credentials encrypted for the deployer to read, never sending them", async () => {
+    const { deployerId } = await setup();
+    let accept = true;
+    const calls = stubDeployer(() =>
+      accept ? { success: true } : { success: false, error: "bad key" }
+    );
+    const firebase = { host: "firebase", config: { site: "my-site" } };
+    const key = {
+      client_email: "deploy@project.iam.gserviceaccount.com",
+      private_key: "very-secret-private-key",
+    };
+    const save = (credentials?: Record<string, unknown> | null) =>
+      setProjectDeployTarget(
+        {
+          projectId: "project-1",
+          target: { deployerId, ...firebase, credentials },
+        },
+        contextFor("owner")
+      );
+    const saved = async () => {
+      const [row] = await db.select().from(projectDeployTarget);
+      return row?.credentials == null
+        ? row?.credentials
+        : decryptCredentials(
+            "project-1",
+            row.credentials,
+            credentialsKey(process.env.DEPLOY_CREDENTIALS_KEY)
+          );
+    };
+    const summary = async (projectId = "project-1") =>
+      (await loadProjectDeploySettings({ projectId }, contextFor("owner")))
+        .target?.credentials;
+
+    expect(await save(key)).toEqual({ success: true });
+    // The deployer checks the saved target, reading the credentials itself.
+    expect(calls.at(-1)!.body).toEqual({
+      projectId: "project-1",
+      target: firebase,
+    });
+    const [row] = await db.select().from(projectDeployTarget);
+    expect(row.credentials).toMatch(/^enc1\./);
+    expect(row.credentials).not.toContain("very-secret");
+    expect(await saved()).toEqual(key);
+    expect(await summary()).toEqual({
+      status: "saved",
+      account: key.client_email,
+    });
+
+    // Saving without credentials keeps them.
+    expect(await save(undefined)).toEqual({ success: true });
+    expect(await saved()).toEqual(key);
+
+    // A rejected check puts the previous credentials back.
+    accept = false;
+    expect(
+      await save({ client_email: "other@x.com", private_key: "k" })
+    ).toEqual({ success: false, error: "bad key" });
+    expect(await saved()).toEqual(key);
+    accept = true;
+
+    await seed.build(db, {
+      id: "build-1",
+      projectId: "project-1",
+      deployment: JSON.stringify({ destination: "saas", domains: [] }),
+      publishStatus: "PENDING",
+    });
+    await createDeploymentClient({ db, builderOrigin: "http://x" }).publish({
+      projectId: "project-1",
+      buildId: "build-1",
+      label: "Project",
+    });
+    expect(calls.at(-1)!.body).toMatchObject({
+      projectId: "project-1",
+      target: firebase,
+    });
+    expect(JSON.stringify(calls)).not.toContain("very-secret");
+
+    // Another project can't use a copied value.
+    await seed.project(db, {
+      id: "project-2",
+      userId: "owner",
+      workspaceId: "00000000-0000-4000-8000-000000000001",
+    });
+    await db
+      .insert(projectDeployTarget)
+      .values({ ...row, projectId: "project-2" });
+    expect(await summary("project-2")).toEqual({ status: "unreadable" });
+
+    expect(await save(null)).toEqual({ success: true });
+    expect(await summary()).toEqual({ status: "none" });
+  });
+
+  test("puts back no target when the first check fails", async () => {
+    const { deployerId } = await setup();
+    stubDeployer(() => ({ success: false, error: "no" }));
+    await setProjectDeployTarget(
+      {
+        projectId: "project-1",
+        target: {
+          deployerId,
+          host: "firebase",
+          config: {},
+          credentials: { a: 1 },
+        },
+      },
+      contextFor("owner")
+    );
+    expect(await db.select().from(projectDeployTarget)).toEqual([]);
   });
 
   test("goes away with its deployer", async () => {
@@ -193,6 +308,13 @@ describe("publish", () => {
         .from(build)
         .where(eq(build.id, "build-1"))
     )[0].status;
+  const buildError = async () =>
+    (
+      await db
+        .select({ error: build.publishError })
+        .from(build)
+        .where(eq(build.id, "build-1"))
+    )[0].error;
 
   test("sends the build, a scoped token and the target", async () => {
     const { deployerId } = await setup();
@@ -271,6 +393,27 @@ describe("publish", () => {
       error: expect.stringContaining("no deploy target"),
     });
     expect(await buildStatus()).toBe("FAILED");
+    // Kept on the build, so Publish can say why.
+    expect(await buildError()).toContain("no deploy target");
+  });
+
+  test("keeps the deployer's error for a failed publish", async () => {
+    await setup();
+    await seedBuild();
+    const token = createPublishToken({
+      projectId: "project-1",
+      buildId: "build-1",
+    });
+    await recordDeployReport(
+      {
+        buildId: "build-1",
+        token,
+        body: { status: "FAILED", error: "Site ID is taken" },
+      },
+      db
+    );
+    expect(await buildStatus()).toBe("FAILED");
+    expect(await buildError()).toBe("Site ID is taken");
   });
 
   test("records the deployer's report", async () => {
@@ -330,7 +473,7 @@ describe("publish", () => {
     ).toEqual({ success: true });
     expect(calls.at(-1)).toMatchObject({
       url: "http://deploy.test/v1/unpublish",
-      body: { target },
+      body: { projectId: "project-1", target },
     });
     const [row] = await db
       .select({ publishedUrl: project.publishedUrl })

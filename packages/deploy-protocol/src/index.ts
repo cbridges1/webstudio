@@ -6,20 +6,24 @@
 // project and the target. The deploy service downloads the build with the token, deploys
 // it and reports the result back to the builder.
 //
+// Each project's host credentials are entered in the builder and stored encrypted in the
+// builder's database (ProjectDeployTarget.credentials, see ./credentials). They never travel
+// in requests: requests name the project, and the deploy service reads and decrypts them from
+// that database with DEPLOY_CREDENTIALS_KEY. It keeps them in memory for the job only and
+// never logs, stores or returns them.
+//
 // Builder -> deploy service: `Authorization: Bearer <deploy service API key>`.
 // Deploy service -> builder: `Authorization: <token from the publish request>`.
 import { z } from "zod";
 
-export const credentialsName = z
-  .string()
-  .regex(/^[A-Za-z0-9._-]+$/, "letters, digits, '.', '_' and '-' only");
+/** A host's credentials, e.g. a Firebase service account key. A secret. */
+export const deployCredentials = z.record(z.string(), z.unknown());
+export type DeployCredentials = z.infer<typeof deployCredentials>;
 
 /** Where a project deploys: a host on the deploy service and that host's settings. */
 export const deployTarget = z.object({
   host: z.string().min(1),
   config: z.record(z.string(), z.unknown()),
-  /** Names a credentials file the deploy service holds. Never the secret itself. */
-  credentials: credentialsName.optional(),
 });
 export type DeployTarget = z.infer<typeof deployTarget>;
 
@@ -34,14 +38,16 @@ export const hostInfo = z.object({
   label: z.string(),
   /** JSON Schema of the host's `config`. */
   config: z.record(z.string(), z.unknown()),
-  /** Credentials usable with this host, or null when it needs none. */
-  credentials: z.array(z.string()).nullable(),
+  /** JSON Schema of the host's credentials, or null when it needs none. */
+  credentials: z.record(z.string(), z.unknown()).nullable(),
 });
 export type HostInfo = z.infer<typeof hostInfo>;
 
 export const hostsResponse = z.object({ hosts: z.array(hostInfo) });
 
 export const publishRequest = z.object({
+  /** Whose saved credentials the host uses. */
+  projectId: z.string().min(1),
   buildId: z.string().min(1),
   builder: z.object({
     /** Where the deploy service downloads the build and reports the result. */
@@ -55,7 +61,12 @@ export const publishRequest = z.object({
 });
 export type PublishRequest = z.infer<typeof publishRequest>;
 
-export const targetRequest = z.object({ target: deployTarget });
+export const targetRequest = z.object({
+  /** Whose saved credentials the host uses. */
+  projectId: z.string().min(1),
+  target: deployTarget,
+});
+export type TargetRequest = z.infer<typeof targetRequest>;
 
 /** Sent by the deploy service when a publish finishes. */
 export const deployReport = z.discriminatedUnion("status", [
@@ -118,7 +129,9 @@ export const createDeployServiceClient = ({
     } catch (error) {
       return {
         success: false,
-        error: `Can't reach the deploy service at ${base}: ${describeError(error)}`,
+        error: `Can't reach the deploy service at ${base}: ${describeError(
+          error
+        )}`,
       };
     }
     if (response.status === 401) {
@@ -157,11 +170,9 @@ export const createDeployServiceClient = ({
 
   return {
     hosts: () => call(deployPaths.hosts, hostsResponse),
-    validate: (target: DeployTarget) =>
-      result(deployPaths.validate, { target }),
+    validate: (input: TargetRequest) => result(deployPaths.validate, input),
     publish: (input: PublishRequest) => result(deployPaths.publish, input),
-    unpublish: (target: DeployTarget) =>
-      result(deployPaths.unpublish, { target }),
+    unpublish: (input: TargetRequest) => result(deployPaths.unpublish, input),
   };
 };
 

@@ -250,23 +250,49 @@ export const publishProject = async (
 };
 
 /**
- * selfhost: no service packages a static download (upstream's closed SaaS did), so the
- * Export dialog's download fails here. Export with the Webstudio CLI instead.
+ * selfhost: Export's static download. The builder builds and zips the site in the background
+ * (apps/builder static-export.server.ts); the client polls the build and then downloads
+ * /cgi/static/ssg/<name>.
  */
 export const publishStaticProject = async (
-  _input: {
+  {
+    projectId,
+    templates,
+  }: {
     projectId: string;
     templates: z.infer<typeof templateSchema>[];
-    name?: string;
   },
-  _context: AppContext
+  context: AppContext
 ): Promise<
   { success: true; name: string } | { success: false; error: string }
-> => ({
-  success: false,
-  error:
-    "Static downloads aren't available on this server. Export with the Webstudio CLI instead.",
-});
+> => {
+  // Only the static site templates build a download.
+  if (templates.some((template) => template.startsWith("ssg") === false)) {
+    return { success: false, error: "Only static site templates download" };
+  }
+  const project = await projectApi.loadById(projectId, context);
+  const build = await createProductionBuild(
+    {
+      projectId,
+      deployment: {
+        destination: "static",
+        name: project.domain,
+        assetsDomain: project.domain,
+        templates,
+      },
+    },
+    context
+  );
+  const result = await context.deployment.deployments.exportStatic({
+    projectId,
+    buildId: build.id,
+    templates,
+  });
+  if (result.success === false) {
+    return result;
+  }
+  return { success: true, name: `${build.id}.zip` };
+};
 
 export const unpublishProjectDomains = async (
   {

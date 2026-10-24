@@ -1,7 +1,7 @@
 {
   "name": "@webstudio-is/deploy-protocol",
   "version": "0.0.0",
-  "description": "selfhost: the HTTP API between the builder and a deploy service (apps/deploy)",
+  "description": "selfhost: the HTTP API between the builder and a deploy service (apps/deploy), the static site build and the credentials encryption they share",
   "author": "Webstudio <github@webstudio.is>",
   "homepage": "https://webstudio.is",
   "type": "module",
@@ -18,6 +18,14 @@
     ".": {
       "webstudio": "./src/index.ts",
       "import": "./src/index.ts"
+    },
+    "./site-build": {
+      "webstudio": "./src/site-build.ts",
+      "import": "./src/site-build.ts"
+    },
+    "./credentials": {
+      "webstudio": "./src/credentials.ts",
+      "import": "./src/credentials.ts"
     }
   },
   "license": "AGPL-3.0-or-later",

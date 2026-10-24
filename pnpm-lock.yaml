@@ -548,6 +548,9 @@ importers:
 
   apps/deploy:
     dependencies:
+      '@webstudio-is/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@webstudio-is/deploy-protocol':
         specifier: workspace:*
         version: link:../../packages/deploy-protocol

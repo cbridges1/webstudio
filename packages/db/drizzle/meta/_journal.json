@@ -29,6 +29,13 @@
       "when": 1792770851902,
       "tag": "0003_deployers",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792875642897,
+      "tag": "0004_build_publish_error",
+      "breakpoints": true
     }
   ]
 }

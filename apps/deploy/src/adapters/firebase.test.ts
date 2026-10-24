@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { createFirebaseAdapter } from "./firebase";
+import { createFirebaseAdapter, siteIdFor } from "./firebase";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -13,12 +13,20 @@ const credentials = {
   client_email: "deployer@my-project.iam.gserviceaccount.com",
   private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
   token_uri: "https://oauth2.googleapis.com/token",
+  project_id: "my-project",
 };
 
 type Call = { method: string; url: string; body: unknown; auth: string | null };
 
 /** A minimal fake of the token endpoint and the Hosting REST API. */
-const createFakeGoogle = (alreadyUploaded: Set<string>) => {
+const createFakeGoogle = (
+  alreadyUploaded: Set<string>,
+  {
+    // Sites Firebase doesn't have yet (others exist), and IDs taken by another project.
+    missingSites = new Set<string>(),
+    takenSites = new Set<string>(),
+  } = {}
+) => {
   const calls: Call[] = [];
   const uploads = new Map<string, Buffer>();
   const fetchImpl: typeof fetch = async (input, init = {}) => {
@@ -61,6 +69,35 @@ const createFakeGoogle = (alreadyUploaded: Set<string>) => {
     const body =
       init.body === undefined ? undefined : JSON.parse(String(init.body));
     calls.push({ method, url, body, auth });
+    const siteGet = url.match(/\/projects\/[^/]+\/sites\/([^/?]+)$/);
+    if (siteGet !== null && method === "GET") {
+      return missingSites.has(siteGet[1])
+        ? Response.json(
+            {
+              error: { code: 404, message: "Requested entity was not found." },
+            },
+            { status: 404 }
+          )
+        : Response.json({ name: `projects/my-project/sites/${siteGet[1]}` });
+    }
+    const siteCreate = url.match(/\/projects\/[^/]+\/sites\?siteId=(.+)$/);
+    if (siteCreate !== null && method === "POST") {
+      if (takenSites.has(siteCreate[1])) {
+        return Response.json(
+          {
+            error: {
+              code: 400,
+              message: `Invalid name: \`${siteCreate[1]}\` is reserved by another project; try something like \`${siteCreate[1]}-1a2b3\` instead`,
+            },
+          },
+          { status: 400 }
+        );
+      }
+      missingSites.delete(siteCreate[1]);
+      return Response.json({
+        name: `projects/my-project/sites/${siteCreate[1]}`,
+      });
+    }
     if (url.endsWith("/versions") && method === "POST") {
       return Response.json({ name: "sites/my-site/versions/v1" });
     }
@@ -109,22 +146,24 @@ describe("firebase adapter", () => {
       log,
     });
 
-    expect(url).toBe("https://my-site.web.app");
+    // The project ID goes in front of the site name.
+    expect(url).toBe("https://my-project-my-site.web.app");
     const api = google.calls.filter((call) =>
       call.url.includes("firebasehosting")
     );
     expect(
       api.map((call) => `${call.method} ${call.url.split("/v1beta1")[1]}`)
     ).toEqual([
-      "POST /sites/my-site/versions",
+      "GET /projects/my-project/sites/my-project-my-site",
+      "POST /sites/my-project-my-site/versions",
       "POST /sites/my-site/versions/v1:populateFiles",
       "PATCH /sites/my-site/versions/v1?updateMask=status",
-      "POST /sites/my-site/releases?versionName=sites%2Fmy-site%2Fversions%2Fv1",
+      "POST /sites/my-project-my-site/releases?versionName=sites%2Fmy-site%2Fversions%2Fv1",
     ]);
     expect(api.every((call) => call.auth === "Bearer access-token")).toBe(true);
-    expect(api[2].body).toEqual({ status: "FINALIZED" });
+    expect(api[3].body).toEqual({ status: "FINALIZED" });
 
-    const files = (api[1].body as { files: Record<string, string> }).files;
+    const files = (api[2].body as { files: Record<string, string> }).files;
     expect(Object.keys(files).sort()).toEqual([
       "/about/index.html",
       "/index.html",
@@ -185,6 +224,87 @@ describe("firebase adapter", () => {
     ).toEqual({
       config: { cleanUrls: true },
     });
+  });
+
+  test("creates the site when Firebase doesn't have it", async () => {
+    const google = createFakeGoogle(new Set(), {
+      missingSites: new Set(["my-project-new-site"]),
+    });
+    const lines: string[] = [];
+    const { url } = await createFirebaseAdapter(google.fetchImpl).deploy({
+      buildDir,
+      config: { site: "new-site" },
+      credentials,
+      log: (line) => lines.push(line),
+    });
+    expect(url).toBe("https://my-project-new-site.web.app");
+    expect(
+      google.calls
+        .filter((call) => call.url.includes("/projects/"))
+        .map((call) => `${call.method} ${call.url.split("/v1beta1")[1]}`)
+    ).toEqual([
+      "GET /projects/my-project/sites/my-project-new-site",
+      "POST /projects/my-project/sites?siteId=my-project-new-site",
+    ]);
+    expect(lines).toContain(
+      "Creating Firebase Hosting site my-project-new-site in project my-project"
+    );
+  });
+
+  test("creates the site in the configured project", async () => {
+    const google = createFakeGoogle(new Set(), {
+      missingSites: new Set(["other-project-new-site"]),
+    });
+    await createFirebaseAdapter(google.fetchImpl).deploy({
+      buildDir,
+      config: { site: "new-site", project: "other-project" },
+      credentials,
+      log,
+    });
+    expect(
+      google.calls.some((call) =>
+        call.url.endsWith(
+          "/projects/other-project/sites?siteId=other-project-new-site"
+        )
+      )
+    ).toBe(true);
+  });
+
+  test("explains a site ID another project already has", async () => {
+    const google = createFakeGoogle(new Set(), {
+      missingSites: new Set(["my-project-deploy-test"]),
+      takenSites: new Set(["my-project-deploy-test"]),
+    });
+    await expect(
+      createFirebaseAdapter(google.fetchImpl).deploy({
+        buildDir,
+        config: { site: "deploy-test" },
+        credentials,
+        log,
+      })
+    ).rejects.toThrow(
+      'Couldn\'t create Firebase Hosting site "my-project-deploy-test" in project "my-project" (400): Invalid name: `my-project-deploy-test` is reserved by another project'
+    );
+    expect(google.calls.some((call) => call.url.endsWith("/versions"))).toBe(
+      false
+    );
+  });
+
+  test("puts the project ID in front of the site name once", () => {
+    expect(siteIdFor({ site: "deploy-test" }, credentials)).toBe(
+      "my-project-deploy-test"
+    );
+    // Already prefixed, or the project's default site: as it is.
+    expect(siteIdFor({ site: "my-project-blog" }, credentials)).toBe(
+      "my-project-blog"
+    );
+    expect(siteIdFor({ site: "my-project" }, credentials)).toBe("my-project");
+    expect(siteIdFor({ site: "blog", project: "other" }, credentials)).toBe(
+      "other-blog"
+    );
+    // No project to go by: as it is.
+    const { project_id: _, ...withoutProject } = credentials;
+    expect(siteIdFor({ site: "blog" }, withoutProject)).toBe("blog");
   });
 
   test("remove disables the site", async () => {

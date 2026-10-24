@@ -68,6 +68,7 @@ describe("loadLatestBuildVirtual", () => {
       domain: "example.com",
       createdAt: "2026-02-01T00:00:00.000Z",
       publishStatus: "PENDING",
+      publishError: null,
       updatedAt: expect.any(String),
     });
     expect(builds.has("p2")).toBe(false);

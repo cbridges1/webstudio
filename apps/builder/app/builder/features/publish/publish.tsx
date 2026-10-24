@@ -383,20 +383,26 @@ const ChangeProjectDomain = ({
       ? project.latestBuildVirtual
       : undefined;
 
-  const { statusText, color, Icon } =
+  const { statusText, color, Icon, status } =
     latestProjectDomainBuild != null
       ? getPublishStatusAndText(latestProjectDomainBuild)
       : {
           statusText: "Not published",
           color: cssVar("--foreground-secondary"),
           Icon: InfoCircleIcon,
+          status: undefined,
         };
+  // selfhost: the deployer's message for the last failed publish, so it can be diagnosed.
+  const lastPublishError =
+    status === "FAILED" ? latestProjectDomainBuild?.publishError : undefined;
 
   const isPublished = latestProjectDomainBuild != null;
 
   return (
     <CollapsibleDomainSection
       title={pageUrl.host}
+      // Open when the last publish failed, so its error shows.
+      initiallyOpen={Boolean(lastPublishError)}
       prefix={
         <DomainCheckbox
           defaultChecked={latestProjectDomainBuild?.domain === domain}
@@ -407,7 +413,16 @@ const ChangeProjectDomain = ({
       suffix={
         <Grid flow="column" align="center">
           <Tooltip
-            content={error !== undefined ? error : <Text>{statusText}</Text>}
+            content={
+              error !== undefined ? (
+                error
+              ) : (
+                <Text>
+                  {statusText}
+                  {lastPublishError ? `: ${lastPublishError}` : ""}
+                </Text>
+              )
+            }
           >
             <Flex
               align="center"
@@ -477,6 +492,15 @@ const ChangeProjectDomain = ({
           />
           {error !== undefined && <Text color="destructive">{error}</Text>}
         </Grid>
+        {lastPublishError && (
+          <Text
+            color="destructive"
+            userSelect="text"
+            css={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+          >
+            {statusText}: {lastPublishError}
+          </Text>
+        )}
         {stagingUsername && (
           <Grid flow="column" align="center" gap={2}>
             <Label
@@ -713,8 +737,17 @@ const Publish = ({
       }
 
       if (status === "FAILED") {
-        toast.error(statusText);
-        setPublishError(statusText);
+        // selfhost: say why, from the deployer's report.
+        const reason = project.latestBuildVirtual?.publishError;
+        const message = reason ? (
+          <>
+            {statusText}: {reason}
+          </>
+        ) : (
+          statusText
+        );
+        toast.error(message);
+        setPublishError(message);
         break;
       }
 
@@ -820,6 +853,10 @@ const Publish = ({
   );
 };
 
+// selfhost: the builder builds the download (static-export.server.ts), which can take a few
+// minutes; its job stops after 10.
+const STATIC_EXPORT_TIMEOUT = 10 * 60 * 1000;
+
 const getStaticPublishStatusAndText = ({
   updatedAt,
   publishStatus,
@@ -830,9 +867,8 @@ const getStaticPublishStatusAndText = ({
   let status = publishStatus;
 
   const delta = Date.now() - new Date(updatedAt).getTime();
-  // Assume build failed after 3 minutes
 
-  if (publishStatus === "PENDING" && delta > PENDING_TIMEOUT) {
+  if (publishStatus === "PENDING" && delta > STATIC_EXPORT_TIMEOUT) {
     status = "FAILED";
   }
 
@@ -930,10 +966,10 @@ const PublishStatic = ({
                   return;
                 }
 
-                const timeout = 10000;
+                const timeout = 3000;
 
                 // Repeat few more times than timeout
-                const repeat = PENDING_TIMEOUT / timeout + 5;
+                const repeat = STATIC_EXPORT_TIMEOUT / timeout + 5;
 
                 for (let i = 0; i !== repeat; i++) {
                   await new Promise((resolve) => setTimeout(resolve, timeout));

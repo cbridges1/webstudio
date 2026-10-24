@@ -17,6 +17,8 @@ const environment = z.object({
 
   // Secret session key, context encode
   AUTH_SECRET: z.string().optional(),
+  // selfhost: encrypts projects' deploy credentials; deployers that read them share it.
+  DEPLOY_CREDENTIALS_KEY: z.string().optional(),
 
   // DEPLOYMENT_ENVIRONMENT development | preview | production
   DEPLOYMENT_ENVIRONMENT: z
@@ -82,6 +84,7 @@ const rawEnv = {
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
   AUTH_SECRET: process.env.AUTH_SECRET,
+  DEPLOY_CREDENTIALS_KEY: process.env.DEPLOY_CREDENTIALS_KEY,
   DEPLOYMENT_ENVIRONMENT: process.env.DEPLOYMENT_ENVIRONMENT,
   DEPLOYMENT_URL: process.env.DEPLOYMENT_URL,
   TRPC_SERVER_URL: process.env.TRPC_SERVER_URL,

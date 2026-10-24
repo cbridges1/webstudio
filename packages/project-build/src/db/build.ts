@@ -423,6 +423,8 @@ export const createProductionBuild = async (
             "deployment"
           ),
           publishStatus: buildTable.publishStatus,
+          // A new build has no publish error yet (insert-select lists every column, in order).
+          publishError: sql<null>`NULL`.as("publishError"),
           dataSources: buildTable.dataSources,
           lastTransactionId: buildTable.lastTransactionId,
           resources: buildTable.resources,

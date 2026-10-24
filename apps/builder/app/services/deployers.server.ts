@@ -3,11 +3,14 @@
 // A deployer is a deploy service (apps/deploy, or anything speaking
 // @webstudio-is/deploy-protocol) that a workspace's admins add with its URL and API key.
 // Each project picks one of its workspace's deployers and a target there (a host, its
-// settings and a credentials name). Publish sends the build to that deployer with a token
-// scoped to the project (publish-token.server.ts); the deployer reports the result back to
-// /rest/deployments/<buildId>.
+// settings and its credentials). Credentials are stored encrypted with
+// DEPLOY_CREDENTIALS_KEY (@webstudio-is/deploy-protocol/credentials) and never sent: the
+// deployer reads them from this database. Publish sends the build to that deployer with a
+// token scoped to the project (publish-token.server.ts); the deployer reports the result back
+// to /rest/deployments/<buildId>.
 import {
   createDeployServiceClient,
+  deployCredentials,
   deployReport,
   deployTarget,
   type DeployResult,
@@ -35,6 +38,14 @@ import {
 } from "@webstudio-is/trpc-interface/index.server";
 import { z } from "zod";
 import { createPublishToken, verifyPublishToken } from "./publish-token.server";
+import { startStaticExport } from "./static-export.server";
+import {
+  credentialsKey,
+  decryptCredentials,
+  describeCredentials,
+  encryptCredentials,
+} from "@webstudio-is/deploy-protocol/credentials";
+import env from "~/env/env.server";
 
 const NO_TARGET =
   "This project has no deploy target. Choose one in Project settings → Deploy.";
@@ -268,7 +279,29 @@ export const checkDeployer = async (
 
 export const projectTargetInput = deployTarget.extend({
   deployerId: z.string(),
+  /** New credentials; null removes them, undefined keeps the saved ones. */
+  credentials: deployCredentials.nullable().optional(),
 });
+
+/** What the settings show about saved credentials. Never the secret. */
+const summarizeCredentials = (projectId: string, stored: string | null) => {
+  if (stored === null) {
+    return { status: "none" as const };
+  }
+  let credentials;
+  try {
+    credentials = decryptCredentials(
+      projectId,
+      stored,
+      credentialsKey(env.DEPLOY_CREDENTIALS_KEY)
+    );
+  } catch {
+    // No key: it can't be read either way.
+  }
+  return credentials === undefined
+    ? { status: "unreadable" as const }
+    : { status: "saved" as const, account: describeCredentials(credentials) };
+};
 
 export const loadProjectDeploySettings = async (
   { projectId }: { projectId: string },
@@ -312,7 +345,7 @@ export const loadProjectDeploySettings = async (
         : {
             ...target,
             config: (target.config ?? {}) as Record<string, unknown>,
-            credentials: target.credentials ?? undefined,
+            credentials: summarizeCredentials(projectId, target.credentials),
           },
   };
 };
@@ -326,7 +359,11 @@ export const listDeployerHosts = async (
   return await clientFor(row).hosts();
 };
 
-/** Checks the target with the deployer before saving it. `null` removes it. */
+/**
+ * Saves the target, then has the deployer check it (it reads the credentials from this
+ * database, so they must be saved first) and puts the previous target back when the check
+ * fails. `null` removes it.
+ */
 export const setProjectDeployTarget = async (
   {
     projectId,
@@ -346,23 +383,50 @@ export const setProjectDeployTarget = async (
     target.deployerId,
     context.db
   );
-  const { deployerId, ...rest } = target;
-  const checked = await clientFor(row).validate(rest);
-  if (checked.success === false) {
-    return checked;
-  }
+  const previous = maybeOne(
+    await context.db
+      .select()
+      .from(projectDeployTarget)
+      .where(eq(projectDeployTarget.projectId, projectId))
+  );
   const values = {
-    deployerId,
-    host: rest.host,
-    config: rest.config as Json,
-    credentials: rest.credentials ?? null,
+    deployerId: target.deployerId,
+    host: target.host,
+    config: target.config as Json,
+    // Undefined keeps the saved credentials.
+    credentials:
+      target.credentials === undefined
+        ? (previous?.credentials ?? null)
+        : target.credentials === null
+          ? null
+          : encryptCredentials(
+              projectId,
+              target.credentials,
+              credentialsKey(env.DEPLOY_CREDENTIALS_KEY)
+            ),
     updatedAt: new Date().toISOString(),
   };
   await context.db
     .insert(projectDeployTarget)
     .values({ projectId, ...values })
     .onConflictDoUpdate({ target: projectDeployTarget.projectId, set: values });
-  return { success: true };
+  const checked = await clientFor(row).validate({
+    projectId,
+    target: { host: target.host, config: target.config },
+  });
+  if (checked.success === false) {
+    if (previous === null) {
+      await context.db
+        .delete(projectDeployTarget)
+        .where(eq(projectDeployTarget.projectId, projectId));
+    } else {
+      await context.db
+        .update(projectDeployTarget)
+        .set(previous)
+        .where(eq(projectDeployTarget.projectId, projectId));
+    }
+  }
+  return checked;
 };
 
 // Publish.
@@ -391,7 +455,6 @@ const loadPublishTarget = async (projectId: string, db: Db) => {
   const target: DeployTarget = {
     host: row.target.host,
     config: (row.target.config ?? {}) as Record<string, unknown>,
-    credentials: row.target.credentials ?? undefined,
   };
   return { success: true as const, deployer: row.deployer, target };
 };
@@ -411,6 +474,7 @@ export const createDeploymentClient = ({
     const resolved = await loadPublishTarget(projectId, db);
     const result: DeployResult = resolved.success
       ? await clientFor(resolved.deployer).publish({
+          projectId,
           buildId,
           builder: {
             origin: resolved.deployer.builderUrl ?? builderOrigin,
@@ -424,7 +488,11 @@ export const createDeploymentClient = ({
       // The build was created as PENDING before this call; nothing will report on it.
       await db
         .update(build)
-        .set({ publishStatus: "FAILED", updatedAt: new Date().toISOString() })
+        .set({
+          publishStatus: "FAILED",
+          publishError: result.error,
+          updatedAt: new Date().toISOString(),
+        })
         .where(eq(build.id, buildId));
     }
     return result;
@@ -433,7 +501,10 @@ export const createDeploymentClient = ({
   async unpublish({ projectId }) {
     const resolved = await loadPublishTarget(projectId, db);
     const result: DeployResult = resolved.success
-      ? await clientFor(resolved.deployer).unpublish(resolved.target)
+      ? await clientFor(resolved.deployer).unpublish({
+          projectId,
+          target: resolved.target,
+        })
       : { success: true };
     if (result.success) {
       await db
@@ -442,6 +513,11 @@ export const createDeploymentClient = ({
         .where(eq(project.id, projectId));
     }
     return result;
+  },
+
+  async exportStatic({ projectId, buildId, templates }) {
+    startStaticExport({ db, projectId, buildId, templates, builderOrigin });
+    return { success: true };
   },
 });
 
@@ -486,6 +562,8 @@ export const recordDeployReport = async (
       .update(build)
       .set({
         publishStatus: report.data.status,
+        publishError:
+          report.data.status === "FAILED" ? report.data.error : null,
         updatedAt: new Date().toISOString(),
       })
       .where(eq(build.id, buildId));

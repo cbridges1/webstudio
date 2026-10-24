@@ -15,6 +15,7 @@ type LatestBuildRow = {
   domain: string;
   createdAt: unknown;
   publishStatus: LatestBuildVirtual["publishStatus"];
+  publishError: string | null;
   updatedAt: unknown;
 };
 
@@ -25,6 +26,7 @@ const toLatestBuild = (row: LatestBuildRow): LatestBuildVirtual => ({
   domain: row.domain,
   createdAt: toIso(row.createdAt),
   publishStatus: row.publishStatus,
+  publishError: row.publishError ?? null,
   updatedAt: toIso(row.updatedAt),
 });
 
@@ -51,6 +53,7 @@ export const loadLatestBuildVirtual = async (
       END AS domain,
       b."createdAt",
       b."publishStatus",
+      b."publishError",
       b."updatedAt"
     FROM "Build" b
     JOIN "Project" p ON b."projectId" = p.id
@@ -127,6 +130,7 @@ export const loadDomainsVirtual = async (
       d.domain,
       b."createdAt",
       b."publishStatus",
+      b."publishError",
       b."updatedAt"
     FROM "ProjectDomain" pd
     JOIN "Domain" d ON d.id = pd."domainId"

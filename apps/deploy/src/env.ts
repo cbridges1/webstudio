@@ -15,7 +15,11 @@ const schema = z.object({
   // service is in, so it always matches the builder.
   WEBSTUDIO_DIR: z.string().default(checkoutDir),
   DEPLOYER_DATA_DIR: z.string().default(".data"),
-  DEPLOY_CREDENTIALS_DIR: z.string().default("credentials"),
+  // The builder's database, read only for projects' saved host credentials, and the key they
+  // are encrypted with (the builder's DEPLOY_CREDENTIALS_KEY). Without them, only hosts that
+  // need no credentials work.
+  DATABASE_URL: z.string().optional(),
+  DEPLOY_CREDENTIALS_KEY: z.string().optional(),
   // Root for the "directory" host (one folder per site). Unset: that host is off.
   DEPLOY_SITES_DIR: z.string().optional(),
 
@@ -33,6 +37,7 @@ const schema = z.object({
 export type Env = z.infer<typeof schema> & {
   jobsDir: string;
   logsDir: string;
+  queueDir: string;
 };
 
 export const loadEnv = (source: NodeJS.ProcessEnv = process.env): Env => {
@@ -49,12 +54,12 @@ export const loadEnv = (source: NodeJS.ProcessEnv = process.env): Env => {
     ...env,
     WEBSTUDIO_DIR: resolve(env.WEBSTUDIO_DIR),
     DEPLOYER_DATA_DIR: dataDir,
-    DEPLOY_CREDENTIALS_DIR: resolve(env.DEPLOY_CREDENTIALS_DIR),
     DEPLOY_SITES_DIR:
       env.DEPLOY_SITES_DIR === undefined || env.DEPLOY_SITES_DIR === ""
         ? undefined
         : resolve(env.DEPLOY_SITES_DIR),
     jobsDir: resolve(dataDir, "jobs"),
     logsDir: resolve(dataDir, "logs"),
+    queueDir: resolve(dataDir, "queue"),
   };
 };

@@ -1,0 +1,18 @@
+# selfhost: the Docker build context is the checkout; dependencies and build outputs are made
+# fresh inside the image, and no local settings go in.
+**/node_modules
+.git
+**/lib
+**/dist
+**/build
+**/.data
+**/.cache
+**/.vercel
+**/.turbo
+**/*.log
+**/.env
+**/.env.*
+**/.DS_Store
+coverage
+playwright-report
+test-results

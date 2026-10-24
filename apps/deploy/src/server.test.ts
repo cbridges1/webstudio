@@ -13,7 +13,7 @@ const published: unknown[] = [];
 
 const publisher = {
   status: () => ({ running: undefined, queued: 0 }),
-  hosts: async () => [
+  hosts: () => [
     { id: "directory", label: "Folder", config: {}, credentials: null },
   ],
   validate: async () => ({ success: true as const }),
@@ -37,7 +37,9 @@ afterAll(() => {
 });
 
 const target = { host: "directory", config: { site: "p1" } };
+const targetRequest = { projectId: "p1", target };
 const publishRequest: PublishRequest = {
+  projectId: "p1",
   buildId: "b1",
   builder: { origin: "https://builder.example.com", token: "t" },
   target,
@@ -48,11 +50,11 @@ describe("deployer server", () => {
     const client = createDeployServiceClient({ url: origin, apiKey });
     expect(await client.publish(publishRequest)).toEqual({ success: true });
     expect(published).toEqual([publishRequest]);
-    expect(await client.unpublish(target)).toEqual({
+    expect(await client.unpublish(targetRequest)).toEqual({
       success: false,
       error: "nope",
     });
-    expect(await client.validate(target)).toEqual({ success: true });
+    expect(await client.validate(targetRequest)).toEqual({ success: true });
     expect(await client.hosts()).toEqual({
       success: true,
       data: {
@@ -68,7 +70,7 @@ describe("deployer server", () => {
       url: `${origin}/deploy/`,
       apiKey,
     });
-    expect(await client.validate(target)).toEqual({ success: true });
+    expect(await client.validate(targetRequest)).toEqual({ success: true });
   });
 
   test("rejects a wrong API key", async () => {
@@ -93,7 +95,7 @@ describe("deployer server", () => {
       url: "http://127.0.0.1:1",
       apiKey,
     });
-    const result = await client.validate(target);
+    const result = await client.validate(targetRequest);
     expect(result.success === false && result.error).toMatch(
       /^Can't reach the deploy service/
     );

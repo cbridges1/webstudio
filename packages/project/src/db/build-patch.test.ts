@@ -27,6 +27,7 @@ const buildRow = {
   version: 3,
   lastTransactionId: "previous-tx",
   isCleaned: null,
+  publishError: null,
   publishStatus: "PUBLISHED" as const,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),

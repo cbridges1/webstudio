@@ -605,6 +605,8 @@ const cloneProjectRows = async (
           publishStatus: sql<"PENDING">`'PENDING'::"PublishStatus"`.as(
             "publishStatus"
           ),
+          // A new build has no publish error yet (insert-select lists every column, in order).
+          publishError: sql<null>`NULL`.as("publishError"),
           dataSources: build.dataSources,
           lastTransactionId: sql<null>`NULL`.as("lastTransactionId"),
           resources: build.resources,

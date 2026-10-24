@@ -1,10 +1,12 @@
-// Builds a published Webstudio build as a static site, using the Webstudio checkout's own CLI and
+// selfhost: builds a Webstudio build as a static site, using the Webstudio checkout's own CLI and
 // packages (the same version as the builder, so the bundle contract always matches). Mirrors the
-// upstream SSG smoke test (packages/cli/scripts/test-ssg-package.ts).
+// upstream SSG smoke test (packages/cli/scripts/test-ssg-package.ts). The deploy service
+// (apps/deploy) publishes with it; the builder's Export → static download uses it too.
 import { spawn, spawnSync } from "node:child_process";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { Log } from "./adapters/types";
+
+export type Log = (line: string) => void;
 
 const isWindows = process.platform === "win32";
 
@@ -45,7 +47,8 @@ const passedEnv = [
 ];
 
 export const createBuildEnv = (source: NodeJS.ProcessEnv = process.env) => {
-  const env: NodeJS.ProcessEnv = {};
+  // A cast: the builder types NODE_ENV as always set.
+  const env = {} as NodeJS.ProcessEnv;
   for (const name of passedEnv) {
     if (source[name] !== undefined) {
       env[name] = source[name];
@@ -129,6 +132,7 @@ export const buildStaticSite = async ({
   buildId,
   builderOrigin,
   builderToken,
+  templates = ["ssg"],
   log,
   signal,
   run = runCommand,
@@ -139,6 +143,8 @@ export const buildStaticSite = async ({
   builderOrigin: string;
   /** Read access to the project, from the publish request. */
   builderToken: string;
+  /** CLI templates: "ssg", or one that adds host files ("ssg-netlify", "ssg-vercel"). */
+  templates?: string[];
   log: Log;
   signal: AbortSignal;
   run?: RunCommand;
@@ -168,11 +174,17 @@ export const buildStaticSite = async ({
     ],
     { cwd: workDir, log, signal, redact: [builderToken] }
   );
-  await run(cli, ["build", "--template", "ssg", "--template", "internal"], {
-    cwd: workDir,
-    log,
-    signal,
-  });
+  await run(
+    cli,
+    [
+      "build",
+      ...[...templates, "internal"].flatMap((template) => [
+        "--template",
+        template,
+      ]),
+    ],
+    { cwd: workDir, log, signal }
+  );
   await run("npm", ["run", "build"], { cwd: workDir, log, signal });
 
   return join(workDir, "dist", "client");

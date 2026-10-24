@@ -35,7 +35,9 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       remix({
-        presets: [vercelPreset()],
+        // selfhost: Vercel's build layout only on Vercel; elsewhere a plain Remix server
+        // build that `remix-serve build/server/index.js` runs (the Docker image).
+        presets: process.env.VERCEL ? [vercelPreset()] : [],
         future: {
           v3_lazyRouteDiscovery: false,
           v3_relativeSplatPath: false,

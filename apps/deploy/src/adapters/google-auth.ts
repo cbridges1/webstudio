@@ -2,11 +2,17 @@
 import { createSign } from "node:crypto";
 import { z } from "zod";
 
-export const serviceAccountSchema = z.object({
-  client_email: z.string().email(),
-  private_key: z.string().min(1),
-  token_uri: z.string().url().default("https://oauth2.googleapis.com/token"),
-});
+export const serviceAccountSchema = z
+  .object({
+    client_email: z.string().email(),
+    private_key: z.string().min(1),
+    token_uri: z.string().url().default("https://oauth2.googleapis.com/token"),
+    // In every JSON key; the Firebase host creates missing sites in this project.
+    project_id: z.string().min(1).optional(),
+  })
+  .describe(
+    "A service account's JSON key (Google Cloud console → IAM → Service accounts → Keys) with the Firebase Hosting Admin role"
+  );
 
 export type ServiceAccount = z.infer<typeof serviceAccountSchema>;
 
@@ -54,7 +60,9 @@ export const getAccessToken = async (
   };
   if (response.ok === false || body.access_token === undefined) {
     throw new Error(
-      `Google token request failed (${response.status}): ${body.error_description ?? "no access token"}`
+      `Google token request failed (${response.status}): ${
+        body.error_description ?? "no access token"
+      }`
     );
   }
   return body.access_token;

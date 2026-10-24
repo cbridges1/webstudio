@@ -1,5 +1,6 @@
 // Firebase Hosting through its REST API (what firebase-tools does under the hood):
-// create a version, list file hashes, upload the missing files, finalize, release.
+// create the site when it doesn't exist, create a version, list file hashes, upload the
+// missing files, finalize, release.
 // https://firebase.google.com/docs/hosting/api-deploy
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
@@ -21,7 +22,16 @@ const configSchema = z.object({
   site: z
     .string()
     .min(1)
-    .describe('Hosting site ID, e.g. "my-site" for my-site.web.app'),
+    .describe(
+      'Hosting site name. The Firebase project ID is put in front unless it\'s already there ("blog" in project "acme" → acme-blog.web.app), since site IDs are unique across all of Firebase. Created on the first publish when it doesn\'t exist'
+    ),
+  project: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Firebase project to create the site in, when it isn't the service account's own"
+    ),
   url: z
     .string()
     .url()
@@ -35,6 +45,38 @@ const configSchema = z.object({
 
 type Config = z.infer<typeof configSchema>;
 type Credentials = z.infer<typeof serviceAccountSchema>;
+
+/** A failed Hosting API call: its status and Firebase's own message. */
+class FirebaseApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly detail: string
+  ) {
+    super(message);
+  }
+}
+
+/** The Firebase project the site belongs to: the configured one, else the service account's. */
+const projectFor = (config: Config, credentials: Credentials) =>
+  config.project ?? credentials.project_id;
+
+/**
+ * The Hosting site ID: the configured site with the project ID in front (site IDs are global
+ * across Firebase, so "blog" alone is likely taken). A site that already starts with the
+ * project ID, or is the project's default site, is used as it is.
+ */
+export const siteIdFor = (config: Config, credentials: Credentials) => {
+  const project = projectFor(config, credentials);
+  if (
+    project === undefined ||
+    config.site === project ||
+    config.site.startsWith(`${project}-`)
+  ) {
+    return config.site;
+  }
+  return `${project}-${config.site}`;
+};
 
 const listFiles = async (dir: string): Promise<string[]> => {
   const entries = await readdir(dir, { withFileTypes: true, recursive: true });
@@ -62,11 +104,61 @@ export const createFirebaseAdapter = (
     });
     const text = await response.text();
     if (response.ok === false) {
-      throw new Error(
-        `Firebase Hosting ${method} ${url.replace(API, "")} failed (${response.status}): ${text}`
+      let detail = text;
+      try {
+        detail =
+          (JSON.parse(text) as { error?: { message?: string } }).error
+            ?.message ?? text;
+      } catch {
+        // Not JSON: keep the text.
+      }
+      throw new FirebaseApiError(
+        `Firebase Hosting ${method} ${url.replace(API, "")} failed (${response.status}): ${text}`,
+        response.status,
+        detail
       );
     }
     return (text === "" ? {} : JSON.parse(text)) as T;
+  };
+
+  /** Creates the site in its project when Firebase doesn't have it yet. */
+  const ensureSite = async (
+    token: string,
+    siteId: string,
+    config: Config,
+    credentials: Credentials,
+    log: (line: string) => void
+  ) => {
+    const project = projectFor(config, credentials);
+    if (project === undefined) {
+      // No project to look in (a key without project_id): publishing reports a missing site.
+      return;
+    }
+    const sites = `${API}/projects/${encodeURIComponent(project)}/sites`;
+    try {
+      await call(token, "GET", `${sites}/${encodeURIComponent(siteId)}`);
+      return;
+    } catch (error) {
+      if (error instanceof FirebaseApiError === false || error.status !== 404) {
+        throw error;
+      }
+    }
+    log(`Creating Firebase Hosting site ${siteId} in project ${project}`);
+    try {
+      await call(
+        token,
+        "POST",
+        `${sites}?siteId=${encodeURIComponent(siteId)}`,
+        {}
+      );
+    } catch (error) {
+      if (error instanceof FirebaseApiError) {
+        throw new Error(
+          `Couldn't create Firebase Hosting site "${siteId}" in project "${project}" (${error.status}): ${error.detail}. Site IDs are unique across all of Firebase, so another project may have it; choose another site ID in Project settings → Deploy.`
+        );
+      }
+      throw error;
+    }
   };
 
   return {
@@ -77,7 +169,9 @@ export const createFirebaseAdapter = (
 
     async deploy({ buildDir, config, credentials, log }) {
       const token = await getAccessToken(credentials, SCOPES, fetchImpl);
-      const site = encodeURIComponent(config.site);
+      const siteId = siteIdFor(config, credentials);
+      const site = encodeURIComponent(siteId);
+      await ensureSite(token, siteId, config, credentials, log);
 
       const files = new Map<string, { hash: string; gzipped: Buffer }>();
       for (const file of await listFiles(buildDir)) {
@@ -163,7 +257,7 @@ export const createFirebaseAdapter = (
         "POST",
         `${API}/sites/${site}/releases?versionName=${encodeURIComponent(version.name)}`
       );
-      const url = config.url ?? `https://${config.site}.web.app`;
+      const url = config.url ?? `https://${siteId}.web.app`;
       log(`Released ${version.name} to ${url}`);
       return { url };
     },
@@ -174,10 +268,10 @@ export const createFirebaseAdapter = (
       await call(
         token,
         "POST",
-        `${API}/sites/${encodeURIComponent(config.site)}/releases`,
+        `${API}/sites/${encodeURIComponent(siteIdFor(config, credentials))}/releases`,
         { type: "SITE_DISABLE" }
       );
-      log(`Disabled Firebase Hosting site ${config.site}`);
+      log(`Disabled Firebase Hosting site ${siteIdFor(config, credentials)}`);
     },
   };
 };

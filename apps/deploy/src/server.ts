@@ -60,14 +60,14 @@ export const createDeployerServer = ({
 }) => {
   const routes: Record<string, (req: IncomingMessage) => Promise<unknown>> = {
     [`GET ${deployPaths.hosts}`]: async () => ({
-      hosts: await publisher.hosts(),
+      hosts: publisher.hosts(),
     }),
     [`POST ${deployPaths.validate}`]: async (req) =>
-      publisher.validate((await readJson(req, targetRequest)).target),
+      publisher.validate(await readJson(req, targetRequest)),
     [`POST ${deployPaths.publish}`]: async (req) =>
       publisher.publish(await readJson(req, publishRequest)),
     [`POST ${deployPaths.unpublish}`]: async (req) =>
-      publisher.unpublish((await readJson(req, targetRequest)).target),
+      publisher.unpublish(await readJson(req, targetRequest)),
   };
 
   return createServer(async (req: IncomingMessage, res: ServerResponse) => {

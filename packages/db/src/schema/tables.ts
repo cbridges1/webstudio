@@ -210,8 +210,9 @@ export const deployer = pgTable(
 );
 
 // selfhost: where Publish sends a project: one of its workspace's deployers and a
-// target there (a host, its settings and the name of a credentials file the deployer
-// holds). Removing the deployer removes the targets that use it.
+// target there (a host, its settings and the host's credentials, encrypted with
+// DEPLOY_CREDENTIALS_KEY; the deployer reads only that column). Removing the deployer removes
+// the targets that use it.
 export const projectDeployTarget = pgTable(
   "ProjectDeployTarget",
   {
@@ -262,6 +263,8 @@ export const build = pgTable(
     version: integer().default(0).notNull(),
     deployment: text(),
     publishStatus: publishStatus().default("PENDING").notNull(),
+    // selfhost: why the deployer failed or refused this publish (shown in Publish).
+    publishError: text(),
     dataSources: text().default("[]").notNull(),
     lastTransactionId: text(),
     resources: text().default("[]").notNull(),
