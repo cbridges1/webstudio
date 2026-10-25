@@ -20,6 +20,8 @@ import { timestamptz } from "./columns";
 import type { Json } from "./json";
 import {
   authorizationRelation,
+  deployJobKind,
+  deployJobStatus,
   domainStatus,
   marketplaceApprovalStatus,
   publishStatus,
@@ -182,20 +184,115 @@ export const project = pgTable(
   ]
 );
 
-// selfhost: the deploy service every project publishes through, set by an app admin
-// (DEPLOYER_URL in the builder's environment takes its place). At most one row. `apiKey`
-// is what the builder sends to the service; it never leaves the server.
-export const deployer = pgTable(
-  "Deployer",
+// selfhost: the builder hands work to the deploy service (apps/deploy) through the database.
+// It queues a DeployJob and sends NOTIFY "deploy_jobs"; the deploy service LISTENs (and polls,
+// for missed notifications), claims jobs with FOR UPDATE SKIP LOCKED and records the outcome.
+// It registers itself and its hosts in DeployWorker. Its own database login can read
+// ProjectDeployTarget and DeployJob, update DeployJob's progress columns and write
+// DeployWorker; nothing else.
+
+/**
+ * How the builder reaches the deploy service, set by an app admin unless the builder's
+ * environment sets it (DEPLOYER_WAKE_URL, DEPLOYER_BUILDER_URL). At most one row.
+ */
+export const deploySettings = pgTable(
+  "DeploySettings",
   {
     id: uuid().defaultRandom().primaryKey(),
-    url: text().notNull(),
-    apiKey: text().notNull(),
-    /** The builder's address as the service reaches it. Null: the builder's own origin. */
+    /** Called (POST) whenever a job is queued, e.g. to start a stopped deploy service. */
+    wakeUrl: text(),
+    /** Sent as `Authorization: Bearer <wakeToken>` to wakeUrl. */
+    wakeToken: text(),
+    /** The builder's address as the deploy service reaches it. Null: the builder's own origin. */
     builderUrl: text(),
-    createdAt: createdAt(),
+    updatedAt: timestamptz("updatedAt")
+      .default(sql`now()`)
+      .notNull(),
   },
-  () => [uniqueIndex("Deployer_single_key").on(sql`(true)`)]
+  () => [uniqueIndex("DeploySettings_single_key").on(sql`(true)`)]
+);
+
+export const deployJob = pgTable(
+  "DeployJob",
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    /**
+     * Which deploy services may take it (DEPLOYER_QUEUE / DEPLOY_QUEUE), for builders sharing
+     * a database whose deploy services can each reach only their own builder.
+     */
+    queue: text().default("default").notNull(),
+    kind: deployJobKind().notNull(),
+    projectId: text().notNull(),
+    /** publish only. */
+    buildId: text(),
+    /**
+     * publish: { builderOrigin, token, label }. The token reads the project for two hours, so
+     * this is a secret.
+     */
+    request: jsonb().$type<Json>().notNull(),
+    status: deployJobStatus().default("queued").notNull(),
+    error: text(),
+    /** publish: { url }. */
+    result: jsonb().$type<Json>(),
+    attempts: integer().default(0).notNull(),
+    workerId: text(),
+    createdAt: createdAt(),
+    startedAt: timestamptz("startedAt"),
+    /** Updated while a job runs; a stale one belonged to a worker that died. */
+    heartbeatAt: timestamptz("heartbeatAt"),
+    finishedAt: timestamptz("finishedAt"),
+  },
+  (table) => [
+    index("DeployJob_queue_status_createdAt_idx").on(
+      table.queue,
+      table.status,
+      table.createdAt
+    ),
+    foreignKey({
+      columns: [table.projectId],
+      foreignColumns: [project.id],
+      name: "DeployJob_projectId_fkey",
+    })
+      .onUpdate("cascade")
+      .onDelete("cascade"),
+  ]
+);
+
+/** Running deploy services: their hosts (for the builder's settings form) and when last seen. */
+export const deployWorker = pgTable("DeployWorker", {
+  id: text().primaryKey(),
+  /** The queue it takes jobs from. */
+  queue: text().default("default").notNull(),
+  /** HostInfo[] (@webstudio-is/deploy-protocol). */
+  hosts: jsonb().$type<Json>().notNull(),
+  startedAt: timestamptz("startedAt")
+    .default(sql`now()`)
+    .notNull(),
+  seenAt: timestamptz("seenAt")
+    .default(sql`now()`)
+    .notNull(),
+});
+
+// selfhost: how the builder sends email (workspace invites, password resets), set by an app
+// admin unless the builder's environment sets SMTP_HOST. At most one row. `password` is
+// encrypted with a key derived from AUTH_SECRET.
+export const emailSettings = pgTable(
+  "EmailSettings",
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    host: text().notNull(),
+    port: integer().notNull(),
+    /** TLS from the start (port 465); otherwise STARTTLS when the server offers it. */
+    secure: boolean().default(false).notNull(),
+    username: text(),
+    password: text(),
+    /** The From address, e.g. `Webstudio <noreply@example.com>`. */
+    from: text().notNull(),
+    updatedAt: timestamptz("updatedAt")
+      .default(sql`now()`)
+      .notNull(),
+  },
+  () => [uniqueIndex("EmailSettings_single_key").on(sql`(true)`)]
 );
 
 // selfhost: where Publish sends a project on the deployer: a host, its settings and the

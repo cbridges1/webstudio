@@ -1,9 +1,13 @@
-// selfhost: the deployer (the deploy service every project publishes through). App admins
-// set its URL and API key here, unless the builder's environment sets it (DEPLOYER_URL),
-// which this then only shows. Projects pick a host on it in Project settings → Deploy.
+// selfhost: the deploy service (apps/deploy). It takes jobs from this builder's database, so
+// there's nothing to connect: this shows whether it's running, and app admins set an optional
+// wake URL (called whenever a job is queued, to start a stopped service) and the builder's
+// address as the service reaches it. When the builder's environment sets those
+// (DEPLOYER_WAKE_URL, DEPLOYER_WAKE_TOKEN, DEPLOYER_BUILDER_URL), this only shows them.
 import { useCallback, useEffect, useState } from "react";
 import {
   Button,
+  Checkbox,
+  CheckboxAndLabel,
   Dialog,
   DialogActions,
   DialogClose,
@@ -19,26 +23,60 @@ import {
 } from "@webstudio-is/design-system";
 import { nativeClient } from "~/shared/trpc/trpc-client";
 
-type Settings =
-  | { source: "none" }
-  | {
-      source: "env" | "app";
-      url: string;
-      builderUrl: string | null;
-      apiKeyEnding: string;
-    };
+type Settings = {
+  source: "env" | "app";
+  wakeUrl: string | null;
+  wakeTokenEnding: string | null;
+  builderUrl: string | null;
+  workers: { id: string; seenAt: string; running: boolean; hosts: string[] }[];
+};
 
-type Status =
+type WakeCheck =
   | { state: "checking" }
-  | { state: "ok"; hosts: string[] }
-  | { state: "error"; error: string };
+  | { state: "done"; ok: boolean; message: string };
 
 const toError = (error: Error) => ({
   success: false as const,
   error: error.message,
 });
 
-const DeployerForm = ({
+const sinceText = (iso: string) => {
+  const seconds = Math.max(
+    0,
+    Math.round((Date.now() - new Date(iso).getTime()) / 1000)
+  );
+  if (seconds < 90) {
+    return `${seconds} s ago`;
+  }
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) {
+    return `${minutes} min ago`;
+  }
+  return new Date(iso).toLocaleString();
+};
+
+const Workers = ({ workers }: { workers: Settings["workers"] }) => {
+  if (workers.length === 0) {
+    return (
+      <Text>
+        No deploy service has connected to this builder's database yet. Start
+        one (apps/deploy) with this database's DATABASE_URL.
+      </Text>
+    );
+  }
+  return (
+    <Grid gap="1">
+      {workers.map((worker) => (
+        <Text key={worker.id} color={worker.running ? undefined : "subtle"}>
+          {worker.id}: {worker.running ? "running" : "not running"} (seen{" "}
+          {sinceText(worker.seenAt)}) · {worker.hosts.join(", ")}
+        </Text>
+      ))}
+    </Grid>
+  );
+};
+
+const SettingsForm = ({
   settings,
   onSaved,
 }: {
@@ -47,18 +85,8 @@ const DeployerForm = ({
 }) => {
   const [error, setError] = useState<string>();
   const [isSaving, setIsSaving] = useState(false);
-  const saved = settings.source === "none" ? undefined : settings;
+  const [removeToken, setRemoveToken] = useState(false);
   const readOnly = settings.source === "env";
-
-  const remove = async () => {
-    setError(undefined);
-    const result = await nativeClient.deployer.remove.mutate().catch(toError);
-    if (result.success === false) {
-      setError(result.error);
-      return;
-    }
-    onSaved();
-  };
 
   return (
     <form
@@ -70,8 +98,9 @@ const DeployerForm = ({
         setIsSaving(true);
         const result = await nativeClient.deployer.save
           .mutate({
-            url: field("url"),
-            apiKey: field("apiKey"),
+            wakeUrl: field("wakeUrl"),
+            wakeToken: field("wakeToken"),
+            removeWakeToken: removeToken,
             builderUrl: field("builderUrl"),
           })
           .catch(toError);
@@ -83,31 +112,46 @@ const DeployerForm = ({
         onSaved();
       }}
     >
-      <Grid gap="3" css={{ paddingInline: theme.spacing[5] }}>
+      <Grid gap="3">
         <Grid gap="1">
-          <Label htmlFor="deployer-url">URL</Label>
+          <Label htmlFor="deployer-wake-url">Wake URL (optional)</Label>
           <InputField
-            id="deployer-url"
-            name="url"
-            placeholder="https://deploy.example.com"
-            defaultValue={saved?.url}
+            id="deployer-wake-url"
+            name="wakeUrl"
+            placeholder="https://deploy.example.com/wake"
+            defaultValue={settings.wakeUrl ?? ""}
             disabled={readOnly}
           />
+          <Text color="subtle">
+            Called (POST) whenever a publish or another job is queued, to start
+            a deploy service that's stopped while idle. The deploy service's own
+            /wake works. A running service picks up jobs without it.
+          </Text>
         </Grid>
         <Grid gap="1">
-          <Label htmlFor="deployer-key">API key</Label>
+          <Label htmlFor="deployer-wake-token">Wake token (optional)</Label>
           <InputField
-            id="deployer-key"
-            name="apiKey"
+            id="deployer-wake-token"
+            name="wakeToken"
             type="password"
             autoComplete="off"
-            disabled={readOnly}
+            disabled={readOnly || removeToken}
             placeholder={
-              saved === undefined
-                ? "The deployer's DEPLOY_API_KEY"
-                : `Unchanged (ends in ${saved.apiKeyEnding})`
+              settings.wakeTokenEnding === null
+                ? "Sent as Authorization: Bearer <token>"
+                : `Unchanged (ends in ${settings.wakeTokenEnding})`
             }
           />
+          {readOnly === false && settings.wakeTokenEnding !== null && (
+            <CheckboxAndLabel>
+              <Checkbox
+                id="deployer-remove-token"
+                checked={removeToken}
+                onCheckedChange={(checked) => setRemoveToken(checked === true)}
+              />
+              <Label htmlFor="deployer-remove-token">Remove the token</Label>
+            </CheckboxAndLabel>
+          )}
         </Grid>
         <Grid gap="1">
           <Label htmlFor="deployer-builder-url">
@@ -117,23 +161,18 @@ const DeployerForm = ({
             id="deployer-builder-url"
             name="builderUrl"
             placeholder="This builder's address"
-            defaultValue={saved?.builderUrl ?? ""}
+            defaultValue={settings.builderUrl ?? ""}
             disabled={readOnly}
           />
           <Text color="subtle">
-            Where the deployer downloads builds and reports back, when it
+            Where the deploy service downloads builds and reports back, when it
             reaches this builder at another address (for example inside a
             private network).
           </Text>
         </Grid>
         {error && <Text color="destructive">{error}</Text>}
         {readOnly === false && (
-          <Flex gap="2" justify="end">
-            {saved !== undefined && (
-              <Button type="button" color="ghost" onClick={() => void remove()}>
-                Remove
-              </Button>
-            )}
+          <Flex justify="end">
             <Button
               type="submit"
               color="primary"
@@ -157,35 +196,45 @@ export const DeployerDialog = ({
 }) => {
   const [settings, setSettings] = useState<Settings>();
   const [error, setError] = useState<string>();
-  const [status, setStatus] = useState<Status>();
-
-  const check = useCallback(async () => {
-    setStatus({ state: "checking" });
-    const result = await nativeClient.deployer.check.mutate().catch(toError);
-    setStatus(
-      result.success
-        ? { state: "ok", hosts: result.data.hosts.map((host) => host.label) }
-        : { state: "error", error: result.error }
-    );
-  }, []);
+  const [wakeCheck, setWakeCheck] = useState<WakeCheck>();
 
   const load = useCallback(async () => {
     setError(undefined);
-    setStatus(undefined);
     const result = await nativeClient.deployer.settings.query().catch(toError);
     if (result.success === false) {
       setError(result.error);
       return;
     }
     setSettings(result.data);
-    if (result.data.source !== "none") {
-      void check();
+  }, []);
+
+  const testWake = async () => {
+    setWakeCheck({ state: "checking" });
+    const result = await nativeClient.deployer.check.mutate().catch(toError);
+    if (result.success === false) {
+      setWakeCheck({ state: "done", ok: false, message: result.error });
+      return;
     }
-  }, [check]);
+    const { wake } = result.data;
+    setWakeCheck(
+      wake === null
+        ? { state: "done", ok: false, message: "No wake URL is set." }
+        : {
+            state: "done",
+            ok: wake.ok,
+            message: wake.ok
+              ? `The wake URL answered ${wake.status}.`
+              : (wake.error ?? `The wake URL answered ${wake.status}.`),
+          }
+    );
+    await load();
+  };
 
   useEffect(() => {
     if (isOpen) {
       void load();
+    } else {
+      setWakeCheck(undefined);
     }
   }, [isOpen, load]);
 
@@ -193,64 +242,55 @@ export const DeployerDialog = ({
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
       <DialogContent css={{ width: theme.spacing[35] }}>
         <ScrollAreaNative css={{ maxHeight: "70vh" }}>
-          <Grid gap="3" css={{ paddingBlock: theme.spacing[5] }}>
-            <Text css={{ paddingInline: theme.spacing[5] }} color="subtle">
-              The deploy service every project publishes through. Each project
-              picks a host on it in Project settings → Deploy.
+          <Grid
+            gap="3"
+            css={{
+              paddingBlock: theme.spacing[5],
+              paddingInline: theme.spacing[5],
+            }}
+          >
+            <Text color="subtle">
+              The deploy service takes publishes from this builder's database,
+              so it needs no address or key here. Each project picks a host in
+              Project settings → Deploy.
             </Text>
+            {settings !== undefined && <Workers workers={settings.workers} />}
             {settings?.source === "env" && (
-              <Text css={{ paddingInline: theme.spacing[5] }}>
-                Set by the builder's environment (DEPLOYER_URL,
-                DEPLOYER_API_KEY, DEPLOYER_BUILDER_URL). Change it there.
+              <Text>
+                Set by the builder's environment (DEPLOYER_WAKE_URL,
+                DEPLOYER_WAKE_TOKEN, DEPLOYER_BUILDER_URL). Change them there.
               </Text>
-            )}
-            {settings?.source === "none" && (
-              <Text css={{ paddingInline: theme.spacing[5] }}>
-                No deployer yet. Publish stays off until one is set.
-              </Text>
-            )}
-            {status !== undefined && (
-              <Flex
-                gap="2"
-                align="center"
-                justify="between"
-                css={{ paddingInline: theme.spacing[5] }}
-              >
-                {status.state === "checking" && (
-                  <Text color="subtle">Checking…</Text>
-                )}
-                {status.state === "ok" && (
-                  <Text color="subtle" truncate>
-                    Connected · {status.hosts.join(", ")}
-                  </Text>
-                )}
-                {status.state === "error" && (
-                  <Text color="destructive">{status.error}</Text>
-                )}
-                <Button color="ghost" onClick={() => void check()}>
-                  Check
-                </Button>
-              </Flex>
             )}
             {settings !== undefined && (
-              <DeployerForm
+              <SettingsForm
                 // A fresh form with the saved values after each save.
                 key={JSON.stringify(settings)}
                 settings={settings}
                 onSaved={() => void load()}
               />
             )}
-            {error && (
-              <Text
-                color="destructive"
-                css={{ paddingInline: theme.spacing[5] }}
-              >
-                {error}
+            {wakeCheck?.state === "checking" && (
+              <Text color="subtle">Calling the wake URL…</Text>
+            )}
+            {wakeCheck?.state === "done" && (
+              <Text color={wakeCheck.ok ? undefined : "destructive"}>
+                {wakeCheck.message}
               </Text>
             )}
+            {error && <Text color="destructive">{error}</Text>}
           </Grid>
         </ScrollAreaNative>
         <DialogActions>
+          <Button
+            color="neutral"
+            disabled={settings?.wakeUrl === null || settings === undefined}
+            onClick={() => void testWake()}
+          >
+            Test wake URL
+          </Button>
+          <Button color="ghost" onClick={() => void load()}>
+            Refresh
+          </Button>
           <DialogClose>
             <Button color="ghost">Close</Button>
           </DialogClose>

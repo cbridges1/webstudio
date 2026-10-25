@@ -4,6 +4,7 @@ import {
   isNull,
   maybeOne,
   user,
+  workspace,
   workspaceMember,
 } from "@webstudio-is/db";
 import { z } from "zod";
@@ -14,6 +15,45 @@ import {
 } from "@webstudio-is/trpc-interface/index.server";
 import { workspace as workspaceApi } from "@webstudio-is/project/index.server";
 import { roles } from "@webstudio-is/trpc-interface/authorize";
+import {
+  isEmailEnabled,
+  sendEmail,
+  workspaceInviteEmail,
+} from "./email.server";
+
+/** selfhost: tells the invitee by email when email is set up. Never fails the invite. */
+const emailInvite = async (
+  { workspaceId, email }: { workspaceId: string; email: string },
+  ctx: { db: Parameters<typeof isEmailEnabled>[0]; inviterId?: string }
+) => {
+  if ((await isEmailEnabled(ctx.db)) === false) {
+    return false;
+  }
+  const target = maybeOne(
+    await ctx.db
+      .select({ name: workspace.name })
+      .from(workspace)
+      .where(eq(workspace.id, workspaceId))
+  );
+  const inviter =
+    ctx.inviterId === undefined
+      ? null
+      : maybeOne(
+          await ctx.db
+            .select({ username: user.username, email: user.email })
+            .from(user)
+            .where(eq(user.id, ctx.inviterId))
+        );
+  const result = await sendEmail(
+    ctx.db,
+    workspaceInviteEmail({
+      to: email,
+      inviter: inviter?.username ?? inviter?.email ?? "Someone",
+      workspaceName: target?.name ?? "a workspace",
+    })
+  );
+  return result.sent;
+};
 
 const name = z.string().min(2).max(100);
 const relation = z.enum(roles);
@@ -118,8 +158,18 @@ export const workspaceRouter = router({
         }
 
         const { notificationId } = await workspaceApi.addMember(input, ctx);
+        const emailed = await emailInvite(input, {
+          db: ctx.db,
+          inviterId:
+            ctx.authorization.type === "user"
+              ? ctx.authorization.userId
+              : undefined,
+        }).catch((error) => {
+          console.warn(`Invite email not sent: ${String(error)}`);
+          return false;
+        });
 
-        return { success: true as const, notificationId };
+        return { success: true as const, notificationId, emailed };
       } catch (error) {
         return createErrorResponse(error);
       }

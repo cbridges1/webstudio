@@ -1,52 +1,23 @@
-import {
-  ContentIcon,
-  DiscordIcon,
-  YoutubeIcon,
-  XLogoIcon,
-  BlueskyIcon,
-  FacebookIcon,
-  LinkedinIcon,
-  RedditIcon,
-} from "@webstudio-is/icons";
+import { CloudIcon, ContentIcon, PlayIcon } from "@webstudio-is/icons";
 
-export const socialLinks = [
-  { label: "X", url: "https://x.com/getwebstudio", icon: <XLogoIcon /> },
-  {
-    label: "Bluesky",
-    url: "https://bsky.app/profile/webstudio.is",
-    icon: <BlueskyIcon />,
-  },
-  {
-    label: "Facebook",
-    url: "https://www.facebook.com/webstudiois",
-    icon: <FacebookIcon />,
-  },
-  {
-    label: "LinkedIn",
-    url: "https://www.linkedin.com/company/getwebstudio/",
-    icon: <LinkedinIcon />,
-  },
-  {
-    label: "Reddit",
-    url: "https://www.reddit.com/r/webstudio/",
-    icon: <RedditIcon />,
-  },
-] as const;
+// selfhost: documentation in our repositories, in place of upstream's help, community and
+// social links.
+const docsUrl = "https://github.com/cbridges1/webstudio/blob/selfhost/docs";
 
 export const help = [
   {
-    label: "Video tutorials",
-    url: "https://wstd.us/101",
-    icon: <YoutubeIcon />,
+    label: "Getting started",
+    url: `${docsUrl}/basics/intro.md`,
+    icon: <PlayIcon />,
   },
   {
     label: "Docs",
-    url: "https://docs.webstudio.is/",
+    url: `${docsUrl}/README.md`,
     icon: <ContentIcon />,
   },
   {
-    label: "Community",
-    url: "https://wstd.us/community",
-    icon: <DiscordIcon />,
+    label: "Self-hosting",
+    url: "https://github.com/cbridges1/knowbra-webstudio#readme",
+    icon: <CloudIcon />,
   },
 ] as const;

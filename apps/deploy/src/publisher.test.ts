@@ -1,7 +1,6 @@
 import {
   mkdtemp,
   mkdir,
-  readdir,
   readFile,
   rm,
   stat,
@@ -11,12 +10,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { z } from "zod";
-import type {
-  DeployReport,
-  PublishRequest,
-} from "@webstudio-is/deploy-protocol";
+import type { DeployReport, DeployTarget } from "@webstudio-is/deploy-protocol";
 import { createAdapters } from "./adapters";
-import { createPublisher, type PublisherOptions } from "./publisher";
+import {
+  createPublisher,
+  type PublishJob,
+  type PublisherOptions,
+} from "./publisher";
 import { createBuildEnv } from "@webstudio-is/deploy-protocol/site-build";
 
 let root: string;
@@ -57,10 +57,10 @@ const setup = (overrides: Partial<PublisherOptions> = {}) => {
   const publisher = createPublisher({
     adapters: createAdapters({ sitesDir }),
     webstudioDir: "/unused",
+    loadTarget: async () => savedTarget,
     loadCredentials: async () => savedCredentials,
     jobsDir: join(root, "jobs"),
     logsDir: join(root, "logs"),
-    queueDir: join(root, "queue"),
     jobTimeoutMs: 60_000,
     keepFailedWorkdirs: false,
     fetch: builder.fetch,
@@ -85,18 +85,26 @@ const setup = (overrides: Partial<PublisherOptions> = {}) => {
   return { publisher, calls, logs, reports: builder.reports };
 };
 
-/** What the builder's database holds for the project (stands in for credentials.ts). */
+/** What the builder's database holds for the project (stands in for store.ts). */
+let savedTarget: DeployTarget | undefined;
 let savedCredentials: Record<string, unknown> | undefined;
 
-const job = (overrides: Partial<PublishRequest> = {}): PublishRequest => ({
-  projectId: "project-1",
-  buildId: "build-1",
-  builder: { origin: "https://builder.example.com", token: "publish-token" },
-  target: {
+beforeEach(() => {
+  savedTarget = {
     host: "directory",
     config: { site: "p1", url: "https://p1.example.com/" },
+  };
+  savedCredentials = undefined;
+});
+
+const job = (overrides: Partial<PublishJob> = {}): PublishJob => ({
+  projectId: "project-1",
+  buildId: "build-1",
+  request: {
+    builderOrigin: "https://builder.example.com",
+    token: "publish-token",
+    label: "Project 1",
   },
-  label: "Project 1",
   ...overrides,
 });
 
@@ -104,8 +112,10 @@ describe("publisher", () => {
   test("builds, deploys and reports the URL to the builder", async () => {
     const { publisher, calls, reports } = setup();
 
-    expect(await publisher.publish(job())).toEqual({ success: true });
-    await publisher.idle();
+    expect(await publisher.publish(job())).toEqual({
+      success: true,
+      url: "https://p1.example.com/",
+    });
 
     expect(calls).toEqual([
       {
@@ -128,43 +138,44 @@ describe("publisher", () => {
     await expect(stat(join(root, "jobs", "build-1"))).rejects.toThrow();
   });
 
-  test("rejects an unknown host right away", async () => {
+  test("fails an unknown host before building", async () => {
+    savedTarget = { host: "nope", config: {} };
     const { publisher, calls, reports } = setup();
-    const result = await publisher.publish(
-      job({ target: { host: "nope", config: {} } })
-    );
-    expect(result).toEqual({
+    const outcome = await publisher.publish(job());
+    expect(outcome).toEqual({
       success: false,
       error: expect.stringContaining('no "nope" host'),
     });
-    await publisher.idle();
     expect(calls).toEqual([]);
-    expect(reports).toEqual([]);
+    expect(reports.map((report) => report.body)).toEqual([
+      { status: "FAILED", error: expect.stringContaining('no "nope" host') },
+    ]);
   });
 
-  test("rejects invalid settings right away", async () => {
+  test("fails a project without a target", async () => {
+    savedTarget = undefined;
     const { publisher } = setup();
-    const result = await publisher.publish(
-      job({
-        target: { host: "directory", config: { site: "../etc", url: "x" } },
-      })
-    );
-    expect(result.success).toBe(false);
+    expect(await publisher.validate("project-1")).toEqual({
+      success: false,
+      error: expect.stringContaining("no deploy target"),
+    });
+  });
+
+  test("rejects invalid settings", async () => {
+    savedTarget = { host: "directory", config: { site: "../etc", url: "x" } };
+    const { publisher } = setup();
+    expect((await publisher.validate("project-1")).success).toBe(false);
   });
 
   test("has no directory host without a sites directory", async () => {
     const { publisher } = setup({ adapters: createAdapters({}) });
-    expect((await publisher.publish(job())).success).toBe(false);
+    expect((await publisher.validate("project-1")).success).toBe(false);
   });
 
   test("checks the saved credentials fit the host, without quoting them", async () => {
     const { publisher } = setup();
-    const request = {
-      projectId: "project-1",
-      target: { host: "firebase", config: { site: "my-site" } },
-    };
-    savedCredentials = undefined;
-    expect(await publisher.validate(request)).toEqual({
+    savedTarget = { host: "firebase", config: { site: "my-site" } };
+    expect(await publisher.validate("project-1")).toEqual({
       success: false,
       error:
         "Firebase Hosting needs credentials: add them in Project settings → Deploy",
@@ -173,7 +184,7 @@ describe("publisher", () => {
       client_email: "not-an-email-secret",
       private_key: "",
     };
-    const result = await publisher.validate(request);
+    const result = await publisher.validate("project-1");
     expect(result).toEqual({
       success: false,
       error:
@@ -184,8 +195,7 @@ describe("publisher", () => {
       client_email: "deploy@project.iam.gserviceaccount.com",
       private_key: "-----BEGIN PRIVATE KEY-----",
     };
-    expect(await publisher.validate(request)).toEqual({ success: true });
-    savedCredentials = undefined;
+    expect(await publisher.validate("project-1")).toEqual({ success: true });
   });
 
   test("reports a failed site build", async () => {
@@ -194,8 +204,10 @@ describe("publisher", () => {
         throw new Error("vite exploded");
       },
     });
-    expect(await publisher.publish(job())).toEqual({ success: true });
-    await publisher.idle();
+    expect(await publisher.publish(job())).toEqual({
+      success: false,
+      error: "vite exploded",
+    });
     expect(reports.map((report) => report.body)).toEqual([
       { status: "FAILED", error: "vite exploded" },
     ]);
@@ -210,42 +222,12 @@ describe("publisher", () => {
       },
     });
     await publisher.publish(job());
-    await publisher.idle();
     expect(attempts).toBe(3);
   });
 
-  test("runs jobs one at a time and keeps going after a failure", async () => {
-    const order: string[] = [];
-    const { publisher, reports } = setup({
-      buildSite: async ({ workDir, buildId }) => {
-        order.push(`start ${buildId}`);
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        order.push(`end ${buildId}`);
-        if (buildId === "build-1") {
-          throw new Error("first fails");
-        }
-        const out = join(workDir, "dist", "client");
-        await mkdir(out, { recursive: true });
-        return out;
-      },
-    });
-    await publisher.publish(job({ buildId: "build-1" }));
-    await publisher.publish(job({ buildId: "build-2" }));
-    await publisher.idle();
-    expect(order).toEqual([
-      "start build-1",
-      "end build-1",
-      "start build-2",
-      "end build-2",
-    ]);
-    expect(reports.map((report) => report.body.status)).toEqual([
-      "FAILED",
-      "PUBLISHED",
-    ]);
-  });
-
-  test("reads the credentials only after the site build", async () => {
+  test("reads the target and credentials again after the site build", async () => {
     const events: string[] = [];
+    savedTarget = { host: "fake", config: {} };
     const { publisher } = setup({
       adapters: new Map([
         [
@@ -278,9 +260,8 @@ describe("publisher", () => {
         return out;
       },
     });
-    await publisher.publish(job({ target: { host: "fake", config: {} } }));
-    await publisher.idle();
-    // The check when queueing, then the build, then the deploy's own read.
+    await publisher.publish(job());
+    // The check before building, then the build, then the deploy's own read.
     expect(events).toEqual([
       "credentials",
       "build",
@@ -289,54 +270,10 @@ describe("publisher", () => {
     ]);
   });
 
-  test("keeps queued publishes on disk and resumes them after a restart", async () => {
-    let release = () => {};
-    const blocked = new Promise<void>((done) => {
-      release = done;
-    });
-    const first = setup({
-      buildSite: async () => {
-        await blocked;
-        throw new Error("the service stopped");
-      },
-    });
-    await first.publisher.publish(job({ buildId: "build-1" }));
-    await first.publisher.publish(job({ buildId: "build-2" }));
-    expect((await readdir(join(root, "queue"))).sort()).toEqual([
-      "build-1.json",
-      "build-2.json",
-    ]);
-    const saved = await stat(join(root, "queue", "build-1.json"));
-    expect(saved.mode & 0o777).toBe(0o600);
-
-    // A new process over the same data directory, before the first finishes anything.
-    await writeFile(join(root, "queue", "junk.json"), "{");
-    const second = setup();
-    expect(await second.publisher.resume()).toBe(2);
-    await second.publisher.idle();
-    expect(second.calls.map((call) => call.buildId)).toEqual([
-      "build-1",
-      "build-2",
-    ]);
-    expect(second.reports.map((report) => report.body.status)).toEqual([
-      "PUBLISHED",
-      "PUBLISHED",
-    ]);
-    expect(await readdir(join(root, "queue"))).toEqual([]);
-    release();
-    await first.publisher.idle();
-  });
-
   test("unpublish removes the site", async () => {
     const { publisher } = setup();
     await publisher.publish(job());
-    await publisher.idle();
-    expect(
-      await publisher.unpublish({
-        projectId: "project-1",
-        target: job().target,
-      })
-    ).toEqual({ success: true });
+    expect(await publisher.unpublish("project-1")).toEqual({ success: true });
     await expect(stat(join(sitesDir, "p1"))).rejects.toThrow();
   });
 
@@ -365,7 +302,7 @@ describe("site build environment", () => {
       createBuildEnv({
         PATH: "/bin",
         HOME: "/home/me",
-        DEPLOY_API_KEY: "secret",
+        DEPLOY_CREDENTIALS_KEY: "secret",
         DATABASE_URL: "postgres://secret",
       })
     ).toEqual({

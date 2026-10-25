@@ -26,12 +26,31 @@ const environment = z.object({
   AUTH_SECRET: z.string().optional(),
   // selfhost: encrypts projects' deploy credentials; deployers that read them share it.
   DEPLOY_CREDENTIALS_KEY: z.string().optional(),
-  // selfhost: the deploy service Publish uses. Set, it replaces the one an app admin sets
-  // in the dashboard (profile menu → Deployer), which then can't be changed there.
-  DEPLOYER_URL: optional(z.string().url()),
-  DEPLOYER_API_KEY: optional(z.string()),
+  // selfhost: email (workspace invites, password resets) over SMTP. SMTP_HOST set replaces what
+  // an app admin sets in the dashboard (profile menu → Email), which then can't be changed
+  // there. Unset everywhere: the builder sends no email.
+  SMTP_HOST: optional(z.string()),
+  // Default 587, or 465 with SMTP_SECURE=true.
+  SMTP_PORT: optional(z.coerce.number().int().positive()),
+  // "true": TLS from the start (usually port 465); otherwise STARTTLS when offered.
+  SMTP_SECURE: optional(z.enum(["true", "false"])),
+  SMTP_USER: optional(z.string()),
+  SMTP_PASSWORD: optional(z.string()),
+  // The From address, e.g. "Webstudio <noreply@example.com>". Required with SMTP_HOST.
+  SMTP_FROM: optional(z.string()),
+
+  // selfhost: how the builder reaches the deploy service, which takes jobs from the database.
+  // Any of these set replaces what an app admin sets in the dashboard (profile menu →
+  // Deployer), which then can't be changed there.
+  // POSTed to whenever a job is queued, e.g. to start a stopped deploy service (optional).
+  DEPLOYER_WAKE_URL: optional(z.string().url()),
+  // Sent as `Authorization: Bearer <token>` to the wake URL (optional).
+  DEPLOYER_WAKE_TOKEN: optional(z.string()),
   // The builder's address as the deploy service reaches it (default: the builder's origin).
   DEPLOYER_BUILDER_URL: optional(z.string().url()),
+  // The job queue its deploy services take from (their DEPLOY_QUEUE; default "default"), for
+  // builders sharing a database whose deploy services can each reach only their own builder.
+  DEPLOYER_QUEUE: optional(z.string()),
 
   // DEPLOYMENT_ENVIRONMENT development | preview | production
   DEPLOYMENT_ENVIRONMENT: z
@@ -98,9 +117,16 @@ const rawEnv = {
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
   AUTH_SECRET: process.env.AUTH_SECRET,
   DEPLOY_CREDENTIALS_KEY: process.env.DEPLOY_CREDENTIALS_KEY,
-  DEPLOYER_URL: process.env.DEPLOYER_URL,
-  DEPLOYER_API_KEY: process.env.DEPLOYER_API_KEY,
+  SMTP_HOST: process.env.SMTP_HOST,
+  SMTP_PORT: process.env.SMTP_PORT,
+  SMTP_SECURE: process.env.SMTP_SECURE,
+  SMTP_USER: process.env.SMTP_USER,
+  SMTP_PASSWORD: process.env.SMTP_PASSWORD,
+  SMTP_FROM: process.env.SMTP_FROM,
+  DEPLOYER_WAKE_URL: process.env.DEPLOYER_WAKE_URL,
+  DEPLOYER_WAKE_TOKEN: process.env.DEPLOYER_WAKE_TOKEN,
   DEPLOYER_BUILDER_URL: process.env.DEPLOYER_BUILDER_URL,
+  DEPLOYER_QUEUE: process.env.DEPLOYER_QUEUE,
   DEPLOYMENT_ENVIRONMENT: process.env.DEPLOYMENT_ENVIRONMENT,
   DEPLOYMENT_URL: process.env.DEPLOYMENT_URL,
   TRPC_SERVER_URL: process.env.TRPC_SERVER_URL,
@@ -178,9 +204,9 @@ if (env.AUTH_RATE_LIMIT === "false") {
   }
 }
 
-// selfhost: the deploy service refuses requests without its key.
-if (env.DEPLOYER_URL !== undefined && env.DEPLOYER_API_KEY === undefined) {
-  throw new Error("DEPLOYER_API_KEY must be set with DEPLOYER_URL");
+// selfhost: mail needs a sender.
+if (env.SMTP_HOST !== undefined && env.SMTP_FROM === undefined) {
+  throw new Error("SMTP_FROM must be set with SMTP_HOST");
 }
 
 export type ServerEnv = typeof env;

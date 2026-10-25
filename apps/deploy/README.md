@@ -3,56 +3,59 @@
 The deploy service for our self-hosted Webstudio (selfhost). It makes the builder's **Publish**
 button work: it builds a published build as a static site and uploads it to a host.
 
-It knows nothing about any builder: it has no builder address and no builder secret. The
-builder is pointed at it (`DEPLOYER_URL` and `DEPLOYER_API_KEY` in the builder's environment, or
-an app admin's dashboard profile menu → **Deployer**), and each project picks a target on it in
-**Project settings → Deploy**. One deploy service can serve several builders; each builder uses
-one deploy service.
+It shares the builder's database and takes its work from there: no builder address, no API
+key. The builder queues jobs (publish, unpublish, and checking a target when a project admin
+saves it) in `DeployJob` and sends `NOTIFY deploy_jobs`; this service `LISTEN`s, also polls
+(`DEPLOY_POLL_INTERVAL_MS`), and records each job's outcome. It registers itself and its hosts in
+`DeployWorker`, which is how the builder knows it's running and which hosts to offer in
+**Project settings → Deploy**. Optionally the builder also calls a wake URL whenever it queues a
+job (`DEPLOYER_WAKE_URL`, or the dashboard's profile menu → **Deployer**), e.g. this service's
+`POST /wake` on a platform that stops it when idle.
 
 It's a separate process from the builder, since site builds run project code (HTML embeds). It
 lives in this workspace only to build sites with this checkout's CLI and SSG packages, so it
 always matches the builder. knowbra-webstudio runs it (`npm run dev` there starts it with the
 builder).
 
-## API
+## Jobs
 
-Defined in `@webstudio-is/deploy-protocol` (`packages/deploy-protocol`), which the builder uses
-to call it. The full contract, for writing another deployer, is in knowbra-webstudio's
-`docs/deployers.md`. Every request carries `Authorization: Bearer <DEPLOY_API_KEY>`; the service can sit
-behind a path prefix.
+`@webstudio-is/deploy-protocol` (`packages/deploy-protocol`) has the shared shapes; the tables
+are in `@webstudio-is/db`. Writing another deploy service is described in knowbra-webstudio's
+`docs/deployers.md`.
 
-| Request              | Does                                                                                                        |
-| -------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `GET /v1/hosts`      | The hosts it offers: each one's settings and credentials (JSON Schema)                                      |
-| `POST /v1/validate`  | Checks a project's target (`{ projectId, target: { host, config } }`); the builder calls it when saving one |
-| `POST /v1/publish`   | Queues a publish (below)                                                                                    |
-| `POST /v1/unpublish` | Removes a target's site                                                                                     |
-| `GET /healthz`       | Running and queued jobs (no key)                                                                            |
+- **Claiming.** The oldest queued job of this service's queue (`DEPLOY_QUEUE`) is taken with
+  `FOR UPDATE SKIP LOCKED`, so several instances never run the same job. Publishes and unpublishes
+  run one at a time; target checks run beside them, so saving a target doesn't wait for a build.
+- **Notifications are hints.** One sent while the connection was down is lost; the next poll,
+  and the catch-up after reconnecting, find the job anyway.
+- **Crashes.** A running job's heartbeat is written every 30 s. A job without one for 5 minutes
+  belonged to an instance that died: it's queued again, and failed (and reported) after three
+  tries.
+- **HTTP.** `GET /healthz` (status) and `POST /wake` (look for jobs now; `DEPLOY_WAKE_TOKEN`, if
+  set, must come as `Authorization: Bearer <token>`), under any path prefix.
 
 ## What happens on Publish
 
-1. The builder creates a production build (status `PENDING`) and sends `POST /v1/publish` with
-   the build ID, the project's target, and `builder: { origin, token }`. `token` is a token the
-   builder signs for this publish: it can read that one project and report this publish, and
-   expires after two hours.
-2. The service checks the target right away (unknown host, invalid settings, missing
-   credentials). Problems show in the Publish dialog and the builder marks the build `FAILED`.
-   Otherwise the job is queued (saved in `.data/queue/<buildId>.json`, readable only by this
-   service's user, since it holds the token) and the call returns `{ success: true }`.
-3. Jobs run one at a time, each in `.data/jobs/<buildId>` (deleted afterwards):
+1. The builder creates a production build (status `PENDING`) and queues a publish job with
+   `{ builderOrigin, token, label }`. `token` is signed by the builder for this publish: it can
+   read that one project and report this publish, and expires after two hours. A newer publish
+   of the same project replaces one still waiting.
+2. This service takes the job and checks the project's saved target (unknown host, invalid
+   settings, missing credentials), failing early when it can't work.
+3. It builds in `.data/jobs/<buildId>` (deleted afterwards):
    - `pnpm deploy` the checkout's `ssg-cloudflare-pages` fixture (its dependencies are the
      checkout's own SSG packages, hardlinked from the pnpm store);
-   - `webstudio sync --buildId … --origin <builder.origin> --authToken <builder.token>`;
+   - `webstudio sync --buildId … --origin <builderOrigin> --authToken <token>`;
    - `webstudio build --template ssg --template internal`, then `npm run build`;
-   - only now are the project's credentials read from the database, and the host adapter
-     uploads `dist/client`.
-4. The service reports the result to `POST <builder.origin>/rest/deployments/<buildId>` with the
-   token: `{ status: "PUBLISHED", url }` or `{ status: "FAILED", error }`, retrying a few times.
-   The builder marks the build and saves `url` as the project's published link. Each job's log
-   is in `.data/logs/<buildId>.log`.
+   - only now are the project's target and credentials read again, and the host adapter uploads
+     `dist/client`.
+4. It reports to `POST <builderOrigin>/rest/deployments/<buildId>` with the token:
+   `{ status: "PUBLISHED", url }` or `{ status: "FAILED", error }`, retrying a few times, and
+   records the outcome on the job. The builder marks the build and saves `url` as the project's
+   published link. Each job's log is in `.data/logs/<buildId>.log`.
 
 Build commands get only what pnpm, npm and the CLI need from the environment (`PATH`, `HOME`, …),
-never this service's key.
+never this service's database login or keys.
 
 ## Hosts
 
@@ -64,8 +67,8 @@ never this service's key.
 Settings come from the builder, so no host takes a path: `directory` writes only under
 `DEPLOY_SITES_DIR` (and is off without it). Credentials are entered per project in the builder,
 which stores them encrypted; this service reads them from the builder's database
-(`ProjectDeployTarget.credentials`, nothing else) and decrypts them with the shared
-`DEPLOY_CREDENTIALS_KEY`, keeping them in memory for the job only.
+(`ProjectDeployTarget`) and decrypts them with the shared `DEPLOY_CREDENTIALS_KEY`, keeping them
+in memory for the job only.
 
 To add a host, write an adapter (`src/adapters/types.ts`: `label`, `configSchema` with
 `.describe()`d fields, optional `credentialsSchema`, `deploy`, `remove`) and register it in
@@ -73,20 +76,50 @@ To add a host, write an adapter (`src/adapters/types.ts`: `label`, `configSchema
 
 ## Environment
 
-| Variable                 | Default             | Purpose                                                   |
-| ------------------------ | ------------------- | --------------------------------------------------------- |
-| `DEPLOY_API_KEY`         | required            | The key builders call it with (32+ characters)            |
-| `HOST`, `PORT`           | `127.0.0.1`, `3001` | Listen address. Only builders need to reach it            |
-| `DEPLOY_SITES_DIR`       | unset               | Root for the `directory` host; unset turns that host off  |
-| `DATABASE_URL`           | unset               | The builder's database, for projects' saved credentials   |
-| `DEPLOY_CREDENTIALS_KEY` | unset               | The builder's key for those credentials (32+ characters)  |
-| `WEBSTUDIO_DIR`          | this checkout       | The Webstudio checkout whose CLI and packages build sites |
-| `DEPLOYER_DATA_DIR`      | `.data`             | Job directories and logs                                  |
-| `JOB_TIMEOUT_MS`         | 15 minutes          | Per-job limit                                             |
-| `KEEP_FAILED_WORKDIRS`   | `false`             | Keep a failed job's directory for debugging               |
+| Variable                  | Default             | Purpose                                                                        |
+| ------------------------- | ------------------- | ------------------------------------------------------------------------------ |
+| `DATABASE_URL`            | required            | The builder's database, with a login limited to what this service does (below) |
+| `DEPLOY_CREDENTIALS_KEY`  | unset               | The builder's key for projects' credentials (32+ characters)                   |
+| `DEPLOY_POLL_INTERVAL_MS` | `15000`             | How often to look for jobs besides notifications                               |
+| `DEPLOY_QUEUE`            | `default`           | Takes only this queue's jobs (the builder's `DEPLOYER_QUEUE`)                  |
+| `DEPLOY_WORKER_ID`        | the host name       | Names this instance in `DeployWorker`                                          |
+| `DEPLOY_WAKE_TOKEN`       | unset               | Required on `POST /wake` when set                                              |
+| `HOST`, `PORT`            | `127.0.0.1`, `3001` | Listen address for `/healthz` and `/wake`                                      |
+| `DEPLOY_SITES_DIR`        | unset               | Root for the `directory` host; unset turns that host off                       |
+| `WEBSTUDIO_DIR`           | this checkout       | The Webstudio checkout whose CLI and packages build sites                      |
+| `DEPLOYER_DATA_DIR`       | `.data`             | Job directories and logs                                                       |
+| `JOB_TIMEOUT_MS`          | 15 minutes          | Per-job limit                                                                  |
+| `KEEP_FAILED_WORKDIRS`    | `false`             | Keep a failed job's directory for debugging                                    |
 
-The service must reach each builder at the `origin` it sends. When it can't (a private network,
-containers), set the builder's `DEPLOYER_BUILDER_URL` (or **Builder address** in its Deployer dialog).
+The service must reach the builder at the `builderOrigin` of each job. When it can't (a private
+network, containers), set the builder's `DEPLOYER_BUILDER_URL` (or **Builder address** in its
+Deployer dialog).
+
+### The database login
+
+Give it a login of its own (knowbra-webstudio creates `webstudio_deployer` on every start):
+
+```sql
+CREATE ROLE webstudio_deployer LOGIN PASSWORD '…';
+GRANT USAGE ON SCHEMA public TO webstudio_deployer;
+GRANT SELECT ("projectId", "host", "config", "credentials") ON "ProjectDeployTarget" TO webstudio_deployer;
+GRANT SELECT ON "DeployJob" TO webstudio_deployer;
+GRANT UPDATE ("status", "error", "result", "attempts", "workerId", "startedAt", "heartbeatAt", "finishedAt")
+  ON "DeployJob" TO webstudio_deployer;
+GRANT SELECT, INSERT, UPDATE, DELETE ON "DeployWorker" TO webstudio_deployer;
+```
+
+### Neon
+
+- Use the **direct** connection string (the host without `-pooler`). Neon's pooler runs PgBouncer
+  in transaction mode, which accepts `LISTEN` but never delivers notifications; the service warns
+  and falls back to polling when it sees a `-pooler` host. The builder can keep the pooled one.
+- **Scale to zero ends listeners**, and polling (and the service's heartbeat) keeps the compute
+  awake anyway. For a service that runs all the time, turn scale to zero off (paid plans). The
+  listener reconnects after Neon restarts the compute and looks for jobs it missed.
+- A service that should only run when needed: stop it when idle and set the builder's wake URL
+  to something that starts it (its own `/wake` on Cloud Run, a platform hook, …). A queued job
+  waits in the database until it's up.
 
 ## Run
 
@@ -99,12 +132,11 @@ Tests: `pnpm --filter @webstudio-is/deploy test` (typecheck: `… typecheck`).
 
 ## Limits
 
-- A restart (or crash) re-runs every queued publish from the start, including the one that was
-  running. One whose publish token has expired (two hours) fails, and the builder times it out.
+- A job interrupted by a crash runs again from the start once its heartbeat is stale (5 minutes).
+  A publish whose token has expired (two hours) fails, and the builder times it out.
 - The publish token is passed to the CLI as an argument (it has no environment variable for it),
   so it's visible to other processes on the same machine. Run the service in its own container.
-- Untrusted project code (HTML embeds) runs during `vite build` as this service's user. The
-  credentials are read only after the build, but the build can still read this service's
-  environment files and data directory. Run the service in its own container (the Dockerfile's
-  `deploy` target) with a database login that can read only `ProjectDeployTarget`'s
-  `projectId`, `host` and `credentials` (knowbra-webstudio creates one).
+- Untrusted project code (HTML embeds) runs during `vite build` as this service's user. Its
+  environment holds none of this service's settings, and the credentials are read only after the
+  build, but the build can still read this service's data directory. Run the service in its own
+  container (the Dockerfile's `deploy` target) with the limited database login above.

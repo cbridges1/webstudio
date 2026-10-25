@@ -18,6 +18,7 @@ import { logoutPath } from "~/shared/router-utils";
 import type { User } from "~/shared/db/user.server";
 import { ColorSchemeMenu } from "~/shared/color-scheme-menu";
 import { DeployerDialog } from "./deployer-dialog";
+import { EmailDialog } from "./email-dialog";
 
 const getAvatarLetter = (title?: string) => {
   return (title || "X").charAt(0).toLocaleUpperCase();
@@ -69,6 +70,7 @@ export const ProfileMenu = ({
   const navigate = useNavigate();
   const nameOrEmail = user.username ?? user.email ?? defaultUserName;
   const [deployerOpen, setDeployerOpen] = useState(false);
+  const [emailOpen, setEmailOpen] = useState(false);
   return (
     <>
       <DropdownMenu>
@@ -88,6 +90,9 @@ export const ProfileMenu = ({
               <DropdownMenuItem onSelect={() => setDeployerOpen(true)}>
                 Deployer
               </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setEmailOpen(true)}>
+                Email
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
             </>
           )}
@@ -97,7 +102,17 @@ export const ProfileMenu = ({
         </DropdownMenuContent>
       </DropdownMenu>
       {isAdmin && (
-        <DeployerDialog isOpen={deployerOpen} onOpenChange={setDeployerOpen} />
+        <>
+          <DeployerDialog
+            isOpen={deployerOpen}
+            onOpenChange={setDeployerOpen}
+          />
+          <EmailDialog
+            isOpen={emailOpen}
+            onOpenChange={setEmailOpen}
+            userEmail={user.email ?? undefined}
+          />
+        </>
       )}
     </>
   );

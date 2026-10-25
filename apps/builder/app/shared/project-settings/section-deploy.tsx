@@ -1,4 +1,4 @@
-// selfhost: where Publish sends this project: a target on the deployer. The deployer describes its hosts (settings and credentials as JSON Schema),
+// selfhost: where Publish sends this project: a target on the deploy service. It describes its hosts (settings and credentials as JSON Schema),
 // so this form works for any host it offers. Credentials are write-only: the builder keeps
 // them encrypted and only shows whose they are.
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -215,7 +215,13 @@ export const SectionDeploy = ({
       }
       setCredentialsText("");
       await loadSettings();
-      setMessage(remove ? "Deploy target removed." : "Saved.");
+      setMessage(
+        remove
+          ? "Deploy target removed."
+          : "warning" in result && result.warning
+            ? result.warning
+            : "Saved."
+      );
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -235,16 +241,16 @@ export const SectionDeploy = ({
         </Text>
         {settings?.hasDeployer === false && (
           <Text>
-            No deployer is set up yet.{" "}
+            No deploy service has connected to this builder yet.{" "}
             {settings.canManageDeployer
-              ? "Set it in the dashboard: profile menu → Deployer."
-              : "Ask an admin to set one up."}
+              ? "Start one (apps/deploy) with this builder's database; the dashboard's profile menu → Deployer shows its status."
+              : "Ask an admin to start one."}
           </Text>
         )}
         {settings?.hasDeployer === true && (
           <>
             {hosts === undefined && error === undefined && (
-              <Text color="subtle">Asking the deployer for its hosts…</Text>
+              <Text color="subtle">Loading the deploy service's hosts…</Text>
             )}
             {hosts !== undefined && (
               <Grid gap={1}>

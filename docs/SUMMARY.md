@@ -97,7 +97,6 @@
   * [📛 Built with Webstudio](university/core-components/built-with-webstudio.md)
 * [⬛ CLI](university/cli.md)
 * [🤖 MCP](university/mcp.md)
-* [✨ Inception](university/inception.md)
 * [▫️ Radix UI Components](university/radix/README.md)
   * [Accordion](university/radix/accordion.md)
   * [Checkbox](university/radix/checkbox.md)

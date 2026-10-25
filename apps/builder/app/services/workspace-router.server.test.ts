@@ -1,10 +1,12 @@
-import { describe, test, expect } from "vitest";
+import { afterEach, describe, test, expect } from "vitest";
 import { notification } from "@webstudio-is/db";
 import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import { createCallerFactory } from "@webstudio-is/trpc-interface/index.server";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import { defaultPlanFeatures } from "@webstudio-is/plans";
 import { workspaceRouter } from "./workspace-router.server";
+import env from "~/env/env.server";
+import { emailTransport } from "./email.server";
 
 const db = setupTestDb();
 
@@ -153,5 +155,65 @@ describe("listMembers", () => {
       expect(result.data.members).toHaveLength(2);
       expect(result.data.pendingInvites).toHaveLength(0);
     }
+  });
+});
+
+describe("addMember email", () => {
+  const originalCreate = emailTransport.create;
+  afterEach(() => {
+    emailTransport.create = originalCreate;
+    env.SMTP_HOST = undefined;
+    env.SMTP_FROM = undefined;
+  });
+
+  const captureMail = (fail = false) => {
+    const sent: Record<string, unknown>[] = [];
+    emailTransport.create = () =>
+      ({
+        sendMail: async (mail: Record<string, unknown>) => {
+          if (fail) {
+            throw new Error("SMTP down");
+          }
+          sent.push(mail);
+          return {};
+        },
+      }) as unknown as ReturnType<typeof originalCreate>;
+    return sent;
+  };
+
+  const invite = () =>
+    createCaller(createContext()).addMember({
+      workspaceId: WS1,
+      email: "invitee@test.com",
+      relation: "editors",
+    });
+
+  test("isn't sent without email set up", async () => {
+    await setupAddMember();
+    const sent = captureMail();
+    expect(await invite()).toMatchObject({ success: true, emailed: false });
+    expect(sent).toEqual([]);
+  });
+
+  test("tells the invitee when email is set up", async () => {
+    await setupAddMember();
+    env.SMTP_HOST = "smtp.test";
+    env.SMTP_FROM = "noreply@test.com";
+    const sent = captureMail();
+    expect(await invite()).toMatchObject({ success: true, emailed: true });
+    expect(sent).toEqual([
+      expect.objectContaining({
+        to: "invitee@test.com",
+        subject: expect.stringContaining("invited you to"),
+      }),
+    ]);
+  });
+
+  test("a mail failure doesn't fail the invite", async () => {
+    await setupAddMember();
+    env.SMTP_HOST = "smtp.test";
+    env.SMTP_FROM = "noreply@test.com";
+    captureMail(true);
+    expect(await invite()).toMatchObject({ success: true, emailed: false });
   });
 });

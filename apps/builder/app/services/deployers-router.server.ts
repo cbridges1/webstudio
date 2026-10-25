@@ -1,4 +1,4 @@
-// selfhost: the deployer and project deploy targets (deployers.server.ts).
+// selfhost: the deploy service settings and project deploy targets (deployers.server.ts).
 import { z } from "zod";
 import {
   createErrorResponse,
@@ -12,7 +12,6 @@ import {
   loadDeployerSettings,
   loadProjectDeploySettings,
   projectTargetInput,
-  removeDeployer,
   saveDeployer,
   setProjectDeployTarget,
 } from "./deployers.server";
@@ -34,15 +33,7 @@ export const deployerRouter = router({
     .input(deployerInput)
     .mutation(({ input, ctx }) => respond(() => saveDeployer(input, ctx))),
 
-  remove: procedure.mutation(({ ctx }) => respond(() => removeDeployer(ctx))),
-
-  check: procedure.mutation(async ({ ctx }) => {
-    try {
-      return await checkDeployer(ctx);
-    } catch (error) {
-      return createErrorResponse(error);
-    }
-  }),
+  check: procedure.mutation(({ ctx }) => respond(() => checkDeployer(ctx))),
 
   projectSettings: procedure
     .input(z.object({ projectId: z.string() }))

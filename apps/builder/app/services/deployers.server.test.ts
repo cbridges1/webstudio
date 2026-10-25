@@ -1,29 +1,38 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.hoisted(() => {
   process.env.AUTH_SECRET = "test-auth-secret";
   process.env.DEPLOY_CREDENTIALS_KEY = "test-deploy-credentials-key-0123456789";
 });
 
-import { build, eq, project, projectDeployTarget } from "@webstudio-is/db";
+import {
+  and,
+  build,
+  deployJob,
+  deployWorker,
+  eq,
+  project,
+  projectDeployTarget,
+} from "@webstudio-is/db";
 import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import {
   checkDeployer,
   createDeploymentClient,
+  jobWaits,
+  listDeployerHosts,
   loadDeployerSettings,
   loadProjectDeploySettings,
   recordDeployReport,
-  removeDeployer,
   saveDeployer,
   setProjectDeployTarget,
 } from "./deployers.server";
-import env from "~/env/env.server";
 import { createPublishToken, verifyPublishToken } from "./publish-token.server";
 import {
   credentialsKey,
   decryptCredentials,
 } from "@webstudio-is/deploy-protocol/credentials";
+import env from "~/env/env.server";
 
 const db = setupTestDb();
 
@@ -33,79 +42,158 @@ const contextFor = (userId: string) =>
     authorization: { type: "user", userId },
   }) as unknown as AppContext;
 
+const waits = { ...jobWaits };
+
+beforeEach(() => {
+  Object.assign(jobWaits, { validateMs: 2000, unpublishMs: 2000, pollMs: 5 });
+});
+
+afterEach(() => {
+  Object.assign(jobWaits, waits);
+  vi.unstubAllGlobals();
+  env.DEPLOYER_WAKE_URL = undefined;
+  env.DEPLOYER_WAKE_TOKEN = undefined;
+  env.DEPLOYER_BUILDER_URL = undefined;
+  env.DEPLOYER_QUEUE = undefined;
+  stopAnswering?.();
+});
+
 type Call = { url: string; auth: string | null; body: unknown };
 
-/** Stubs fetch as a deployer that accepts everything and records the calls. */
-const stubDeployer = (
-  respond: (path: string) => unknown = () => ({ success: true })
-) => {
+/** Stubs fetch as a wake URL that accepts everything and records the calls. */
+const stubWake = (status = 202) => {
   const calls: Call[] = [];
   vi.stubGlobal("fetch", async (input: string, init: RequestInit = {}) => {
-    const url = String(input);
     calls.push({
-      url,
+      url: String(input),
       auth: new Headers(init.headers).get("Authorization"),
       body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
     });
-    return Response.json(respond(new URL(url).pathname));
+    return new Response(null, { status });
   });
   return calls;
 };
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-  env.DEPLOYER_URL = undefined;
-  env.DEPLOYER_API_KEY = undefined;
-  env.DEPLOYER_BUILDER_URL = undefined;
-});
+let stopAnswering: (() => void) | undefined;
+
+type QueuedJob = typeof deployJob.$inferSelect;
+
+/**
+ * Plays the deploy service: finishes each queued job with `respond`'s outcome. Records the
+ * jobs it saw.
+ */
+const answerJobs = (
+  respond: (job: QueuedJob) => {
+    status: "succeeded" | "failed";
+    error?: string;
+  }
+) => {
+  const seen: QueuedJob[] = [];
+  let stopped = false;
+  stopAnswering = () => {
+    stopped = true;
+  };
+  void (async () => {
+    while (stopped === false) {
+      const queued = await db
+        .select()
+        .from(deployJob)
+        .where(eq(deployJob.status, "queued"));
+      for (const job of queued) {
+        seen.push(job);
+        const outcome = respond(job);
+        await db
+          .update(deployJob)
+          .set({ status: outcome.status, error: outcome.error ?? null })
+          .where(eq(deployJob.id, job.id));
+      }
+      await new Promise((done) => setTimeout(done, 5));
+    }
+  })();
+  return seen;
+};
 
 const target = {
   host: "directory",
   config: { site: "p1", url: "https://p1.example.com/" },
 };
 
-/** An app admin, a project owner and their project, and the deployer. */
-const setup = async () => {
-  const workspaceId = "00000000-0000-4000-8000-000000000001";
+const hosts = [
+  { id: "directory", label: "Folder", config: {}, credentials: null },
+];
+
+/** An app admin, a project owner and their project, and a registered deploy service. */
+const setup = async ({ worker = true } = {}) => {
   await seed.user(db, { id: "admin", role: "admin" });
-  await seed.workspace(db, { id: workspaceId, userId: "owner" });
-  await seed.project(db, { id: "project-1", userId: "owner", workspaceId });
-  await saveDeployer(
-    { url: "http://deploy.test/", apiKey: "secret-api-key-1234" },
-    contextFor("admin")
-  );
+  await seed.workspace(db, {
+    id: "00000000-0000-4000-8000-000000000001",
+    userId: "owner",
+  });
+  await seed.project(db, {
+    id: "project-1",
+    userId: "owner",
+    workspaceId: "00000000-0000-4000-8000-000000000001",
+  });
+  if (worker) {
+    await db.insert(deployWorker).values({ id: "deploy-1", hosts });
+  }
 };
 
-describe("deployer", () => {
-  test("admins set it without seeing the key", async () => {
+const jobs = () => db.select().from(deployJob).orderBy(deployJob.createdAt);
+
+describe("deploy service settings", () => {
+  test("admins set the wake URL and builder address without seeing the token", async () => {
     await setup();
     expect(await loadDeployerSettings(contextFor("admin"))).toEqual({
       source: "app",
-      url: "http://deploy.test/",
+      wakeUrl: null,
+      wakeTokenEnding: null,
       builderUrl: null,
-      apiKeyEnding: "1234",
+      workers: [
+        {
+          id: "deploy-1",
+          seenAt: expect.any(String),
+          running: true,
+          hosts: ["Folder"],
+        },
+      ],
     });
-    // A save without a key keeps it.
     await saveDeployer(
-      { url: "http://deploy2.test/", builderUrl: "http://builder:3000" },
+      {
+        wakeUrl: "https://deploy.test/wake",
+        wakeToken: "wake-token-1234",
+        builderUrl: "http://builder:3000",
+      },
+      contextFor("admin")
+    );
+    // A save without a token keeps it.
+    await saveDeployer(
+      { wakeUrl: "https://deploy2.test/wake", builderUrl: "" },
       contextFor("admin")
     );
     expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
-      url: "http://deploy2.test/",
-      builderUrl: "http://builder:3000",
-      apiKeyEnding: "1234",
+      wakeUrl: "https://deploy2.test/wake",
+      wakeTokenEnding: "1234",
+      builderUrl: null,
+    });
+    await saveDeployer(
+      { wakeUrl: "https://deploy2.test/wake", removeWakeToken: true },
+      contextFor("admin")
+    );
+    expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
+      wakeTokenEnding: null,
     });
   });
 
-  test("only admins manage it", async () => {
+  test("only admins manage them", async () => {
     await setup();
     await expect(loadDeployerSettings(contextFor("owner"))).rejects.toThrow(
       "Only admins"
     );
     await expect(
-      saveDeployer({ url: "http://evil.test/" }, contextFor("owner"))
+      saveDeployer({ wakeUrl: "http://evil.test/" }, contextFor("owner"))
     ).rejects.toThrow("Only admins");
-    await expect(removeDeployer(contextFor("owner"))).rejects.toThrow(
+    await expect(checkDeployer(contextFor("owner"))).rejects.toThrow(
       "Only admins"
     );
   });
@@ -113,65 +201,83 @@ describe("deployer", () => {
   test("admins have Better Auth's admin role among their roles", async () => {
     await seed.user(db, { id: "both", role: "user,admin" });
     await seed.user(db, { id: "superadmin", role: "superadmin" });
-    expect(await loadDeployerSettings(contextFor("both"))).toEqual({
-      source: "none",
+    expect(await loadDeployerSettings(contextFor("both"))).toMatchObject({
+      workers: [],
     });
     await expect(
       loadDeployerSettings(contextFor("superadmin"))
     ).rejects.toThrow("Only admins");
   });
 
-  test("the environment's replaces the saved one and can't be changed", async () => {
+  test("the environment's replace the saved ones and can't be changed", async () => {
     await setup();
-    env.DEPLOYER_URL = "http://env-deploy.test/";
-    env.DEPLOYER_API_KEY = "env-api-key-9876";
-    expect(await loadDeployerSettings(contextFor("admin"))).toEqual({
+    env.DEPLOYER_WAKE_URL = "http://env-deploy.test/wake";
+    env.DEPLOYER_WAKE_TOKEN = "env-wake-token-9876";
+    expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
       source: "env",
-      url: "http://env-deploy.test/",
+      wakeUrl: "http://env-deploy.test/wake",
+      wakeTokenEnding: "9876",
       builderUrl: null,
-      apiKeyEnding: "9876",
     });
     await expect(
-      saveDeployer({ url: "http://x.test/" }, contextFor("admin"))
-    ).rejects.toThrow("set by the builder's environment");
-    await expect(removeDeployer(contextFor("admin"))).rejects.toThrow(
-      "set by the builder's environment"
-    );
-    const calls = stubDeployer(() => ({ success: true, data: { hosts: [] } }));
-    await checkDeployer(contextFor("admin"));
+      saveDeployer({ wakeUrl: "http://x.test/" }, contextFor("admin"))
+    ).rejects.toThrow("builder's environment");
+    const calls = stubWake();
+    expect(await checkDeployer(contextFor("admin"))).toEqual({
+      wake: { ok: true, status: 202 },
+    });
     expect(calls).toEqual([
       {
-        url: "http://env-deploy.test/v1/hosts",
-        auth: "Bearer env-api-key-9876",
-        body: undefined,
+        url: "http://env-deploy.test/wake",
+        auth: "Bearer env-wake-token-9876",
+        body: { test: true },
       },
     ]);
+  });
+
+  test("a failing wake URL is reported, not thrown", async () => {
+    await setup();
+    env.DEPLOYER_WAKE_URL = "http://env-deploy.test/wake";
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("connection refused");
+    });
+    expect(await checkDeployer(contextFor("admin"))).toEqual({
+      wake: { ok: false, error: "connection refused" },
+    });
   });
 });
 
 describe("project deploy target", () => {
-  test("is checked with the deployer before it's saved", async () => {
+  test("lists the registered deploy service's hosts", async () => {
     await setup();
-    const calls = stubDeployer(() => ({ success: false, error: "bad site" }));
+    expect(
+      await listDeployerHosts({ projectId: "project-1" }, contextFor("owner"))
+    ).toEqual({ success: true, data: { hosts } });
+  });
+
+  test("is checked by the deploy service, which reads it from the database", async () => {
+    await setup();
+    const seen = answerJobs(() => ({ status: "failed", error: "bad site" }));
     expect(
       await setProjectDeployTarget(
         { projectId: "project-1", target },
         contextFor("owner")
       )
     ).toEqual({ success: false, error: "bad site" });
-    expect(calls).toEqual([
-      {
-        url: "http://deploy.test/v1/validate",
-        auth: "Bearer secret-api-key-1234",
-        body: { projectId: "project-1", target },
-      },
+    expect(seen).toEqual([
+      expect.objectContaining({
+        kind: "validate",
+        projectId: "project-1",
+        request: {},
+      }),
     ]);
+    // The first target is removed again.
     expect(await db.select().from(projectDeployTarget)).toEqual([]);
   });
 
   test("is saved and loaded", async () => {
     await setup();
-    stubDeployer();
+    answerJobs(() => ({ status: "succeeded" }));
     expect(
       await setProjectDeployTarget(
         { projectId: "project-1", target },
@@ -190,11 +296,48 @@ describe("project deploy target", () => {
     });
   });
 
-  test("keeps credentials encrypted for the deployer to read, never sending them", async () => {
+  test("is kept unchecked when the deploy service doesn't answer", async () => {
+    await setup();
+    jobWaits.validateMs = 50;
+    expect(
+      await setProjectDeployTarget(
+        { projectId: "project-1", target },
+        contextFor("owner")
+      )
+    ).toEqual({
+      success: true,
+      warning: expect.stringContaining("didn't check it in time"),
+    });
+    expect(await db.select().from(projectDeployTarget)).toHaveLength(1);
+    // Nobody took the check, so it's dropped.
+    expect(await jobs()).toMatchObject([{ status: "canceled" }]);
+  });
+
+  test("is kept unchecked before any deploy service has connected", async () => {
+    await setup({ worker: false });
+    expect(
+      await setProjectDeployTarget(
+        { projectId: "project-1", target },
+        contextFor("owner")
+      )
+    ).toEqual({
+      success: true,
+      warning: expect.stringContaining("No deploy service has connected"),
+    });
+    expect(await jobs()).toEqual([]);
+    expect(
+      await loadProjectDeploySettings(
+        { projectId: "project-1" },
+        contextFor("owner")
+      )
+    ).toMatchObject({ hasDeployer: false });
+  });
+
+  test("keeps credentials encrypted for the deploy service to read, never putting them in jobs", async () => {
     await setup();
     let accept = true;
-    const calls = stubDeployer(() =>
-      accept ? { success: true } : { success: false, error: "bad key" }
+    answerJobs(() =>
+      accept ? { status: "succeeded" } : { status: "failed", error: "bad key" }
     );
     const firebase = { host: "firebase", config: { site: "my-site" } };
     const key = {
@@ -203,10 +346,7 @@ describe("project deploy target", () => {
     };
     const save = (credentials?: Record<string, unknown> | null) =>
       setProjectDeployTarget(
-        {
-          projectId: "project-1",
-          target: { ...firebase, credentials },
-        },
+        { projectId: "project-1", target: { ...firebase, credentials } },
         contextFor("owner")
       );
     const saved = async () => {
@@ -224,11 +364,6 @@ describe("project deploy target", () => {
         .target?.credentials;
 
     expect(await save(key)).toEqual({ success: true });
-    // The deployer checks the saved target, reading the credentials itself.
-    expect(calls.at(-1)!.body).toEqual({
-      projectId: "project-1",
-      target: firebase,
-    });
     const [row] = await db.select().from(projectDeployTarget);
     expect(row.credentials).toMatch(/^enc1\./);
     expect(row.credentials).not.toContain("very-secret");
@@ -261,11 +396,7 @@ describe("project deploy target", () => {
       buildId: "build-1",
       label: "Project",
     });
-    expect(calls.at(-1)!.body).toMatchObject({
-      projectId: "project-1",
-      target: firebase,
-    });
-    expect(JSON.stringify(calls)).not.toContain("very-secret");
+    expect(JSON.stringify(await jobs())).not.toContain("very-secret");
 
     // Another project can't use a copied value.
     await seed.project(db, {
@@ -281,172 +412,142 @@ describe("project deploy target", () => {
     expect(await save(null)).toEqual({ success: true });
     expect(await summary()).toEqual({ status: "none" });
   });
-
-  test("puts back no target when the first check fails", async () => {
-    await setup();
-    stubDeployer(() => ({ success: false, error: "no" }));
-    await setProjectDeployTarget(
-      {
-        projectId: "project-1",
-        target: {
-          host: "firebase",
-          config: {},
-          credentials: { a: 1 },
-        },
-      },
-      contextFor("owner")
-    );
-    expect(await db.select().from(projectDeployTarget)).toEqual([]);
-  });
-
-  test("stays when the deployer is removed", async () => {
-    await setup();
-    stubDeployer();
-    await setProjectDeployTarget(
-      { projectId: "project-1", target },
-      contextFor("owner")
-    );
-    await removeDeployer(contextFor("admin"));
-    expect(await db.select().from(projectDeployTarget)).toHaveLength(1);
-    expect(
-      await loadProjectDeploySettings(
-        { projectId: "project-1" },
-        contextFor("owner")
-      )
-    ).toMatchObject({ hasDeployer: false });
-    await expect(
-      setProjectDeployTarget(
-        { projectId: "project-1", target },
-        contextFor("owner")
-      )
-    ).rejects.toThrow("No deployer is set up");
-  });
 });
 
 describe("publish", () => {
-  const seedBuild = () =>
+  const seedBuild = (id = "build-1") =>
     seed.build(db, {
-      id: "build-1",
+      id,
       projectId: "project-1",
       deployment: JSON.stringify({ destination: "saas", domains: [] }),
       publishStatus: "PENDING",
     });
 
-  const buildStatus = async () =>
+  const buildRow = async (id = "build-1") =>
     (
       await db
-        .select({ status: build.publishStatus })
+        .select({ status: build.publishStatus, error: build.publishError })
         .from(build)
-        .where(eq(build.id, "build-1"))
-    )[0].status;
-  const buildError = async () =>
-    (
-      await db
-        .select({ error: build.publishError })
-        .from(build)
-        .where(eq(build.id, "build-1"))
-    )[0].error;
+        .where(eq(build.id, id))
+    )[0];
 
-  test("sends the build, a scoped token and the target", async () => {
-    await setup();
-    await seedBuild();
-    const calls = stubDeployer();
-    await setProjectDeployTarget(
-      { projectId: "project-1", target },
-      contextFor("owner")
-    );
-    const client = createDeploymentClient({
-      db,
-      builderOrigin: "http://localhost:5180",
-    });
+  const saveTarget = async () => {
+    await db
+      .insert(projectDeployTarget)
+      .values({ projectId: "project-1", ...target });
+  };
 
-    expect(
-      await client.publish({
-        projectId: "project-1",
-        buildId: "build-1",
-        label: "Project",
-      })
-    ).toEqual({ success: true });
-
-    const publish = calls.at(-1)!;
-    expect(publish.url).toBe("http://deploy.test/v1/publish");
-    const body = publish.body as {
-      builder: { origin: string; token: string };
-    };
-    expect(body).toMatchObject({
-      buildId: "build-1",
-      builder: { origin: "http://localhost:5180" },
-      target,
+  const publish = (
+    buildId = "build-1",
+    builderOrigin = "http://localhost:5180"
+  ) =>
+    createDeploymentClient({ db, builderOrigin }).publish({
+      projectId: "project-1",
+      buildId,
       label: "Project",
     });
-    expect(verifyPublishToken(body.builder.token)).toMatchObject({
+
+  test("queues a job with a scoped token and the builder's address, and wakes the deploy service", async () => {
+    await setup();
+    await saveTarget();
+    await seedBuild();
+    env.DEPLOYER_WAKE_URL = "https://deploy.test/wake";
+    const wakes = stubWake();
+
+    expect(await publish()).toEqual({ success: true });
+
+    const [job] = await jobs();
+    expect(job).toMatchObject({
+      kind: "publish",
       projectId: "project-1",
       buildId: "build-1",
+      status: "queued",
+      request: { builderOrigin: "http://localhost:5180", label: "Project" },
     });
-    expect(await buildStatus()).toBe("PENDING");
+    expect(
+      verifyPublishToken((job.request as { token: string }).token)
+    ).toMatchObject({ projectId: "project-1", buildId: "build-1" });
+    expect(wakes).toEqual([
+      {
+        url: "https://deploy.test/wake",
+        auth: null,
+        body: { jobId: job.id, kind: "publish", projectId: "project-1" },
+      },
+    ]);
+    expect((await buildRow()).status).toBe("PENDING");
   });
 
-  test("uses the deployer's builder address when it has one", async () => {
+  test("still queues when the wake URL fails", async () => {
     await setup();
+    await saveTarget();
+    await seedBuild();
+    env.DEPLOYER_WAKE_URL = "https://deploy.test/wake";
+    stubWake(503);
+    expect(await publish()).toEqual({ success: true });
+    expect(await jobs()).toHaveLength(1);
+  });
+
+  test("uses the builder address from the settings", async () => {
+    await setup();
+    await saveTarget();
+    await seedBuild();
     await saveDeployer(
-      { url: "http://deploy.test/", builderUrl: "http://builder:3000" },
+      { builderUrl: "http://builder:3000" },
       contextFor("admin")
     );
-    await seedBuild();
-    const calls = stubDeployer();
-    await setProjectDeployTarget(
-      { projectId: "project-1", target },
-      contextFor("owner")
-    );
-    await createDeploymentClient({ db, builderOrigin: "http://x" }).publish({
-      projectId: "project-1",
-      buildId: "build-1",
-      label: "Project",
-    });
-    expect(calls.at(-1)!.body).toMatchObject({
-      builder: { origin: "http://builder:3000" },
+    await publish("build-1", "http://x");
+    expect((await jobs())[0].request).toMatchObject({
+      builderOrigin: "http://builder:3000",
     });
   });
 
-  test("fails the build when no deployer is set up", async () => {
-    await seed.project(db, { id: "project-1", userId: "owner" });
+  test("replaces a publish that's still queued", async () => {
+    await setup();
+    await saveTarget();
+    await seedBuild("build-1");
+    await seedBuild("build-2");
+    await publish("build-1");
+    await publish("build-2");
+    expect((await jobs()).map((job) => [job.buildId, job.status])).toEqual([
+      ["build-1", "canceled"],
+      ["build-2", "queued"],
+    ]);
+    expect(await buildRow("build-1")).toEqual({
+      status: "FAILED",
+      error: "Replaced by a newer publish",
+    });
+  });
+
+  test("fails the build when no deploy service has connected", async () => {
+    await setup({ worker: false });
+    await saveTarget();
     await seedBuild();
-    const result = await createDeploymentClient({
-      db,
-      builderOrigin: "http://x",
-    }).publish({
-      projectId: "project-1",
-      buildId: "build-1",
-      label: "Project",
-    });
-    expect(result).toEqual({
+    expect(await publish()).toEqual({
       success: false,
-      error: expect.stringContaining("No deployer is set up"),
+      error: expect.stringContaining("No deploy service has connected"),
     });
-    expect(await buildError()).toContain("No deployer is set up");
+    expect(await buildRow()).toEqual({
+      status: "FAILED",
+      error: expect.stringContaining("No deploy service has connected"),
+    });
+    expect(await jobs()).toEqual([]);
   });
 
   test("fails the build when the project has no target", async () => {
     await setup();
     await seedBuild();
-    const result = await createDeploymentClient({
-      db,
-      builderOrigin: "http://x",
-    }).publish({
-      projectId: "project-1",
-      buildId: "build-1",
-      label: "Project",
-    });
-    expect(result).toEqual({
+    expect(await publish()).toEqual({
       success: false,
       error: expect.stringContaining("no deploy target"),
     });
-    expect(await buildStatus()).toBe("FAILED");
     // Kept on the build, so Publish can say why.
-    expect(await buildError()).toContain("no deploy target");
+    expect(await buildRow()).toEqual({
+      status: "FAILED",
+      error: expect.stringContaining("no deploy target"),
+    });
   });
 
-  test("keeps the deployer's error for a failed publish", async () => {
+  test("keeps the deploy service's error for a failed publish", async () => {
     await setup();
     await seedBuild();
     const token = createPublishToken({
@@ -461,11 +562,13 @@ describe("publish", () => {
       },
       db
     );
-    expect(await buildStatus()).toBe("FAILED");
-    expect(await buildError()).toBe("Site ID is taken");
+    expect(await buildRow()).toEqual({
+      status: "FAILED",
+      error: "Site ID is taken",
+    });
   });
 
-  test("records the deployer's report", async () => {
+  test("records the deploy service's report", async () => {
     await setup();
     await seedBuild();
     const token = createPublishToken({
@@ -480,7 +583,7 @@ describe("publish", () => {
       },
       db
     );
-    expect(await buildStatus()).toBe("PUBLISHED");
+    expect((await buildRow()).status).toBe("PUBLISHED");
     const [row] = await db
       .select({ publishedUrl: project.publishedUrl })
       .from(project)
@@ -501,33 +604,62 @@ describe("publish", () => {
         db
       )
     ).rejects.toThrow("Invalid or expired publish token");
-    expect(await buildStatus()).toBe("PENDING");
+    expect((await buildRow()).status).toBe("PENDING");
   });
 
-  test("unpublish removes the site and clears the published link", async () => {
+  const publishedUrl = async () =>
+    (
+      await db
+        .select({ publishedUrl: project.publishedUrl })
+        .from(project)
+        .where(eq(project.id, "project-1"))
+    )[0].publishedUrl;
+
+  const unpublish = () =>
+    createDeploymentClient({ db, builderOrigin: "http://x" }).unpublish({
+      projectId: "project-1",
+    });
+
+  test("unpublish has the deploy service remove the site, then clears the link", async () => {
     await setup();
-    const calls = stubDeployer();
-    await setProjectDeployTarget(
-      { projectId: "project-1", target },
-      contextFor("owner")
-    );
+    await saveTarget();
     await db
       .update(project)
       .set({ publishedUrl: "https://p1.example.com/" })
       .where(eq(project.id, "project-1"));
-    expect(
-      await createDeploymentClient({ db, builderOrigin: "http://x" }).unpublish(
-        { projectId: "project-1" }
-      )
-    ).toEqual({ success: true });
-    expect(calls.at(-1)).toMatchObject({
-      url: "http://deploy.test/v1/unpublish",
-      body: { projectId: "project-1", target },
-    });
-    const [row] = await db
-      .select({ publishedUrl: project.publishedUrl })
-      .from(project)
+    const seen = answerJobs(() => ({ status: "succeeded" }));
+    expect(await unpublish()).toEqual({ success: true });
+    expect(seen).toMatchObject([{ kind: "unpublish", projectId: "project-1" }]);
+    expect(await publishedUrl()).toBeNull();
+  });
+
+  test("unpublish keeps the link when the site couldn't be removed", async () => {
+    await setup();
+    await saveTarget();
+    await db
+      .update(project)
+      .set({ publishedUrl: "https://p1.example.com/" })
       .where(eq(project.id, "project-1"));
-    expect(row.publishedUrl).toBeNull();
+    answerJobs(() => ({ status: "failed", error: "no access" }));
+    expect(await unpublish()).toEqual({ success: false, error: "no access" });
+    expect(await publishedUrl()).toBe("https://p1.example.com/");
+  });
+
+  test("unpublish says so when nobody takes the job", async () => {
+    await setup();
+    await saveTarget();
+    jobWaits.unpublishMs = 50;
+    expect(await unpublish()).toEqual({
+      success: false,
+      error: expect.stringContaining("didn't pick up"),
+    });
+    expect(
+      await db
+        .select()
+        .from(deployJob)
+        .where(
+          and(eq(deployJob.kind, "unpublish"), eq(deployJob.status, "canceled"))
+        )
+    ).toHaveLength(1);
   });
 });

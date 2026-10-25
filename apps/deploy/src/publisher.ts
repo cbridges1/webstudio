@@ -1,28 +1,27 @@
+// Runs one job (worker.ts picks them from the builder's database): builds and deploys a
+// publish and reports it to the builder, removes an unpublished site, or checks a target.
 import { createWriteStream } from "node:fs";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   deployReportPath,
-  publishRequest,
   type DeployReport,
   type DeployResult,
-  type PublishRequest,
-  type TargetRequest,
+  type PublishJobRequest,
 } from "@webstudio-is/deploy-protocol";
 import type { AnyHostAdapter, Log } from "./adapters/types";
 import { buildStaticSite } from "@webstudio-is/deploy-protocol/site-build";
 import { describeHosts, resolveTarget, TargetError } from "./targets";
-import type { LoadCredentials } from "./credentials";
+import type { LoadCredentials, LoadTarget } from "./store";
 
 export type PublisherOptions = {
   adapters: Map<string, AnyHostAdapter>;
   webstudioDir: string;
-  /** Reads a project's saved credentials from the builder's database. */
+  /** Read a project's saved target and credentials from the builder's database. */
+  loadTarget: LoadTarget;
   loadCredentials: LoadCredentials;
   jobsDir: string;
   logsDir: string;
-  /** Queued publishes, one file each, so a restart picks them up again (resume). */
-  queueDir: string;
   jobTimeoutMs: number;
   keepFailedWorkdirs: boolean;
   buildSite?: typeof buildStaticSite;
@@ -32,6 +31,16 @@ export type PublisherOptions = {
   reportRetryDelayMs?: number;
   consoleLog?: (line: string) => void;
 };
+
+export type PublishJob = {
+  projectId: string;
+  buildId: string;
+  request: PublishJobRequest;
+};
+
+export type PublishOutcome =
+  | { success: true; url: string }
+  | { success: false; error: string };
 
 const REPORT_ATTEMPTS = 5;
 
@@ -46,22 +55,19 @@ export const createPublisher = (options: PublisherOptions) => {
     reportRetryDelayMs = 2000,
     consoleLog = (line) => console.info(line),
   } = options;
-  const queued = new Set<string>();
-  let chain = Promise.resolve();
-  let running: string | undefined;
 
-  const resolve = ({ projectId, target }: TargetRequest) =>
+  const resolve = (projectId: string) =>
     resolveTarget({
       projectId,
-      target,
       adapters,
+      loadTarget: options.loadTarget,
       loadCredentials: options.loadCredentials,
     });
 
-  /** Validation problems go back to the caller; anything else is a bug. */
-  const check = async (request: TargetRequest): Promise<DeployResult> => {
+  /** Target problems go back to the builder; anything else is a bug. */
+  const validate = async (projectId: string): Promise<DeployResult> => {
     try {
-      await resolve(request);
+      await resolve(projectId);
       return { success: true };
     } catch (error) {
       if (error instanceof TargetError) {
@@ -71,14 +77,17 @@ export const createPublisher = (options: PublisherOptions) => {
     }
   };
 
-  const report = async (job: PublishRequest, body: DeployReport, log: Log) => {
-    const url = new URL(deployReportPath(job.buildId), job.builder.origin);
+  const report = async (job: PublishJob, body: DeployReport, log: Log) => {
+    const url = new URL(
+      deployReportPath(job.buildId),
+      job.request.builderOrigin
+    );
     for (let attempt = 1; attempt <= REPORT_ATTEMPTS; attempt += 1) {
       try {
         const response = await request(url, {
           method: "POST",
           headers: {
-            Authorization: job.builder.token,
+            Authorization: job.request.token,
             "Content-Type": "application/json",
           },
           body: JSON.stringify(body),
@@ -107,8 +116,10 @@ export const createPublisher = (options: PublisherOptions) => {
     );
   };
 
-  const runJob = async (job: PublishRequest) => {
-    running = job.buildId;
+  const jobLog = (buildId: string) => (line: string) =>
+    consoleLog(`[${buildId}] ${line}`);
+
+  const publish = async (job: PublishJob): Promise<PublishOutcome> => {
     await mkdir(options.logsDir, { recursive: true });
     const logFile = createWriteStream(
       join(options.logsDir, `${job.buildId}.log`),
@@ -116,7 +127,7 @@ export const createPublisher = (options: PublisherOptions) => {
     );
     const log: Log = (line) => {
       logFile.write(`${new Date().toISOString()} ${line}\n`);
-      consoleLog(`[${job.buildId}] ${line}`);
+      jobLog(job.buildId)(line);
     };
     const workDir = join(options.jobsDir, job.buildId);
     const controller = new AbortController();
@@ -124,23 +135,28 @@ export const createPublisher = (options: PublisherOptions) => {
       () => controller.abort(`timed out after ${options.jobTimeoutMs} ms`),
       options.jobTimeoutMs
     );
-    let failed = false;
+    let outcome: PublishOutcome;
     try {
-      log(`Publishing ${job.label ?? "build"} (build ${job.buildId})`);
+      log(`Publishing ${job.request.label ?? "build"} (build ${job.buildId})`);
+      // Fail before the build when the target can't work.
+      const checked = await validate(job.projectId);
+      if (checked.success === false) {
+        throw new TargetError(checked.error);
+      }
       await rm(workDir, { recursive: true, force: true });
       await mkdir(options.jobsDir, { recursive: true });
       const buildDir = await buildSite({
         webstudioDir: options.webstudioDir,
         workDir,
         buildId: job.buildId,
-        builderOrigin: job.builder.origin,
-        builderToken: job.builder.token,
+        builderOrigin: job.request.builderOrigin,
+        builderToken: job.request.token,
         log,
         signal: controller.signal,
       });
-      // Only now, after the build has run the project's code: read the credentials (they may
-      // also have changed while the job waited).
-      const { adapter, config, credentials } = await resolve(job);
+      // Only now, after the build has run the project's code: read the target and the
+      // credentials again (they may also have changed during the build).
+      const { adapter, config, credentials } = await resolve(job.projectId);
       log(`Deploying to ${adapter.label}`);
       const { url } = await adapter.deploy({
         buildDir,
@@ -149,101 +165,38 @@ export const createPublisher = (options: PublisherOptions) => {
         log,
       });
       log(`Published ${url}`);
+      outcome = { success: true, url };
       await report(job, { status: "PUBLISHED", url }, log);
     } catch (error) {
-      failed = true;
       const message = errorMessage(error);
       log(`FAILED: ${message}`);
+      outcome = { success: false, error: message };
       await report(job, { status: "FAILED", error: message }, log);
     } finally {
       clearTimeout(timeout);
-      if (failed === false || options.keepFailedWorkdirs === false) {
-        await rm(workDir, { recursive: true, force: true }).catch(() => {});
-      }
       await new Promise<void>((done) => logFile.end(done));
-      await rm(queueFile(job.buildId), { force: true }).catch(() => {});
-      queued.delete(job.buildId);
-      running = undefined;
     }
-  };
-
-  const queueFile = (buildId: string) =>
-    join(options.queueDir, `${encodeURIComponent(buildId)}.json`);
-
-  const enqueue = (job: PublishRequest) => {
-    queued.add(job.buildId);
-    chain = chain
-      .then(() => runJob(job))
-      .catch((error) => {
-        consoleLog(`[${job.buildId}] job crashed: ${String(error)}`);
-        queued.delete(job.buildId);
-        running = undefined;
-      });
+    if (outcome.success || options.keepFailedWorkdirs === false) {
+      await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+    return outcome;
   };
 
   return {
-    status: () => ({ running, queued: queued.size }),
-
     hosts: () => describeHosts(adapters),
 
-    validate: check,
+    validate,
 
-    /** Checks the target right away, so problems show in the Publish dialog, then queues. */
-    async publish(job: PublishRequest): Promise<DeployResult> {
-      const result = await check(job);
-      if (result.success === false) {
-        consoleLog(`[${job.buildId}] rejected: ${result.error}`);
-        return result;
-      }
-      if (queued.has(job.buildId)) {
-        return { success: true };
-      }
-      // Holds the builder's publish token, so only this service's user can read it.
-      await mkdir(options.queueDir, { recursive: true, mode: 0o700 });
-      await writeFile(queueFile(job.buildId), JSON.stringify(job), {
-        mode: 0o600,
-      });
-      enqueue(job);
-      return { success: true };
-    },
+    publish,
 
-    /**
-     * Queues the publishes a previous run accepted but didn't finish (a restart or a crash).
-     * They run again from the start; one whose publish token has expired fails and the builder
-     * times it out.
-     */
-    async resume() {
-      const files = await readdir(options.queueDir).catch(() => []);
-      let resumed = 0;
-      for (const file of files
-        .filter((name) => name.endsWith(".json"))
-        .sort()) {
-        const path = join(options.queueDir, file);
-        let json: unknown;
-        try {
-          json = JSON.parse(await readFile(path, "utf8"));
-        } catch {
-          json = undefined;
-        }
-        const parsed = publishRequest.safeParse(json);
-        if (parsed.success === false) {
-          consoleLog(`Dropping unreadable queued publish ${file}`);
-          await rm(path, { force: true });
-          continue;
-        }
-        if (queued.has(parsed.data.buildId) === false) {
-          consoleLog(`[${parsed.data.buildId}] resuming a queued publish`);
-          enqueue(parsed.data);
-          resumed += 1;
-        }
-      }
-      return resumed;
-    },
+    /** Tells the builder a publish failed without running it (e.g. a worker died on it). */
+    reportFailure: (job: PublishJob, error: string) =>
+      report(job, { status: "FAILED", error }, jobLog(job.buildId)),
 
-    async unpublish(request: TargetRequest): Promise<DeployResult> {
-      const log: Log = (line) => consoleLog(`[unpublish] ${line}`);
+    async unpublish(projectId: string): Promise<DeployResult> {
+      const log: Log = (line) => consoleLog(`[unpublish ${projectId}] ${line}`);
       try {
-        const { adapter, config, credentials } = await resolve(request);
+        const { adapter, config, credentials } = await resolve(projectId);
         await adapter.remove({ config, credentials, log });
         return { success: true };
       } catch (error) {
@@ -252,9 +205,6 @@ export const createPublisher = (options: PublisherOptions) => {
         return { success: false, error: message };
       }
     },
-
-    /** Resolves when every queued job has finished (tests and shutdown). */
-    idle: () => chain,
   };
 };
 

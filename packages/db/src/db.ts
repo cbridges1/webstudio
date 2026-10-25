@@ -31,6 +31,11 @@ export const createDb = (
     connectionString: normalizeUrl(url),
     max: options.max,
   });
+  // An idle connection the server closed (a restart, or Neon suspending its compute) would
+  // otherwise crash the process; the pool opens a new one for the next query.
+  pool.on("error", (error) => {
+    console.warn(`Database connection closed: ${error.message}`);
+  });
   return drizzle(pool, { schema });
 };
 

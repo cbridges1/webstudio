@@ -22,6 +22,8 @@ import { preventCrossOriginCookie } from "~/services/no-cross-origin-cookie";
 import { redirect } from "~/services/no-store-redirect";
 import { allowedDestinations } from "~/services/destinations.server";
 import { createPrivateNoStoreHeaders } from "~/services/cache-control.server";
+import { getDb } from "@webstudio-is/db";
+import { isEmailEnabled } from "~/services/email.server";
 export { ErrorBoundary } from "~/shared/error/error-boundary";
 
 export const links: LinksFunction = () => {
@@ -96,6 +98,9 @@ export const loader = async ({
         env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
       ),
       isUsernameLoginEnabled: env.AUTH_USERNAME_LOGIN === "true",
+      isPasswordResetEnabled:
+        env.AUTH_USERNAME_LOGIN === "true" &&
+        (await isEmailEnabled(getDb(env.DATABASE_URL))),
     },
     { headers }
   );

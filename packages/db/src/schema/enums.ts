@@ -28,3 +28,18 @@ export const publishStatus = pgEnum("PublishStatus", [
 ]);
 
 export const uploadStatus = pgEnum("UploadStatus", ["UPLOADING", "UPLOADED"]);
+
+// selfhost: the deploy service's job queue (DeployJob).
+export const deployJobKind = pgEnum("DeployJobKind", [
+  "publish",
+  "unpublish",
+  "validate",
+]);
+
+export const deployJobStatus = pgEnum("DeployJobStatus", [
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "canceled",
+]);

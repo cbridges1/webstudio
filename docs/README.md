@@ -26,10 +26,6 @@ Our getting started guide will help you navigate through building your first Web
 [cli.md](university/cli.md)
 {% endcontent-ref %}
 
-{% content-ref url="university/inception.md" %}
-[inception.md](university/inception.md)
-{% endcontent-ref %}
-
 {% content-ref url="university/radix/" %}
 [radix](university/radix/)
 {% endcontent-ref %}

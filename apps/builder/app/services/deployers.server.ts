@@ -1,30 +1,44 @@
-// selfhost: the deployer and projects' deploy targets.
+// selfhost: the deploy service and projects' deploy targets.
 //
-// The deployer is the one deploy service (apps/deploy, or anything speaking
-// @webstudio-is/deploy-protocol's REST API) every project publishes through. It comes from
-// the builder's environment (DEPLOYER_URL, DEPLOYER_API_KEY, DEPLOYER_BUILDER_URL) or, when
-// that isn't set, from what an app admin (a user with Better Auth's "admin" role) saves in
-// the dashboard. Each project picks a target there (a host, its settings and its
-// credentials). Credentials are stored encrypted with DEPLOY_CREDENTIALS_KEY
-// (@webstudio-is/deploy-protocol/credentials) and never sent: the deployer reads them from
-// this database. Publish sends the build with a token scoped to the project
-// (publish-token.server.ts); the deployer reports the result back to
-// /rest/deployments/<buildId>.
+// The builder and the deploy service (apps/deploy) share this database. Publish, unpublish
+// and target checks are queued as DeployJob rows with a NOTIFY on DEPLOY_JOBS_CHANNEL; the
+// deploy service LISTENs (and polls), runs them and records the outcome, and registers itself
+// and its hosts in DeployWorker. Optionally the builder also POSTs to a wake URL whenever it
+// queues a job, to start a deploy service that is stopped while idle.
+//
+// The wake URL, its token and the builder's address as the deploy service reaches it come
+// from the builder's environment (DEPLOYER_WAKE_URL, DEPLOYER_WAKE_TOKEN,
+// DEPLOYER_BUILDER_URL) or, when none is set, from what an app admin (a user with Better
+// Auth's "admin" role) saves in the dashboard. Each project sets its target (a host, its
+// settings and its credentials) in its settings. Credentials are stored encrypted with
+// DEPLOY_CREDENTIALS_KEY (@webstudio-is/deploy-protocol/credentials); the deploy service reads
+// and decrypts them itself. A publish job carries a token scoped to the project
+// (publish-token.server.ts) for downloading the build; the deploy service reports the result
+// to /rest/deployments/<buildId>.
 import {
-  createDeployServiceClient,
+  DEPLOY_JOBS_CHANNEL,
   deployCredentials,
   deployReport,
   deployTarget,
+  hostInfo,
   type DeployResult,
-  type DeployTarget,
+  type HostInfo,
+  type PublishJobRequest,
 } from "@webstudio-is/deploy-protocol";
 import {
+  and,
   build,
-  deployer,
+  deployJob,
+  deploySettings,
+  deployWorker,
+  desc,
   eq,
+  inArray,
   maybeOne,
+  ne,
   project,
   projectDeployTarget,
+  sql,
   user,
   type Db,
   type Json,
@@ -49,56 +63,177 @@ import env from "~/env/env.server";
 const NO_TARGET =
   "This project has no deploy target. Choose one in Project settings → Deploy.";
 const NO_DEPLOYER =
-  "No deployer is set up. An admin sets it in the dashboard: profile menu → Deployer.";
+  "No deploy service has connected to this builder's database yet. Start one (apps/deploy) with this database's DATABASE_URL.";
 
-type Deployer = {
+/** How long the builder waits for the deploy service to finish a job it waits on. */
+export const jobWaits = {
+  validateMs: 10_000,
+  unpublishMs: 60_000,
+  pollMs: 250,
+};
+
+/** A deploy service seen this recently is running (it marks itself every poll, ≤ 1 min). */
+const RUNNING_WITHIN_MS = 3 * 60_000;
+
+type Settings = {
   /** "env": from the builder's environment, which the app can't change. */
   source: "env" | "app";
-  url: string;
-  apiKey: string;
-  /** The builder's address as the deployer reaches it. Null: the builder's own origin. */
+  wakeUrl: string | null;
+  wakeToken: string | null;
+  /** The builder's address as the deploy service reaches it. Null: the builder's own origin. */
   builderUrl: string | null;
 };
 
-/** The environment's deployer, else the one saved in the app, else undefined. */
-const loadDeployer = async (db: Db): Promise<Deployer | undefined> => {
-  if (env.DEPLOYER_URL !== undefined) {
+const settingsFromEnv = () =>
+  env.DEPLOYER_WAKE_URL !== undefined ||
+  env.DEPLOYER_WAKE_TOKEN !== undefined ||
+  env.DEPLOYER_BUILDER_URL !== undefined;
+
+/** The environment's settings, else the ones saved in the app (all empty when none are). */
+const loadSettings = async (db: Db): Promise<Settings> => {
+  if (settingsFromEnv()) {
     return {
       source: "env",
-      url: env.DEPLOYER_URL,
-      apiKey: env.DEPLOYER_API_KEY ?? "",
+      wakeUrl: env.DEPLOYER_WAKE_URL ?? null,
+      wakeToken: env.DEPLOYER_WAKE_TOKEN ?? null,
       builderUrl: env.DEPLOYER_BUILDER_URL ?? null,
     };
   }
-  const row = maybeOne(await db.select().from(deployer));
-  return row === null
-    ? undefined
-    : {
-        source: "app",
-        url: row.url,
-        apiKey: row.apiKey,
-        builderUrl: row.builderUrl,
-      };
+  const row = maybeOne(await db.select().from(deploySettings));
+  return {
+    source: "app",
+    wakeUrl: row?.wakeUrl ?? null,
+    wakeToken: row?.wakeToken ?? null,
+    builderUrl: row?.builderUrl ?? null,
+  };
 };
 
-const requireDeployer = async (db: Db) => {
-  const found = await loadDeployer(db);
-  if (found === undefined) {
-    throw new Error(NO_DEPLOYER);
+/** The job queue this builder's deploy services take from. */
+const jobQueue = () => env.DEPLOYER_QUEUE ?? "default";
+
+/** This queue's deploy services that have registered, most recently seen first. */
+const loadWorkers = async (db: Db) => {
+  const rows = await db
+    .select()
+    .from(deployWorker)
+    .where(eq(deployWorker.queue, jobQueue()))
+    .orderBy(desc(deployWorker.seenAt));
+  return rows.map((row) => ({
+    id: row.id,
+    seenAt: row.seenAt,
+    running: Date.now() - new Date(row.seenAt).getTime() < RUNNING_WITHIN_MS,
+    hosts: z.array(hostInfo).catch([]).parse(row.hosts),
+  }));
+};
+
+/** POSTs to the wake URL; never throws. */
+const wake = async (
+  settings: Settings,
+  body: Record<string, unknown>
+): Promise<{ ok: boolean; status?: number; error?: string } | undefined> => {
+  if (settings.wakeUrl === null) {
+    return;
   }
-  return found;
+  try {
+    const response = await fetch(settings.wakeUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(settings.wakeToken
+          ? { Authorization: `Bearer ${settings.wakeToken}` }
+          : {}),
+      },
+      body: JSON.stringify(body),
+      // A stopped service may take a while to answer; the request has started it by then.
+      signal: AbortSignal.timeout(10_000),
+    });
+    await response.body?.cancel();
+    if (response.ok === false) {
+      console.warn(`Deploy wake URL answered ${response.status}`);
+    }
+    return { ok: response.ok, status: response.status };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Deploy wake URL failed: ${message}`);
+    return { ok: false, error: message };
+  }
 };
 
-const clientFor = (found: Deployer) =>
-  createDeployServiceClient({ url: found.url, apiKey: found.apiKey });
+type JobKind = (typeof deployJob.kind.enumValues)[number];
 
-export const deployerInput = z.object({
-  url: z.string().trim().url(),
-  /** Empty or missing keeps the saved key. */
-  apiKey: z.string().trim().optional(),
-  /** The builder's address as the deployer reaches it. Empty: the builder's own origin. */
-  builderUrl: z.union([z.string().trim().url(), z.literal("")]).optional(),
-});
+/**
+ * Queues a job, notifies the deploy service in the same transaction (the notification is sent
+ * on commit) and calls the wake URL. Also drops old finished jobs.
+ */
+const queueJob = async (
+  db: Db,
+  job: {
+    kind: JobKind;
+    projectId: string;
+    buildId?: string;
+    request?: Json;
+  }
+) => {
+  const id = await db.transaction(async (tx) => {
+    await tx
+      .delete(deployJob)
+      .where(
+        and(
+          inArray(deployJob.status, ["succeeded", "failed", "canceled"]),
+          sql`${deployJob.createdAt} < now() - interval '7 days'`
+        )
+      );
+    const [row] = await tx
+      .insert(deployJob)
+      .values({
+        queue: jobQueue(),
+        kind: job.kind,
+        projectId: job.projectId,
+        buildId: job.buildId ?? null,
+        request: job.request ?? {},
+      })
+      .returning({ id: deployJob.id });
+    await tx.execute(sql`SELECT pg_notify(${DEPLOY_JOBS_CHANNEL}, ${row.id})`);
+    return row.id;
+  });
+  await wake(await loadSettings(db), {
+    jobId: id,
+    kind: job.kind,
+    projectId: job.projectId,
+  });
+  return id;
+};
+
+/**
+ * Waits for a job to finish. When it doesn't in time, a job nobody took is canceled (and
+ * reported as "queued"); one that's running keeps running.
+ */
+const waitForJob = async (db: Db, id: string, timeoutMs: number) => {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const row = maybeOne(
+      await db
+        .select({ status: deployJob.status, error: deployJob.error })
+        .from(deployJob)
+        .where(eq(deployJob.id, id))
+    );
+    if (row === null) {
+      return { status: "canceled" as const };
+    }
+    if (row.status === "succeeded" || row.status === "failed") {
+      return { status: row.status, error: row.error ?? "Failed" };
+    }
+    if (Date.now() >= deadline) {
+      const canceled = await db
+        .update(deployJob)
+        .set({ status: "canceled", finishedAt: sql`now()` })
+        .where(and(eq(deployJob.id, id), eq(deployJob.status, "queued")))
+        .returning({ id: deployJob.id });
+      return { status: canceled.length > 0 ? ("queued" as const) : row.status };
+    }
+    await new Promise((done) => setTimeout(done, jobWaits.pollMs));
+  }
+};
 
 /** Users with Better Auth's admin role (roles are comma-separated). */
 export const isAppAdmin = async (db: Db, userId: string) => {
@@ -113,75 +248,78 @@ const assertAppAdmin = async (context: AppContext) => {
     context.authorization.type !== "user" ||
     (await isAppAdmin(context.db, context.authorization.userId)) === false
   ) {
-    throw new AuthorizationError("Only admins can set up the deployer");
+    throw new AuthorizationError("Only admins can set up the deploy service");
   }
 };
 
-// App admins: the deployer.
+// App admins: how the builder reaches the deploy service.
 
-/** What the browser may see: never the API key, only its last characters. */
+export const deployerInput = z.object({
+  /** Empty: no wake URL. */
+  wakeUrl: z.union([z.string().trim().url(), z.literal("")]).optional(),
+  /** Empty or missing keeps the saved token. */
+  wakeToken: z.string().trim().optional(),
+  removeWakeToken: z.boolean().optional(),
+  /** Empty: the builder's own origin. */
+  builderUrl: z.union([z.string().trim().url(), z.literal("")]).optional(),
+});
+
+/** What the browser may see: never the wake token, only its last characters. */
 export const loadDeployerSettings = async (context: AppContext) => {
   await assertAppAdmin(context);
-  const found = await loadDeployer(context.db);
-  if (found === undefined) {
-    return { source: "none" as const };
-  }
+  const settings = await loadSettings(context.db);
   return {
-    source: found.source,
-    url: found.url,
-    builderUrl: found.builderUrl,
-    apiKeyEnding: found.apiKey.slice(-4),
+    source: settings.source,
+    wakeUrl: settings.wakeUrl,
+    wakeTokenEnding: settings.wakeToken?.slice(-4) ?? null,
+    builderUrl: settings.builderUrl,
+    workers: (await loadWorkers(context.db)).map((worker) => ({
+      id: worker.id,
+      seenAt: worker.seenAt,
+      running: worker.running,
+      hosts: worker.hosts.map((host) => host.label),
+    })),
   };
 };
 
 export type DeployerSettings = Awaited<ReturnType<typeof loadDeployerSettings>>;
-
-const assertNotFromEnv = () => {
-  if (env.DEPLOYER_URL !== undefined) {
-    throw new Error(
-      "The deployer is set by the builder's environment (DEPLOYER_URL), so it can't be changed here"
-    );
-  }
-};
 
 export const saveDeployer = async (
   input: z.infer<typeof deployerInput>,
   context: AppContext
 ) => {
   await assertAppAdmin(context);
-  assertNotFromEnv();
-  const current = maybeOne(await context.db.select().from(deployer));
-  const apiKey = input.apiKey || current?.apiKey;
-  if (apiKey === undefined) {
-    throw new Error("Enter the deployer's API key");
+  if (settingsFromEnv()) {
+    throw new Error(
+      "The deploy service settings come from the builder's environment (DEPLOYER_WAKE_URL, DEPLOYER_WAKE_TOKEN, DEPLOYER_BUILDER_URL), so they can't be changed here"
+    );
   }
+  const current = maybeOne(await context.db.select().from(deploySettings));
   const values = {
-    url: input.url,
-    apiKey,
+    wakeUrl: input.wakeUrl || null,
+    wakeToken: input.removeWakeToken
+      ? null
+      : input.wakeToken || (current?.wakeToken ?? null),
     builderUrl: input.builderUrl || null,
+    updatedAt: new Date().toISOString(),
   };
   if (current === null) {
-    await context.db.insert(deployer).values(values);
+    await context.db.insert(deploySettings).values(values);
   } else {
     await context.db
-      .update(deployer)
+      .update(deploySettings)
       .set(values)
-      .where(eq(deployer.id, current.id));
+      .where(eq(deploySettings.id, current.id));
   }
   return await loadDeployerSettings(context);
 };
 
-/** Projects keep their targets for when a deployer is set up again. */
-export const removeDeployer = async (context: AppContext) => {
-  await assertAppAdmin(context);
-  assertNotFromEnv();
-  await context.db.delete(deployer);
-};
-
-/** Calls the deployer: its hosts when it answers, its error when it doesn't. */
+/** Calls the wake URL as a test; the deploy service's status is in the settings. */
 export const checkDeployer = async (context: AppContext) => {
   await assertAppAdmin(context);
-  return await clientFor(await requireDeployer(context.db)).hosts();
+  return {
+    wake: (await wake(await loadSettings(context.db), { test: true })) ?? null,
+  };
 };
 
 // Project admins: where a project deploys.
@@ -239,7 +377,7 @@ export const loadProjectDeploySettings = async (
       .where(eq(projectDeployTarget.projectId, projectId))
   );
   return {
-    hasDeployer: (await loadDeployer(context.db)) !== undefined,
+    hasDeployer: (await loadWorkers(context.db)).length > 0,
     canManageDeployer:
       context.authorization.type === "user" &&
       (await isAppAdmin(context.db, context.authorization.userId)),
@@ -254,18 +392,28 @@ export const loadProjectDeploySettings = async (
   };
 };
 
+/** The hosts the most recently seen deploy service registered (it needn't be running). */
 export const listDeployerHosts = async (
   { projectId }: { projectId: string },
   context: AppContext
-) => {
+): Promise<{ success: true; data: { hosts: HostInfo[] } }> => {
   await assertProjectAdmin(projectId, context);
-  return await clientFor(await requireDeployer(context.db)).hosts();
+  const [latest] = await loadWorkers(context.db);
+  if (latest === undefined) {
+    throw new Error(NO_DEPLOYER);
+  }
+  return { success: true, data: { hosts: latest.hosts } };
 };
 
+export type SaveTargetResult =
+  | { success: true; warning?: string }
+  | { success: false; error: string };
+
 /**
- * Saves the target, then has the deployer check it (it reads the credentials from this
- * database, so they must be saved first) and puts the previous target back when the check
- * fails. `null` removes it.
+ * Saves the target, then has the deploy service check it (it reads the target and the
+ * credentials from this database, so they must be saved first) and puts the previous target
+ * back when the check fails. Kept unchecked, with a warning, when the deploy service doesn't
+ * answer in time. `null` removes it.
  */
 export const setProjectDeployTarget = async (
   {
@@ -273,7 +421,7 @@ export const setProjectDeployTarget = async (
     target,
   }: { projectId: string; target: z.infer<typeof projectTargetInput> | null },
   context: AppContext
-): Promise<DeployResult> => {
+): Promise<SaveTargetResult> => {
   await assertProjectAdmin(projectId, context);
   if (target === null) {
     await context.db
@@ -281,7 +429,6 @@ export const setProjectDeployTarget = async (
       .where(eq(projectDeployTarget.projectId, projectId));
     return { success: true };
   }
-  const found = await requireDeployer(context.db);
   const previous = maybeOne(
     await context.db
       .select()
@@ -308,11 +455,19 @@ export const setProjectDeployTarget = async (
     .insert(projectDeployTarget)
     .values({ projectId, ...values })
     .onConflictDoUpdate({ target: projectDeployTarget.projectId, set: values });
-  const checked = await clientFor(found).validate({
-    projectId,
-    target: { host: target.host, config: target.config },
-  });
-  if (checked.success === false) {
+
+  if ((await loadWorkers(context.db)).length === 0) {
+    return {
+      success: true,
+      warning: `Saved without a check. ${NO_DEPLOYER}`,
+    };
+  }
+  const jobId = await queueJob(context.db, { kind: "validate", projectId });
+  const checked = await waitForJob(context.db, jobId, jobWaits.validateMs);
+  if (checked.status === "succeeded") {
+    return { success: true };
+  }
+  if (checked.status === "failed") {
     if (previous === null) {
       await context.db
         .delete(projectDeployTarget)
@@ -323,36 +478,40 @@ export const setProjectDeployTarget = async (
         .set(previous)
         .where(eq(projectDeployTarget.projectId, projectId));
     }
+    return { success: false, error: checked.error };
   }
-  return checked;
+  return {
+    success: true,
+    warning:
+      "Saved, but the deploy service didn't check it in time (is it running?). Problems will show when you publish.",
+  };
 };
 
 // Publish.
 
-const loadPublishTarget = async (projectId: string, db: Db) => {
-  const found = await loadDeployer(db);
-  if (found === undefined) {
-    return { success: false as const, error: NO_DEPLOYER };
-  }
-  const row = maybeOne(
+const hasTarget = async (db: Db, projectId: string) =>
+  maybeOne(
     await db
-      .select()
+      .select({ projectId: projectDeployTarget.projectId })
       .from(projectDeployTarget)
       .where(eq(projectDeployTarget.projectId, projectId))
-  );
-  if (row === null) {
-    return { success: false as const, error: NO_TARGET };
-  }
-  const target: DeployTarget = {
-    host: row.host,
-    config: (row.config ?? {}) as Record<string, unknown>,
-  };
-  return { success: true as const, deployer: found, target };
-};
+  ) !== null;
+
+const failBuild = (db: Db, buildIds: string[], error: string) =>
+  buildIds.length === 0
+    ? Promise.resolve()
+    : db
+        .update(build)
+        .set({
+          publishStatus: "FAILED",
+          publishError: error,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(inArray(build.id, buildIds));
 
 /**
- * The deployment client for a request. `builderOrigin` is where deployers reach the
- * builder unless the deployer has its own builder address.
+ * The deployment client for a request. `builderOrigin` is where the deploy service reaches
+ * the builder unless the settings name another builder address.
  */
 export const createDeploymentClient = ({
   db,
@@ -362,51 +521,76 @@ export const createDeploymentClient = ({
   builderOrigin: string;
 }): DeploymentClient => ({
   async publish({ projectId, buildId, label }) {
-    const resolved = await loadPublishTarget(projectId, db);
-    const result: DeployResult = resolved.success
-      ? await clientFor(resolved.deployer).publish({
-          projectId,
-          buildId,
-          builder: {
-            origin: resolved.deployer.builderUrl ?? builderOrigin,
-            token: createPublishToken({ projectId, buildId }),
-          },
-          target: resolved.target,
-          label,
-        })
-      : resolved;
-    if (result.success === false) {
+    const problem =
+      (await loadWorkers(db)).length === 0
+        ? NO_DEPLOYER
+        : (await hasTarget(db, projectId)) === false
+          ? NO_TARGET
+          : undefined;
+    if (problem !== undefined) {
       // The build was created as PENDING before this call; nothing will report on it.
-      await db
-        .update(build)
-        .set({
-          publishStatus: "FAILED",
-          publishError: result.error,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(build.id, buildId));
+      await failBuild(db, [buildId], problem);
+      return { success: false, error: problem };
     }
-    return result;
+    // An older publish still waiting would only be overwritten by this one.
+    const replaced = await db
+      .update(deployJob)
+      .set({ status: "canceled", finishedAt: sql`now()` })
+      .where(
+        and(
+          eq(deployJob.projectId, projectId),
+          eq(deployJob.kind, "publish"),
+          eq(deployJob.status, "queued"),
+          ne(deployJob.buildId, buildId)
+        )
+      )
+      .returning({ buildId: deployJob.buildId });
+    await failBuild(
+      db,
+      replaced.flatMap((row) => (row.buildId === null ? [] : [row.buildId])),
+      "Replaced by a newer publish"
+    );
+    const settings = await loadSettings(db);
+    const request: PublishJobRequest = {
+      builderOrigin: settings.builderUrl ?? builderOrigin,
+      token: createPublishToken({ projectId, buildId }),
+      label,
+    };
+    await queueJob(db, { kind: "publish", projectId, buildId, request });
+    return { success: true };
   },
 
   async unpublish({ projectId }) {
-    const resolved = await loadPublishTarget(projectId, db);
-    const result: DeployResult = resolved.success
-      ? await clientFor(resolved.deployer).unpublish({
-          projectId,
-          target: resolved.target,
-        })
-      : // Without a target nothing was deployed; without a deployer it can't be removed.
-        resolved.error === NO_TARGET
-        ? { success: true }
-        : resolved;
-    if (result.success) {
+    // Without a target nothing was deployed.
+    if ((await hasTarget(db, projectId)) === false) {
       await db
         .update(project)
         .set({ publishedUrl: null })
         .where(eq(project.id, projectId));
+      return { success: true };
     }
-    return result;
+    if ((await loadWorkers(db)).length === 0) {
+      return { success: false, error: NO_DEPLOYER };
+    }
+    const jobId = await queueJob(db, { kind: "unpublish", projectId });
+    const done = await waitForJob(db, jobId, jobWaits.unpublishMs);
+    if (done.status === "succeeded") {
+      await db
+        .update(project)
+        .set({ publishedUrl: null })
+        .where(eq(project.id, projectId));
+      return { success: true };
+    }
+    const error: DeployResult = {
+      success: false,
+      error:
+        done.status === "failed"
+          ? done.error
+          : done.status === "running"
+            ? "The deploy service is still removing the site. Try again in a minute."
+            : "The deploy service didn't pick up the request (is it running?).",
+    };
+    return error;
   },
 
   async exportStatic({ projectId, buildId, templates }) {

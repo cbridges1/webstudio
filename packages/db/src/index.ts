@@ -1,6 +1,7 @@
 export * from "./schema";
 export type { Json } from "./schema/json";
 export { createDb, getDb, type Db, type Schema } from "./db";
+export { listen, type Listener } from "./listen";
 export type {
   Database,
   Tables,

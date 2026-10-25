@@ -1341,7 +1341,7 @@ Commands:
 Notes:
 
 - Use this after the agent can inspect the supplied design. There is no direct
-  Figma, screenshot, Inception, or `design.md` import command.
+  Figma, screenshot, or `design.md` import command.
 - Inspect and reuse existing variables, tokens, styles, components, assets, and
   page patterns before authoring. Build semantic editable structure rather than
   flattening the design into an image or absolute-positioned approximation.
@@ -1383,7 +1383,7 @@ Suggested commands:
 ## Generate from design input
 
 Missing:
-No command imports Figma, screenshots, Inception output, or design.md and turns it into pages/tokens/layout.
+No command imports Figma, screenshots, or design.md and turns it into pages/tokens/layout.
 
 Current fallback:
 Call `meta.guide` with `workflow:"design-input"`, let the agent inspect the supplied

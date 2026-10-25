@@ -5,6 +5,7 @@ import {
   Flex,
   InputField,
   Label,
+  Link,
   SmallIconButton,
   Text,
   theme,
@@ -19,7 +20,12 @@ const fieldCss = {
   "& input": { fontSize: 14 },
 };
 
-export const PasswordLogin = () => {
+export const PasswordLogin = ({
+  isPasswordResetEnabled = false,
+}: {
+  /** selfhost: shows "Forgot password?" when email is set up. */
+  isPasswordResetEnabled?: boolean;
+}) => {
   const [isPasswordVisible, setPasswordVisible] = useState(false);
   const [isSubmitting, setSubmitting] = useState(false);
 
@@ -85,6 +91,13 @@ export const PasswordLogin = () => {
         >
           {isSubmitting ? "Signing in…" : "Sign in"}
         </Button>
+        {isPasswordResetEnabled && (
+          <Text align="center">
+            <Link href="/login/forgot-password" color="subtle">
+              Forgot password?
+            </Link>
+          </Text>
+        )}
         <Text align="center" color="subtle">
           No account yet? Ask your administrator to create one.
         </Text>

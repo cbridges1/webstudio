@@ -5,7 +5,7 @@ import {
   credentialsKey,
   encryptCredentials,
 } from "@webstudio-is/deploy-protocol/credentials";
-import { createCredentialsLoader } from "./credentials";
+import { createCredentialsLoader, createTargetLoader } from "./store";
 
 const db = setupTestDb();
 const key = "k".repeat(40);
@@ -36,6 +36,12 @@ test("reads and decrypts a project's saved credentials", async () => {
   // Not for another host, and nothing for a project without a target.
   expect(await load("project-1", "directory")).toBeUndefined();
   expect(await load("project-2", "firebase")).toBeUndefined();
+  // The target itself, without the credentials.
+  expect(await createTargetLoader(db)("project-1")).toEqual({
+    host: "firebase",
+    config: { site: "s" },
+  });
+  expect(await createTargetLoader(db)("project-2")).toBeUndefined();
 });
 
 test("says so when the key differs from the builder's", async () => {
@@ -48,10 +54,7 @@ test("says so when the key differs from the builder's", async () => {
   );
 });
 
-test("needs a database and a key", async () => {
-  await expect(
-    createCredentialsLoader({ key })("project-1", "firebase")
-  ).rejects.toThrow("no DATABASE_URL");
+test("needs the key", async () => {
   await expect(
     createCredentialsLoader({ db })("project-1", "firebase")
   ).rejects.toThrow("DEPLOY_CREDENTIALS_KEY");

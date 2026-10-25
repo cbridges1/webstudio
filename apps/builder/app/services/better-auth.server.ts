@@ -3,8 +3,8 @@
 // Better Auth only checks credentials (and rate-limits attempts). The builder's own
 // cookie session (remix-auth) stays the only session the app uses, so the builder
 // subdomain hop and logout work as upstream wrote them. Better Auth's HTTP handler is
-// never routed: the builder calls it in-process for sign-in, and the account script
-// uses its server API.
+// never routed: the builder calls it in-process for sign-in and password resets, and the
+// account script uses its server API.
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { admin, username } from "better-auth/plugins";
@@ -24,11 +24,17 @@ export const usernamePattern = /^[a-z0-9_.-]{3,32}$/;
 
 const basePath = "/api/auth";
 
+export type ResetPasswordMail = (input: {
+  user: { email: string; name: string };
+  token: string;
+}) => Promise<void>;
+
 export const createBetterAuth = ({
   db,
   secret,
   baseURL,
   rateLimit = true,
+  sendResetPassword,
 }: {
   db: Db;
   secret: string;
@@ -36,6 +42,8 @@ export const createBetterAuth = ({
   baseURL: string;
   /** Limits sign-in attempts per client address. Only e2e runs turn it off. */
   rateLimit?: boolean;
+  /** Emails a password reset link (see email.server.ts); resets are off without it. */
+  sendResetPassword?: ResetPasswordMail;
 }) =>
   betterAuth({
     secret,
@@ -63,6 +71,13 @@ export const createBetterAuth = ({
       disableSignUp: true,
       minPasswordLength,
       maxPasswordLength,
+      // selfhost: users with an email can reset their password from the sign-in page.
+      sendResetPassword:
+        sendResetPassword === undefined
+          ? undefined
+          : ({ user, token }) => sendResetPassword({ user, token }),
+      resetPasswordTokenExpiresIn: 60 * 60,
+      revokeSessionsOnPasswordReset: true,
     },
     plugins: [
       username({
@@ -84,6 +99,8 @@ export const createBetterAuth = ({
       max: 100,
       customRules: {
         "/sign-in/username": { window: 60, max: 5 },
+        "/request-password-reset": { window: 60, max: 3 },
+        "/reset-password": { window: 60, max: 5 },
       },
     },
     advanced: {
@@ -146,4 +163,82 @@ export const signInWithUsername = async (
     await context.internalAdapter.deleteSession(body.token);
   }
   return { status: "ok", userId: body.user.id };
+};
+
+/** Calls one of Better Auth's endpoints through its handler, so its rate limits apply. */
+const callAuth = (
+  auth: BetterAuth,
+  path: string,
+  body: unknown,
+  request: Request
+) => {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  if (forwardedFor !== null) {
+    headers.set("x-forwarded-for", forwardedFor);
+  }
+  return auth.handler(
+    new Request(new URL(`${basePath}${path}`, auth.options.baseURL), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    })
+  );
+};
+
+/**
+ * Emails a reset link when an account has this email. The answer is the same either way,
+ * so it doesn't tell who has an account.
+ */
+export const requestPasswordReset = async (
+  auth: BetterAuth,
+  { email, request }: { email: string; request: Request }
+): Promise<"sent" | "rate-limited"> => {
+  const response = await callAuth(
+    auth,
+    "/request-password-reset",
+    { email: email.trim().toLowerCase() },
+    request
+  );
+  return response.status === 429 ? "rate-limited" : "sent";
+};
+
+export type PasswordResetResult =
+  | { status: "ok" }
+  | { status: "invalid-token" }
+  | { status: "rate-limited" }
+  | { status: "invalid-password"; message: string };
+
+/** Sets a new password with a reset link's token; signs the user out of Better Auth. */
+export const resetPassword = async (
+  auth: BetterAuth,
+  {
+    token,
+    password,
+    request,
+  }: { token: string; password: string; request: Request }
+): Promise<PasswordResetResult> => {
+  const response = await callAuth(
+    auth,
+    "/reset-password",
+    { token, newPassword: password },
+    request
+  );
+  if (response.ok) {
+    return { status: "ok" };
+  }
+  if (response.status === 429) {
+    return { status: "rate-limited" };
+  }
+  const body = (await response.json().catch(() => ({}))) as {
+    code?: string;
+    message?: string;
+  };
+  if (body.code === "PASSWORD_TOO_SHORT" || body.code === "PASSWORD_TOO_LONG") {
+    return {
+      status: "invalid-password",
+      message: body.message ?? "Choose another password",
+    };
+  }
+  return { status: "invalid-token" };
 };

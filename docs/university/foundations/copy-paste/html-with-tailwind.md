@@ -15,8 +15,6 @@ For general Tailwind HTML, use the **Paste HTML with Tailwind classes** command:
 
 <figure><img src="../../../.gitbook/assets/paste-html-tailwind-command.png" alt="Commands and search showing the Paste HTML with Tailwind classes command"><figcaption><p>Paste HTML with Tailwind classes command</p></figcaption></figure>
 
-HTML/Tailwind output copied from [Inception](../../inception.md#copy-htmltailwind) can also be pasted directly into the Builder.
-
 If the pasted HTML references image URLs, Webstudio uploads those images into [Assets](../assets.md) and rewrites the pasted image instances to use the uploaded assets.
 
 ## Related
@@ -24,4 +22,3 @@ If the pasted HTML references image URLs, Webstudio uploads those images into [A
 - [HTML with CSS](./html-with-css.md) – Paste HTML containing `<style>` blocks
 - [Referenced images](./images.md) – Understand image handling during paste
 - [Commands & search](../commands-and-search.md) – Learn how to run commands from the keyboard
-- [Inception](../../inception.md#copy-htmltailwind) – Copy HTML/Tailwind output from Inception

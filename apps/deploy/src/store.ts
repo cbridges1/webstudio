@@ -1,14 +1,22 @@
-// Reads a project's host credentials from the builder's database (ProjectDeployTarget, which
-// the builder writes when a project admin saves them) and decrypts them with
-// DEPLOY_CREDENTIALS_KEY. Only that column: everything else comes in the request.
+// Reads a project's deploy target from the builder's database (ProjectDeployTarget, which the
+// builder writes when a project admin saves it): the host and its settings, and separately the
+// host credentials, decrypted with DEPLOY_CREDENTIALS_KEY.
 import {
   CREDENTIALS_KEY_MISSING,
   credentialsKey,
   decryptCredentials,
 } from "@webstudio-is/deploy-protocol/credentials";
-import type { DeployCredentials } from "@webstudio-is/deploy-protocol";
+import type {
+  DeployCredentials,
+  DeployTarget,
+} from "@webstudio-is/deploy-protocol";
 import { eq, maybeOne, projectDeployTarget, type Db } from "@webstudio-is/db";
 import { TargetError } from "./targets";
+
+/** The project's saved host and settings, or undefined when it has no target. */
+export type LoadTarget = (
+  projectId: string
+) => Promise<DeployTarget | undefined>;
 
 /** The project's saved credentials for `host`, or undefined when it has none. */
 export type LoadCredentials = (
@@ -16,20 +24,34 @@ export type LoadCredentials = (
   host: string
 ) => Promise<DeployCredentials | undefined>;
 
+export const createTargetLoader =
+  (db: Db): LoadTarget =>
+  async (projectId) => {
+    const row = maybeOne(
+      await db
+        .select({
+          host: projectDeployTarget.host,
+          config: projectDeployTarget.config,
+        })
+        .from(projectDeployTarget)
+        .where(eq(projectDeployTarget.projectId, projectId))
+    );
+    return row === null
+      ? undefined
+      : {
+          host: row.host,
+          config: (row.config ?? {}) as Record<string, unknown>,
+        };
+  };
+
 export const createCredentialsLoader = ({
   db,
   key,
 }: {
-  /** The builder's database; undefined when this service has no DATABASE_URL. */
-  db?: Db;
+  db: Db;
   key?: string;
 }): LoadCredentials => {
   return async (projectId, host) => {
-    if (db === undefined) {
-      throw new TargetError(
-        "This deploy service has no DATABASE_URL, so it can't read the project's credentials"
-      );
-    }
     if (key === undefined || key.length < 32) {
       throw new TargetError(CREDENTIALS_KEY_MISSING);
     }

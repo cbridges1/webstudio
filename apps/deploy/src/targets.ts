@@ -1,10 +1,10 @@
-// Resolves a target from the builder to its host adapter, validated config and credentials.
-// Credentials come from the builder's database (credentials.ts); this service keeps them in
-// memory for the job only.
+// Resolves a project's saved target to its host adapter, validated config and credentials.
+// All of it comes from the builder's database (store.ts); this service keeps the credentials
+// in memory for the job only.
 import { z } from "zod";
-import type { DeployTarget, HostInfo } from "@webstudio-is/deploy-protocol";
+import type { HostInfo } from "@webstudio-is/deploy-protocol";
 import type { AnyHostAdapter, HostAdapter } from "./adapters/types";
-import type { LoadCredentials } from "./credentials";
+import type { LoadCredentials, LoadTarget } from "./store";
 
 export type ResolvedTarget = {
   adapter: HostAdapter<unknown, unknown>;
@@ -16,15 +16,21 @@ export class TargetError extends Error {}
 
 export const resolveTarget = async ({
   projectId,
-  target,
   adapters,
+  loadTarget,
   loadCredentials,
 }: {
   projectId: string;
-  target: DeployTarget;
   adapters: Map<string, AnyHostAdapter>;
+  loadTarget: LoadTarget;
   loadCredentials: LoadCredentials;
 }): Promise<ResolvedTarget> => {
+  const target = await loadTarget(projectId);
+  if (target === undefined) {
+    throw new TargetError(
+      "This project has no deploy target. Choose one in Project settings → Deploy."
+    );
+  }
   const adapter = adapters.get(target.host);
   if (adapter === undefined) {
     throw new TargetError(

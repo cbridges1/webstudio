@@ -35,7 +35,7 @@ EXPOSE 3000
 CMD ["node", "node_modules/@remix-run/serve/dist/cli.js", "build/server/index.js"]
 
 # The deploy service: builds published projects with this checkout's CLI and site packages and
-# uploads them. Jobs, logs and the queue live in DEPLOYER_DATA_DIR (a volume).
+# uploads them. Job folders and logs live in DEPLOYER_DATA_DIR (a volume); the queue is in the database.
 FROM workspace AS deploy
 ENV HOST=0.0.0.0 \
     PORT=3001 \

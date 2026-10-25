@@ -1,20 +1,23 @@
-// selfhost: the HTTP API between the builder and a deploy service (apps/deploy).
+// selfhost: what the builder and a deploy service (apps/deploy) share.
 //
-// A deploy service knows nothing about the builder or its projects. Workspace admins add
-// deploy services in the builder (URL and API key); each project picks one and a target on
-// it. On Publish the builder sends the build ID, its own address, a token scoped to the
-// project and the target. The deploy service downloads the build with the token, deploys
-// it and reports the result back to the builder.
+// They share the builder's database. The builder queues jobs (DeployJob: publish, unpublish,
+// validate) and sends NOTIFY on DEPLOY_JOBS_CHANNEL; the deploy service LISTENs, also polls
+// for notifications it missed, claims each job with FOR UPDATE SKIP LOCKED and records the
+// outcome on it. It registers itself and its hosts (hostInfo) in DeployWorker. The builder can
+// also POST to a wake URL whenever it queues a job, e.g. the deploy service's own
+// deployPaths.wake, to start a stopped service.
 //
-// Each project's host credentials are entered in the builder and stored encrypted in the
-// builder's database (ProjectDeployTarget.credentials, see ./credentials). They never travel
-// in requests: requests name the project, and the deploy service reads and decrypts them from
-// that database with DEPLOY_CREDENTIALS_KEY. It keeps them in memory for the job only and
-// never logs, stores or returns them.
+// A project's target (ProjectDeployTarget: host, config and credentials) is read by the deploy
+// service from the database when the job runs. Credentials are stored encrypted (see
+// ./credentials) and decrypted with DEPLOY_CREDENTIALS_KEY; the deploy service keeps them in
+// memory for the job only and never logs, stores or returns them.
 //
-// Builder -> deploy service: `Authorization: Bearer <deploy service API key>`.
-// Deploy service -> builder: `Authorization: <token from the publish request>`.
+// A publish downloads the build from the builder (`builderOrigin`, with the job's token) and
+// reports the result to `builderOrigin` + deployReportPath, `Authorization: <token>`.
 import { z } from "zod";
+
+/** The Postgres channel the builder notifies when it queues a job (the payload is its ID). */
+export const DEPLOY_JOBS_CHANNEL = "deploy_jobs";
 
 /** A host's credentials, e.g. a Firebase service account key. A secret. */
 export const deployCredentials = z.record(z.string(), z.unknown());
@@ -43,30 +46,19 @@ export const hostInfo = z.object({
 });
 export type HostInfo = z.infer<typeof hostInfo>;
 
-export const hostsResponse = z.object({ hosts: z.array(hostInfo) });
-
-export const publishRequest = z.object({
-  /** Whose saved credentials the host uses. */
-  projectId: z.string().min(1),
-  buildId: z.string().min(1),
-  builder: z.object({
-    /** Where the deploy service downloads the build and reports the result. */
-    origin: z.string().url(),
-    /** Read access to the project, and permission to report this publish. */
-    token: z.string().min(1),
-  }),
-  target: deployTarget,
+/** DeployJob.request of a publish. */
+export const publishJobRequest = z.object({
+  /** Where the deploy service downloads the build and reports the result. */
+  builderOrigin: z.string().url(),
+  /** Read access to the project, and permission to report this publish. */
+  token: z.string().min(1),
   /** For the deploy service's logs only. */
   label: z.string().optional(),
 });
-export type PublishRequest = z.infer<typeof publishRequest>;
+export type PublishJobRequest = z.infer<typeof publishJobRequest>;
 
-export const targetRequest = z.object({
-  /** Whose saved credentials the host uses. */
-  projectId: z.string().min(1),
-  target: deployTarget,
-});
-export type TargetRequest = z.infer<typeof targetRequest>;
+/** DeployJob.result of a publish. */
+export const publishJobResult = z.object({ url: z.string().url() });
 
 /** Sent by the deploy service when a publish finishes. */
 export const deployReport = z.discriminatedUnion("status", [
@@ -75,105 +67,13 @@ export const deployReport = z.discriminatedUnion("status", [
 ]);
 export type DeployReport = z.infer<typeof deployReport>;
 
+/** The deploy service's HTTP endpoints. */
 export const deployPaths = {
   health: "/healthz",
-  hosts: "/v1/hosts",
-  validate: "/v1/validate",
-  publish: "/v1/publish",
-  unpublish: "/v1/unpublish",
+  /** POST: look for queued jobs now. */
+  wake: "/wake",
 } as const;
 
-/** The builder's endpoint for reports, relative to `builder.origin`. */
+/** The builder's endpoint for reports, relative to `builderOrigin`. */
 export const deployReportPath = (buildId: string) =>
   `/rest/deployments/${encodeURIComponent(buildId)}`;
-
-const describeError = (error: unknown) =>
-  error instanceof Error
-    ? error.cause instanceof Error
-      ? `${error.message} (${error.cause.message})`
-      : error.message
-    : String(error);
-
-/** Calls a deploy service. Failures come back as `{ success: false }`, never thrown. */
-export const createDeployServiceClient = ({
-  url,
-  apiKey,
-  fetch: request = globalThis.fetch,
-  timeoutMs = 30_000,
-}: {
-  url: string;
-  apiKey: string;
-  fetch?: typeof globalThis.fetch;
-  timeoutMs?: number;
-}) => {
-  const base = url.replace(/\/+$/, "");
-
-  const call = async <T>(
-    path: string,
-    schema: z.ZodType<T>,
-    body?: unknown
-  ): Promise<
-    { success: true; data: T } | { success: false; error: string }
-  > => {
-    let response: Response;
-    try {
-      response = await request(`${base}${path}`, {
-        method: body === undefined ? "GET" : "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch (error) {
-      return {
-        success: false,
-        error: `Can't reach the deploy service at ${base}: ${describeError(
-          error
-        )}`,
-      };
-    }
-    if (response.status === 401) {
-      return {
-        success: false,
-        error: "The deploy service rejected its API key",
-      };
-    }
-    let json: unknown;
-    try {
-      json = await response.json();
-    } catch {
-      return {
-        success: false,
-        error: `The deploy service answered ${response.status} without JSON`,
-      };
-    }
-    const parsed = schema.safeParse(json);
-    if (parsed.success === false) {
-      const message =
-        typeof json === "object" &&
-        json !== null &&
-        "error" in json &&
-        typeof json.error === "string"
-          ? json.error
-          : `unexpected response (${response.status})`;
-      return { success: false, error: `Deploy service: ${message}` };
-    }
-    return { success: true, data: parsed.data };
-  };
-
-  const result = async (path: string, body: unknown): Promise<DeployResult> => {
-    const response = await call(path, deployResult, body);
-    return response.success ? response.data : response;
-  };
-
-  return {
-    hosts: () => call(deployPaths.hosts, hostsResponse),
-    validate: (input: TargetRequest) => result(deployPaths.validate, input),
-    publish: (input: PublishRequest) => result(deployPaths.publish, input),
-    unpublish: (input: TargetRequest) => result(deployPaths.unpublish, input),
-  };
-};
-
-export type DeployServiceClient = ReturnType<typeof createDeployServiceClient>;

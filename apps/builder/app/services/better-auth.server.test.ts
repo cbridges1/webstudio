@@ -1,7 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { authAccount, authSession, eq, user } from "@webstudio-is/db";
 import { setupTestDb } from "@webstudio-is/db/testing";
-import { createBetterAuth, signInWithUsername } from "./better-auth.server";
+import {
+  createBetterAuth,
+  requestPasswordReset,
+  resetPassword,
+  signInWithUsername,
+} from "./better-auth.server";
 
 const db = setupTestDb();
 
@@ -146,5 +151,106 @@ describe("username sign-in", () => {
     expect(
       await db.select().from(user).where(eq(user.email, "eve@example.com"))
     ).toEqual([]);
+  });
+});
+
+describe("password reset", () => {
+  const request = (ip = "203.0.113.9") =>
+    new Request("http://localhost:5180/login/forgot-password", {
+      method: "POST",
+      headers: { "x-forwarded-for": ip },
+    });
+
+  const createResettableAuth = () => {
+    const sent: { email: string; name: string; token: string }[] = [];
+    const auth = createBetterAuth({
+      db,
+      secret: "test-secret-that-is-long-enough-for-better-auth",
+      baseURL: "http://localhost:5180",
+      sendResetPassword: async ({ user, token }) => {
+        sent.push({ email: user.email, name: user.name, token });
+      },
+    });
+    return { auth, sent };
+  };
+
+  test("emails a token that sets a new password once", async () => {
+    const { auth, sent } = createResettableAuth();
+    await createAccount(auth, "alice", { email: "alice@example.com" });
+
+    expect(
+      await requestPasswordReset(auth, {
+        email: " Alice@Example.com ",
+        request: request(),
+      })
+    ).toBe("sent");
+    expect(sent).toEqual([
+      { email: "alice@example.com", name: "alice", token: expect.any(String) },
+    ]);
+    const { token } = sent[0];
+
+    expect(
+      await resetPassword(auth, {
+        token,
+        password: "short",
+        request: request(),
+      })
+    ).toMatchObject({ status: "invalid-password" });
+    const newPassword = "a whole new password, long enough";
+    expect(
+      await resetPassword(auth, {
+        token,
+        password: newPassword,
+        request: request(),
+      })
+    ).toEqual({ status: "ok" });
+    // Once only.
+    expect(
+      await resetPassword(auth, {
+        token,
+        password: "and another long password",
+        request: request(),
+      })
+    ).toEqual({ status: "invalid-token" });
+
+    await expect(
+      signIn(auth, { username: "alice", password })
+    ).resolves.toEqual({ status: "invalid" });
+    await expect(
+      signIn(auth, { username: "alice", password: newPassword })
+    ).resolves.toMatchObject({ status: "ok" });
+  });
+
+  test("answers the same for an unknown email or an account without one", async () => {
+    const { auth, sent } = createResettableAuth();
+    await createAccount(auth, "bob");
+    expect(
+      await requestPasswordReset(auth, {
+        email: "nobody@example.com",
+        request: request(),
+      })
+    ).toBe("sent");
+    // bob's placeholder address isn't his email.
+    expect(
+      await requestPasswordReset(auth, {
+        email: "bob@users.invalid",
+        request: request("203.0.113.10"),
+      })
+    ).toBe("sent");
+    expect(sent).toEqual([]);
+  });
+
+  test("limits requests per client address", async () => {
+    const { auth } = createResettableAuth();
+    const results = [];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      results.push(
+        await requestPasswordReset(auth, {
+          email: "x@example.com",
+          request: request("203.0.113.20"),
+        })
+      );
+    }
+    expect(results).toEqual(["sent", "sent", "sent", "rate-limited"]);
   });
 });
