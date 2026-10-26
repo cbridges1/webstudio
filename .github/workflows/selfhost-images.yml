@@ -2,7 +2,8 @@
 # GitHub's container registry:
 #   ghcr.io/<owner>/webstudio-builder
 #   ghcr.io/<owner>/webstudio-deploy
-# tagged with the branch name (selfhost) and sha-<commit>, for deployments to pull.
+# tagged with the branch name (selfhost), sha-<commit> and, for the selfhost branch, latest, for
+# deployments to pull.
 name: Self-host images
 
 on:
@@ -52,6 +53,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/selfhost' }}
 
       - id: deploy-meta
         uses: docker/metadata-action@v5
@@ -60,6 +62,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/selfhost' }}
 
       - name: Builder image
         uses: docker/build-push-action@v6
