@@ -32,12 +32,14 @@ try {
   if (exists.rowCount === 0) {
     await client.query(`CREATE ROLE ${role} LOGIN`);
   }
-  // ALTER ROLE doesn't take parameters; the password is quoted as a literal.
+  // ALTER ROLE doesn't take parameters; the password is quoted as a literal. No other
+  // attributes: CREATE ROLE's defaults are already NOSUPERUSER NOCREATEDB NOCREATEROLE, and on
+  // managed databases (Cloud SQL) the owner isn't a superuser, so naming SUPERUSER at all fails.
   const quoted = await client.query("SELECT quote_literal($1) AS value", [
     password,
   ]);
   await client.query(
-    `ALTER ROLE ${role} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD ${quoted.rows[0].value}`
+    `ALTER ROLE ${role} WITH LOGIN PASSWORD ${quoted.rows[0].value}`
   );
   await client.query(`
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${role};
