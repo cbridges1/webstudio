@@ -51,7 +51,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (error.message !== INVALID_CREDENTIALS) {
         console.error("Error authenticating with password", error);
       }
-      // Never show the raw error; the login page shows "Invalid username or password".
+      // Never show the raw error; the login page shows "Invalid username, email or password".
       return redirect(
         loginPath({ error: AUTH_PROVIDERS.LOGIN_PASSWORD, returnTo })
       );

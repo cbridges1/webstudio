@@ -15,6 +15,10 @@
 // and decrypts them itself. A publish job carries a token scoped to the project
 // (publish-token.server.ts) for downloading the build; the deploy service reports the result
 // to /rest/deployments/<buildId>.
+//
+// In the "builtin" deployer mode (builtin-deployer.server.ts) this builder runs the deploy
+// service's worker itself: it registers in DeployWorker like any deploy service, and no wake
+// URL is called.
 import {
   DEPLOY_JOBS_CHANNEL,
   deployCredentials,
@@ -59,6 +63,12 @@ import {
   encryptCredentials,
 } from "@webstudio-is/deploy-protocol/credentials";
 import env from "~/env/env.server";
+import {
+  applyDeployerMode,
+  deployerModes,
+  resolveDeployerMode,
+  wakeBuiltinDeployer,
+} from "./builtin-deployer.server";
 
 const NO_TARGET =
   "This project has no deploy target. Choose one in Project settings → Deploy.";
@@ -111,8 +121,12 @@ const loadSettings = async (db: Db): Promise<Settings> => {
 /** The job queue this builder's deploy services take from. */
 const jobQueue = () => env.DEPLOYER_QUEUE ?? "default";
 
-/** This queue's deploy services that have registered, most recently seen first. */
+/**
+ * This queue's deploy services that have registered, most recently seen first. Starts (or
+ * stops) the built-in one first, so it's there in the "builtin" mode.
+ */
 const loadWorkers = async (db: Db) => {
+  await applyDeployerMode(db);
   const rows = await db
     .select()
     .from(deployWorker)
@@ -196,11 +210,15 @@ const queueJob = async (
     await tx.execute(sql`SELECT pg_notify(${DEPLOY_JOBS_CHANNEL}, ${row.id})`);
     return row.id;
   });
-  await wake(await loadSettings(db), {
-    jobId: id,
-    kind: job.kind,
-    projectId: job.projectId,
-  });
+  if ((await applyDeployerMode(db))?.mode === "builtin") {
+    wakeBuiltinDeployer();
+  } else {
+    await wake(await loadSettings(db), {
+      jobId: id,
+      kind: job.kind,
+      projectId: job.projectId,
+    });
+  }
   return id;
 };
 
@@ -268,7 +286,11 @@ export const deployerInput = z.object({
 export const loadDeployerSettings = async (context: AppContext) => {
   await assertAppAdmin(context);
   const settings = await loadSettings(context.db);
+  const mode = await resolveDeployerMode(context.db);
   return {
+    mode: mode.mode,
+    modeSource: mode.source,
+    envMode: mode.envMode,
     source: settings.source,
     wakeUrl: settings.wakeUrl,
     wakeTokenEnding: settings.wakeToken?.slice(-4) ?? null,
@@ -311,6 +333,30 @@ export const saveDeployer = async (
       .set(values)
       .where(eq(deploySettings.id, current.id));
   }
+  return await loadDeployerSettings(context);
+};
+
+export const deployerModeInput = z.object({
+  /** Null: follow DEPLOYER_MODE. */
+  mode: z.enum(deployerModes).nullable(),
+});
+
+/** Saves the mode (it overrides DEPLOYER_MODE) and applies it in this process right away. */
+export const setDeployerMode = async (
+  { mode }: z.infer<typeof deployerModeInput>,
+  context: AppContext
+) => {
+  await assertAppAdmin(context);
+  const current = maybeOne(await context.db.select().from(deploySettings));
+  if (current === null) {
+    await context.db.insert(deploySettings).values({ mode });
+  } else {
+    await context.db
+      .update(deploySettings)
+      .set({ mode, updatedAt: new Date().toISOString() })
+      .where(eq(deploySettings.id, current.id));
+  }
+  await applyDeployerMode(context.db);
   return await loadDeployerSettings(context);
 };
 

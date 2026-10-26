@@ -13,6 +13,7 @@ import { buildRouter } from "./build-router.server";
 import { apiRouter } from "./api-router.server";
 import { deployerRouter } from "./deployers-router.server";
 import { emailRouter } from "./email-router.server";
+import { usersRouter } from "./users-router.server";
 
 export const appRouter = router({
   api: apiRouter,
@@ -24,6 +25,7 @@ export const appRouter = router({
   workspace: workspaceRouter,
   deployer: deployerRouter,
   email: emailRouter,
+  users: usersRouter,
   notification: notificationRouter,
   authorizationToken: authorizationTokenRouter,
   dashboardProject: dashboardProjectRouter,

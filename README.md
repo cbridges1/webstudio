@@ -19,9 +19,11 @@ commands there.
 
 This repository keeps the code, its tests and the e2e runner, and CI publishes the builder and
 deploy service images (`.github/workflows/selfhost-images.yml`, to
-`ghcr.io/<owner>/webstudio-builder` and `ghcr.io/<owner>/webstudio-deploy`, tagged with the branch
-and `sha-<commit>`). The deploy service that makes Publish work is `apps/deploy`: a separate
-process from the builder.
+`ghcr.io/<owner>/webstudio-builder` and `ghcr.io/<owner>/webstudio-deploy`, tagged `latest`, the
+branch and `sha-<commit>`). The deploy service that makes Publish work is `apps/deploy`: a separate
+process from the builder, or, with `DEPLOYER_MODE=builtin` (or the dashboard's Settings →
+Deployer), run by the builder itself. App admins manage users, the deployer and email in the
+dashboard's Settings.
 
 ```sh
 npm run test:selfhost      # tests for this fork's changes

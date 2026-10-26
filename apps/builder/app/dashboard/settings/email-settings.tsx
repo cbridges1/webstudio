@@ -1,23 +1,16 @@
-// selfhost: the SMTP server the builder sends email with (workspace invites, password
-// resets). App admins set it here, unless the builder's environment sets SMTP_HOST, which this
-// then only shows.
+// selfhost: Settings → Email: the SMTP server the builder sends email with (workspace
+// invites, password resets). App admins set it here, unless the builder's environment sets
+// SMTP_HOST, which this then only shows.
 import { useCallback, useEffect, useState } from "react";
 import {
   Button,
   Checkbox,
   CheckboxAndLabel,
-  Dialog,
-  DialogActions,
-  DialogClose,
-  DialogContent,
-  DialogTitle,
   Flex,
   Grid,
   InputField,
   Label,
-  ScrollAreaNative,
   Text,
-  theme,
 } from "@webstudio-is/design-system";
 import { nativeClient } from "~/shared/trpc/trpc-client";
 
@@ -227,13 +220,9 @@ const TestEmail = ({ defaultTo }: { defaultTo?: string }) => {
   );
 };
 
-export const EmailDialog = ({
-  isOpen,
-  onOpenChange,
+export const EmailSettings = ({
   userEmail,
 }: {
-  isOpen: boolean;
-  onOpenChange: (open: boolean) => void;
   /** Prefills the test address. */
   userEmail?: string;
 }) => {
@@ -251,56 +240,35 @@ export const EmailDialog = ({
   }, []);
 
   useEffect(() => {
-    if (isOpen) {
-      void load();
-    }
-  }, [isOpen, load]);
+    void load();
+  }, [load]);
 
   return (
-    <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent css={{ width: theme.spacing[35] }}>
-        <ScrollAreaNative css={{ maxHeight: "70vh" }}>
-          <Grid
-            gap="3"
-            css={{
-              paddingBlock: theme.spacing[5],
-              paddingInline: theme.spacing[5],
-            }}
-          >
-            <Text color="subtle">
-              The SMTP server the builder sends workspace invites and password
-              reset links with. Without one, invites only show in the dashboard
-              and passwords are reset by an administrator.
-            </Text>
-            {settings?.source === "none" && <Text>Email is off.</Text>}
-            {settings?.source === "env" && (
-              <Text>
-                Set by the builder's environment (SMTP_HOST, SMTP_PORT,
-                SMTP_SECURE, SMTP_USER, SMTP_PASSWORD, SMTP_FROM). Change it
-                there.
-              </Text>
-            )}
-            {settings !== undefined && (
-              <SettingsForm
-                // A fresh form with the saved values after each save.
-                key={JSON.stringify(settings)}
-                settings={settings}
-                onSaved={() => void load()}
-              />
-            )}
-            {settings !== undefined && settings.source !== "none" && (
-              <TestEmail defaultTo={userEmail} />
-            )}
-            {error && <Text color="destructive">{error}</Text>}
-          </Grid>
-        </ScrollAreaNative>
-        <DialogActions>
-          <DialogClose>
-            <Button color="ghost">Close</Button>
-          </DialogClose>
-        </DialogActions>
-        <DialogTitle>Email</DialogTitle>
-      </DialogContent>
-    </Dialog>
+    <Grid gap="3">
+      <Text color="subtle">
+        The SMTP server the builder sends workspace invites and password reset
+        links with. Without one, invites only show in the dashboard and
+        passwords are reset by an administrator.
+      </Text>
+      {settings?.source === "none" && <Text>Email is off.</Text>}
+      {settings?.source === "env" && (
+        <Text>
+          Set by the builder's environment (SMTP_HOST, SMTP_PORT, SMTP_SECURE,
+          SMTP_USER, SMTP_PASSWORD, SMTP_FROM). Change it there.
+        </Text>
+      )}
+      {settings !== undefined && (
+        <SettingsForm
+          // A fresh form with the saved values after each save.
+          key={JSON.stringify(settings)}
+          settings={settings}
+          onSaved={() => void load()}
+        />
+      )}
+      {settings !== undefined && settings.source !== "none" && (
+        <TestEmail defaultTo={userEmail} />
+      )}
+      {error && <Text color="destructive">{error}</Text>}
+    </Grid>
   );
 };

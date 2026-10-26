@@ -5,6 +5,34 @@ vi.hoisted(() => {
   process.env.DEPLOY_CREDENTIALS_KEY = "test-deploy-credentials-key-0123456789";
 });
 
+/** The built-in deployer's worker, played: it registers like the real one and records calls. */
+const builtin = vi.hoisted(() => ({
+  calls: [] as string[],
+  options: undefined as DeployServiceOptions | undefined,
+}));
+
+vi.mock("@webstudio-is/deploy/service", () => ({
+  createDeployService: (options: DeployServiceOptions) => {
+    builtin.options = options;
+    return {
+      hosts: () => ["directory"],
+      status: () => ({}),
+      wake: () => builtin.calls.push("wake"),
+      start: async () => {
+        builtin.calls.push("start");
+        await options.db?.insert(deployWorker).values({
+          id: options.workerId,
+          queue: options.queue,
+          hosts,
+        });
+      },
+      stop: async () => {
+        builtin.calls.push("stop");
+      },
+    };
+  },
+}));
+
 import {
   and,
   build,
@@ -15,10 +43,12 @@ import {
   projectDeployTarget,
 } from "@webstudio-is/db";
 import { seed, setupTestDb } from "@webstudio-is/db/testing";
+import type { DeployServiceOptions } from "@webstudio-is/deploy/service";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
 import {
   checkDeployer,
   createDeploymentClient,
+  setDeployerMode,
   jobWaits,
   listDeployerHosts,
   loadDeployerSettings,
@@ -33,6 +63,7 @@ import {
   decryptCredentials,
 } from "@webstudio-is/deploy-protocol/credentials";
 import env from "~/env/env.server";
+import { applyDeployerMode } from "./builtin-deployer.server";
 
 const db = setupTestDb();
 
@@ -56,6 +87,13 @@ afterEach(() => {
   env.DEPLOYER_BUILDER_URL = undefined;
   env.DEPLOYER_QUEUE = undefined;
   stopAnswering?.();
+});
+
+afterEach(async () => {
+  // Stops a built-in worker a test started.
+  env.DEPLOYER_MODE = undefined;
+  await applyDeployerMode(db);
+  builtin.calls = [];
 });
 
 type Call = { url: string; auth: string | null; body: unknown };
@@ -145,6 +183,9 @@ describe("deploy service settings", () => {
   test("admins set the wake URL and builder address without seeing the token", async () => {
     await setup();
     expect(await loadDeployerSettings(contextFor("admin"))).toEqual({
+      mode: "separate",
+      modeSource: "default",
+      envMode: null,
       source: "app",
       wakeUrl: null,
       wakeTokenEnding: null,
@@ -244,6 +285,87 @@ describe("deploy service settings", () => {
     expect(await checkDeployer(contextFor("admin"))).toEqual({
       wake: { ok: false, error: "connection refused" },
     });
+  });
+});
+
+describe("deployer mode", () => {
+  test("defaults to separate, follows DEPLOYER_MODE, and an admin's choice overrides it", async () => {
+    await setup();
+    expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
+      mode: "separate",
+      modeSource: "default",
+    });
+    env.DEPLOYER_MODE = "builtin";
+    expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
+      mode: "builtin",
+      modeSource: "env",
+      envMode: "builtin",
+    });
+    await setDeployerMode({ mode: "separate" }, contextFor("admin"));
+    expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
+      mode: "separate",
+      modeSource: "app",
+      envMode: "builtin",
+    });
+    // Null follows the environment again.
+    await setDeployerMode({ mode: null }, contextFor("admin"));
+    expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
+      mode: "builtin",
+      modeSource: "env",
+    });
+  });
+
+  test("only admins change it", async () => {
+    await setup();
+    await expect(
+      setDeployerMode({ mode: "builtin" }, contextFor("owner"))
+    ).rejects.toThrow("Only admins");
+  });
+
+  test("builtin starts the worker in the builder, which takes publishes without a deploy service", async () => {
+    await setup({ worker: false });
+    await db
+      .insert(projectDeployTarget)
+      .values({ projectId: "project-1", ...target });
+    await seed.build(db, {
+      id: "build-1",
+      projectId: "project-1",
+      deployment: JSON.stringify({ destination: "saas", domains: [] }),
+      publishStatus: "PENDING",
+    });
+    env.DEPLOYER_WAKE_URL = "https://deploy.test/wake";
+    const wakes = stubWake();
+
+    await setDeployerMode({ mode: "builtin" }, contextFor("admin"));
+    expect(builtin.calls).toEqual(["start"]);
+    expect(builtin.options).toMatchObject({
+      queue: "default",
+      credentialsKey: env.DEPLOY_CREDENTIALS_KEY,
+    });
+    expect(
+      await createDeploymentClient({
+        db,
+        builderOrigin: "http://localhost:5180",
+      }).publish({ projectId: "project-1", buildId: "build-1", label: "P" })
+    ).toEqual({ success: true });
+    // Woken in the process; the wake URL is for a separate service.
+    expect(builtin.calls).toEqual(["start", "wake"]);
+    expect(wakes).toEqual([]);
+    expect(await jobs()).toHaveLength(1);
+
+    await setDeployerMode({ mode: "separate" }, contextFor("admin"));
+    expect(builtin.calls).toEqual(["start", "wake", "stop"]);
+  });
+
+  test("starts once however often it's applied", async () => {
+    await setup();
+    env.DEPLOYER_MODE = "builtin";
+    await Promise.all([
+      applyDeployerMode(db),
+      applyDeployerMode(db),
+      loadDeployerSettings(contextFor("admin")),
+    ]);
+    expect(builtin.calls).toEqual(["start"]);
   });
 });
 

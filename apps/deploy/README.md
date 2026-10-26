@@ -9,12 +9,26 @@ saves it) in `DeployJob` and sends `NOTIFY deploy_jobs`; this service `LISTEN`s,
 (`DEPLOY_POLL_INTERVAL_MS`), and records each job's outcome. It registers itself and its hosts in
 `DeployWorker`, which is how the builder knows it's running and which hosts to offer in
 **Project settings → Deploy**. Optionally the builder also calls a wake URL whenever it queues a
-job (`DEPLOYER_WAKE_URL`, or the dashboard's profile menu → **Deployer**), e.g. this service's
+job (`DEPLOYER_WAKE_URL`, or the dashboard's **Settings → Deployer**), e.g. this service's
 `POST /wake` on a platform that stops it when idle.
 
-It's a separate process from the builder, since site builds run project code (HTML embeds). It
-lives in this workspace only to build sites with this checkout's CLI and SSG packages, so it
-always matches the builder.
+It runs as a separate process from the builder by default, since site builds run project code
+(HTML embeds): the service has its own database login and none of the builder's secrets. It
+lives in this workspace to build sites with this checkout's CLI and SSG packages, so it always
+matches the builder.
+
+## Built into the builder
+
+With `DEPLOYER_MODE=builtin` on the builder (or **Settings → Deployer → Built into the builder**,
+which overrides it), the builder runs this service's worker itself (`src/service.ts`, exported
+as `@webstudio-is/deploy/service`) and nothing else needs to be deployed. It registers in
+`DeployWorker` as `builder-<host name>` and works the same way, with the builder's database
+login and `DEPLOY_CREDENTIALS_KEY`. Builder settings for it: `DEPLOYER_DATA_DIR` (builds and
+logs; default a folder in the temporary directory) and `DEPLOY_SITES_DIR` (the directory host).
+
+Builds then use the builder's CPU and memory (on Cloud Run, give it always-allocated CPU), and
+project code runs on the builder's machine as its user: use it only when you trust everyone who
+can publish.
 
 ## Jobs
 

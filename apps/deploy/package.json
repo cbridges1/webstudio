@@ -20,5 +20,11 @@
     "@types/node": "^22.13.10",
     "typescript": "7.0.2",
     "vitest": "^3.1.2"
+  },
+  "exports": {
+    "./service": {
+      "webstudio": "./src/service.ts",
+      "import": "./src/service.ts"
+    }
   }
 }

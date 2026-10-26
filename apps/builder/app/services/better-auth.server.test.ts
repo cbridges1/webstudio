@@ -92,6 +92,47 @@ describe("username sign-in", () => {
     ).resolves.toEqual({ status: "ok", userId });
   });
 
+  test("signs in with the account's email instead of the username", async () => {
+    const auth = createAuth();
+    const userId = await createAccount(auth, "alice", {
+      email: "alice@example.com",
+    });
+
+    await expect(
+      signIn(auth, { username: " Alice@Example.com ", password })
+    ).resolves.toEqual({ status: "ok", userId });
+    await expect(
+      signIn(auth, {
+        username: "alice@example.com",
+        password: "wrong password!!",
+      })
+    ).resolves.toEqual({ status: "invalid" });
+    await expect(
+      signIn(auth, { username: "bob@example.com", password })
+    ).resolves.toEqual({ status: "invalid" });
+  });
+
+  test("an account without an email can't sign in with its placeholder", async () => {
+    const auth = createAuth();
+    await createAccount(auth);
+
+    await expect(
+      signIn(auth, { username: "alice@users.invalid", password })
+    ).resolves.toEqual({ status: "invalid" });
+  });
+
+  test("email sign-ins count against the rate limit", async () => {
+    const auth = createAuth();
+    await createAccount(auth, "alice", { email: "alice@example.com" });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await signIn(auth, { username: "nobody@example.com", password });
+    }
+    await expect(
+      signIn(auth, { username: "alice@example.com", password })
+    ).resolves.toEqual({ status: "rate-limited" });
+  });
+
   test("gives the same answer for a wrong password and an unknown username", async () => {
     const auth = createAuth();
     await createAccount(auth);

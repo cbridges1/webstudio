@@ -1,0 +1,1 @@
+ALTER TABLE "DeploySettings" ADD COLUMN "mode" text;

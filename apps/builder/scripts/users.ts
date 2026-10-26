@@ -5,11 +5,14 @@
 // (app/services/better-auth.server.ts).
 //
 // Usage (from apps/builder): pnpm users <command>
-//   add <username> [--email <email>]  Create a user, its default workspace and a password
+//   add <username> [--email <email>] [--admin]
+//                                     Create a user, its default workspace and a password
+//                                     (--admin: an app admin too)
 //   set-password <username>           Replace the password and sign the user out of Better Auth
 //   disable <username>                Block sign-in
 //   enable <username>                 Allow sign-in again
-//   make-admin <username>             Make an app admin (sets up the deployer)
+//   make-admin <username>             Make an app admin (dashboard Settings: users, deployer,
+//                                     email)
 //   remove-admin <username>           Make a regular user again
 //   list                              List username accounts, whether they can sign in and
 //                                     which are admins
@@ -89,6 +92,7 @@ const readPassword = async (passwordStdin: boolean) => {
 
 const args = process.argv.slice(2);
 const passwordStdin = args.includes("--password-stdin");
+const makeAdmin = args.includes("--admin");
 const emailIndex = args.indexOf("--email");
 const email = emailIndex === -1 ? undefined : args[emailIndex + 1];
 const passwordEnvIndex = args.indexOf("--password-env");
@@ -97,6 +101,7 @@ const passwordEnv =
 const [command, rawUsername] = args.filter(
   (arg, index) =>
     arg !== "--password-stdin" &&
+    arg !== "--admin" &&
     [emailIndex, passwordEnvIndex].every(
       (option) => option === -1 || (index !== option && index !== option + 1)
     )
@@ -116,7 +121,7 @@ const main = async () => {
 
   if (rawUsername === undefined) {
     die(
-      "usage: users <add|set-password|disable|enable|make-admin|remove-admin> <username> [--email <email>] | users list"
+      "usage: users <add|set-password|disable|enable|make-admin|remove-admin> <username> [--email <email>] [--admin] | users list"
     );
   }
   const username = normalizeUsername(rawUsername);
@@ -137,7 +142,10 @@ const main = async () => {
         email,
         password: await readPassword(passwordStdin),
       });
-      console.info(`Created ${username}.`);
+      if (makeAdmin) {
+        await accounts.setAdmin(username, true);
+      }
+      console.info(`Created ${username}${makeAdmin ? ", an admin" : ""}.`);
       return;
     case "set-password":
       if ((await accounts.exists(username)) === false) {

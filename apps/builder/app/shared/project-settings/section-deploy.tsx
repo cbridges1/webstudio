@@ -243,7 +243,7 @@ export const SectionDeploy = ({
           <Text>
             No deploy service has connected to this builder yet.{" "}
             {settings.canManageDeployer
-              ? "Start one (apps/deploy) with this builder's database; the dashboard's profile menu → Deployer shows its status."
+              ? "Start one (apps/deploy) with this builder's database, or have the builder run it itself, in the dashboard's Settings → Deployer."
               : "Ask an admin to start one."}
           </Text>
         )}

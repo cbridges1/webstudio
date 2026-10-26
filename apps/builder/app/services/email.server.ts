@@ -2,7 +2,7 @@
 //
 // The SMTP server comes from the builder's environment (SMTP_HOST, SMTP_PORT, SMTP_SECURE,
 // SMTP_USER, SMTP_PASSWORD, SMTP_FROM) or, when SMTP_HOST isn't set, from what an app admin
-// saves in the dashboard (profile menu → Email; EmailSettings, the password encrypted with a
+// saves in the dashboard (Settings → Email; EmailSettings, the password encrypted with a
 // key derived from AUTH_SECRET). Without either, the builder sends no email: invites stay
 // in-app notifications and "Forgot password?" is hidden.
 import nodemailer from "nodemailer";

@@ -27,7 +27,7 @@ const environment = z.object({
   // selfhost: encrypts projects' deploy credentials; deployers that read them share it.
   DEPLOY_CREDENTIALS_KEY: z.string().optional(),
   // selfhost: email (workspace invites, password resets) over SMTP. SMTP_HOST set replaces what
-  // an app admin sets in the dashboard (profile menu → Email), which then can't be changed
+  // an app admin sets in the dashboard (Settings → Email), which then can't be changed
   // there. Unset everywhere: the builder sends no email.
   SMTP_HOST: optional(z.string()),
   // Default 587, or 465 with SMTP_SECURE=true.
@@ -40,7 +40,7 @@ const environment = z.object({
   SMTP_FROM: optional(z.string()),
 
   // selfhost: how the builder reaches the deploy service, which takes jobs from the database.
-  // Any of these set replaces what an app admin sets in the dashboard (profile menu →
+  // Any of these set replaces what an app admin sets in the dashboard (Settings →
   // Deployer), which then can't be changed there.
   // POSTed to whenever a job is queued, e.g. to start a stopped deploy service (optional).
   DEPLOYER_WAKE_URL: optional(z.string().url()),
@@ -51,6 +51,15 @@ const environment = z.object({
   // The job queue its deploy services take from (their DEPLOY_QUEUE; default "default"), for
   // builders sharing a database whose deploy services can each reach only their own builder.
   DEPLOYER_QUEUE: optional(z.string()),
+  // How publishes run: "separate" (default), a deploy service (apps/deploy) running on its own;
+  // "builtin", this builder runs the deploy service's worker itself, so nothing else needs to
+  // be deployed. An app admin can override it in Settings → Deployer.
+  DEPLOYER_MODE: optional(z.enum(["separate", "builtin"])),
+  // builtin: where builds are made and their logs kept (default: a folder in the system's
+  // temporary directory).
+  DEPLOYER_DATA_DIR: optional(z.string()),
+  // builtin: the root folder of the "directory" host (one folder per site); unset, it's off.
+  DEPLOY_SITES_DIR: optional(z.string()),
 
   // DEPLOYMENT_ENVIRONMENT development | preview | production
   DEPLOYMENT_ENVIRONMENT: z
@@ -127,6 +136,9 @@ const rawEnv = {
   DEPLOYER_WAKE_TOKEN: process.env.DEPLOYER_WAKE_TOKEN,
   DEPLOYER_BUILDER_URL: process.env.DEPLOYER_BUILDER_URL,
   DEPLOYER_QUEUE: process.env.DEPLOYER_QUEUE,
+  DEPLOYER_MODE: process.env.DEPLOYER_MODE,
+  DEPLOYER_DATA_DIR: process.env.DEPLOYER_DATA_DIR,
+  DEPLOY_SITES_DIR: process.env.DEPLOY_SITES_DIR,
   DEPLOYMENT_ENVIRONMENT: process.env.DEPLOYMENT_ENVIRONMENT,
   DEPLOYMENT_URL: process.env.DEPLOYMENT_URL,
   TRPC_SERVER_URL: process.env.TRPC_SERVER_URL,

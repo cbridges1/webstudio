@@ -57,6 +57,13 @@
       "when": 1792889767672,
       "tag": "0007_email_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793047941086,
+      "tag": "0008_deployer_mode",
+      "breakpoints": true
     }
   ]
 }

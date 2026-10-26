@@ -8,11 +8,13 @@ import {
 import {
   checkDeployer,
   deployerInput,
+  deployerModeInput,
   listDeployerHosts,
   loadDeployerSettings,
   loadProjectDeploySettings,
   projectTargetInput,
   saveDeployer,
+  setDeployerMode,
   setProjectDeployTarget,
 } from "./deployers.server";
 
@@ -32,6 +34,10 @@ export const deployerRouter = router({
   save: procedure
     .input(deployerInput)
     .mutation(({ input, ctx }) => respond(() => saveDeployer(input, ctx))),
+
+  setMode: procedure
+    .input(deployerModeInput)
+    .mutation(({ input, ctx }) => respond(() => setDeployerMode(input, ctx))),
 
   check: procedure.mutation(({ ctx }) => respond(() => checkDeployer(ctx))),
 

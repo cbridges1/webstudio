@@ -7,9 +7,12 @@ import {
 } from "@remix-run/react";
 import { setEnv } from "@webstudio-is/feature-flags";
 import env from "./env/env.server";
+import { watchDeployerMode } from "./services/builtin-deployer.server";
 import { useSetFeatures } from "./shared/use-set-features";
 
 export const loader = () => {
+  // selfhost: starts the built-in deployer with the first request when it's the mode.
+  watchDeployerMode();
   return json({
     featureFlags: env.FEATURE_FLAGS,
   });

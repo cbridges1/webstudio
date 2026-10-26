@@ -1,29 +1,31 @@
-// selfhost: the deploy service (apps/deploy). It takes jobs from this builder's database, so
-// there's nothing to connect: this shows whether it's running, and app admins set an optional
-// wake URL (called whenever a job is queued, to start a stopped service) and the builder's
-// address as the service reaches it. When the builder's environment sets those
-// (DEPLOYER_WAKE_URL, DEPLOYER_WAKE_TOKEN, DEPLOYER_BUILDER_URL), this only shows them.
+// selfhost: Settings → Deployer. App admins choose where publishes run (the deployer mode:
+// builtin-deployer.server.ts): built into the builder, or a separate deploy service
+// (apps/deploy). Either takes jobs from this builder's database, so there's nothing to connect:
+// this shows whether one is running, and for a separate service app admins set an optional
+// wake URL (called whenever a job is queued, to start a stopped service). Both reach the
+// builder at its own address unless a builder address is set. When the builder's environment
+// sets those (DEPLOYER_WAKE_URL, DEPLOYER_WAKE_TOKEN, DEPLOYER_BUILDER_URL), this only shows
+// them; the mode saved here overrides DEPLOYER_MODE.
 import { useCallback, useEffect, useState } from "react";
 import {
   Button,
   Checkbox,
   CheckboxAndLabel,
-  Dialog,
-  DialogActions,
-  DialogClose,
-  DialogContent,
-  DialogTitle,
   Flex,
   Grid,
   InputField,
   Label,
-  ScrollAreaNative,
+  Select,
   Text,
-  theme,
 } from "@webstudio-is/design-system";
 import { nativeClient } from "~/shared/trpc/trpc-client";
 
+type Mode = "separate" | "builtin";
+
 type Settings = {
+  mode: Mode;
+  modeSource: "app" | "env" | "default";
+  envMode: Mode | null;
   source: "env" | "app";
   wakeUrl: string | null;
   wakeTokenEnding: string | null;
@@ -55,12 +57,19 @@ const sinceText = (iso: string) => {
   return new Date(iso).toLocaleString();
 };
 
-const Workers = ({ workers }: { workers: Settings["workers"] }) => {
+const Workers = ({
+  workers,
+  mode,
+}: {
+  workers: Settings["workers"];
+  mode: Mode;
+}) => {
   if (workers.length === 0) {
     return (
       <Text>
-        No deploy service has connected to this builder's database yet. Start
-        one (apps/deploy) with this database's DATABASE_URL.
+        {mode === "builtin"
+          ? "The built-in deployer hasn't started. The builder's log says why."
+          : "No deploy service has connected to this builder's database yet. Start one (apps/deploy) with this database's DATABASE_URL."}
       </Text>
     );
   }
@@ -76,6 +85,65 @@ const Workers = ({ workers }: { workers: Settings["workers"] }) => {
   );
 };
 
+const modeLabels: Record<Mode, string> = {
+  separate: "Separate deploy service",
+  builtin: "Built into the builder",
+};
+
+type ModeChoice = Mode | "env";
+
+const ModeForm = ({
+  settings,
+  onSaved,
+}: {
+  settings: Settings;
+  onSaved: () => void;
+}) => {
+  const [error, setError] = useState<string>();
+  const [isSaving, setIsSaving] = useState(false);
+  const choice: ModeChoice =
+    settings.modeSource === "app" ? settings.mode : "env";
+  const envLabel = `As the environment says (DEPLOYER_MODE: ${
+    settings.envMode === null
+      ? "not set, so separate"
+      : modeLabels[settings.envMode].toLowerCase()
+  })`;
+  const choose = async (next: ModeChoice) => {
+    setError(undefined);
+    setIsSaving(true);
+    const result = await nativeClient.deployer.setMode
+      .mutate({ mode: next === "env" ? null : next })
+      .catch(toError);
+    setIsSaving(false);
+    if (result.success === false) {
+      setError(result.error);
+      return;
+    }
+    onSaved();
+  };
+  return (
+    <Grid gap="1">
+      <Label htmlFor="deployer-mode">Where publishes run</Label>
+      <Select<ModeChoice>
+        id="deployer-mode"
+        options={["env", "separate", "builtin"]}
+        value={choice}
+        disabled={isSaving}
+        getLabel={(option: ModeChoice) =>
+          option === "env" ? envLabel : modeLabels[option]
+        }
+        onChange={(next) => void choose(next)}
+      />
+      <Text color="subtle">
+        {settings.mode === "builtin"
+          ? "The builder builds and deploys sites itself, so nothing else needs to run. Builds use the builder's CPU and memory; on a platform that throttles CPU between requests (Cloud Run's default) give it always-allocated CPU. Builds run project code next to the builder and its secrets, so use this only when you trust everyone who can publish."
+          : "A deploy service (apps/deploy) runs on its own and takes publishes from this builder's database."}
+      </Text>
+      {error && <Text color="destructive">{error}</Text>}
+    </Grid>
+  );
+};
+
 const SettingsForm = ({
   settings,
   onSaved,
@@ -83,6 +151,7 @@ const SettingsForm = ({
   settings: Settings;
   onSaved: () => void;
 }) => {
+  const isSeparate = settings.mode === "separate";
   const [error, setError] = useState<string>();
   const [isSaving, setIsSaving] = useState(false);
   const [removeToken, setRemoveToken] = useState(false);
@@ -113,7 +182,7 @@ const SettingsForm = ({
       }}
     >
       <Grid gap="3">
-        <Grid gap="1">
+        <Grid gap="1" css={isSeparate ? undefined : { display: "none" }}>
           <Label htmlFor="deployer-wake-url">Wake URL (optional)</Label>
           <InputField
             id="deployer-wake-url"
@@ -128,7 +197,7 @@ const SettingsForm = ({
             /wake works. A running service picks up jobs without it.
           </Text>
         </Grid>
-        <Grid gap="1">
+        <Grid gap="1" css={isSeparate ? undefined : { display: "none" }}>
           <Label htmlFor="deployer-wake-token">Wake token (optional)</Label>
           <InputField
             id="deployer-wake-token"
@@ -165,7 +234,7 @@ const SettingsForm = ({
             disabled={readOnly}
           />
           <Text color="subtle">
-            Where the deploy service downloads builds and reports back, when it
+            Where the deployer downloads builds and reports back, when it
             reaches this builder at another address (for example inside a
             private network).
           </Text>
@@ -187,13 +256,7 @@ const SettingsForm = ({
   );
 };
 
-export const DeployerDialog = ({
-  isOpen,
-  onOpenChange,
-}: {
-  isOpen: boolean;
-  onOpenChange: (open: boolean) => void;
-}) => {
+export const DeployerSettings = () => {
   const [settings, setSettings] = useState<Settings>();
   const [error, setError] = useState<string>();
   const [wakeCheck, setWakeCheck] = useState<WakeCheck>();
@@ -231,72 +294,60 @@ export const DeployerDialog = ({
   };
 
   useEffect(() => {
-    if (isOpen) {
-      void load();
-    } else {
-      setWakeCheck(undefined);
-    }
-  }, [isOpen, load]);
+    void load();
+  }, [load]);
 
   return (
-    <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent css={{ width: theme.spacing[35] }}>
-        <ScrollAreaNative css={{ maxHeight: "70vh" }}>
-          <Grid
-            gap="3"
-            css={{
-              paddingBlock: theme.spacing[5],
-              paddingInline: theme.spacing[5],
-            }}
-          >
-            <Text color="subtle">
-              The deploy service takes publishes from this builder's database,
-              so it needs no address or key here. Each project picks a host in
-              Project settings → Deploy.
-            </Text>
-            {settings !== undefined && <Workers workers={settings.workers} />}
-            {settings?.source === "env" && (
-              <Text>
-                Set by the builder's environment (DEPLOYER_WAKE_URL,
-                DEPLOYER_WAKE_TOKEN, DEPLOYER_BUILDER_URL). Change them there.
-              </Text>
-            )}
-            {settings !== undefined && (
-              <SettingsForm
-                // A fresh form with the saved values after each save.
-                key={JSON.stringify(settings)}
-                settings={settings}
-                onSaved={() => void load()}
-              />
-            )}
-            {wakeCheck?.state === "checking" && (
-              <Text color="subtle">Calling the wake URL…</Text>
-            )}
-            {wakeCheck?.state === "done" && (
-              <Text color={wakeCheck.ok ? undefined : "destructive"}>
-                {wakeCheck.message}
-              </Text>
-            )}
-            {error && <Text color="destructive">{error}</Text>}
-          </Grid>
-        </ScrollAreaNative>
-        <DialogActions>
+    <Grid gap="3">
+      <Text color="subtle">
+        The deployer takes publishes from this builder's database, so it needs
+        no address or key here. Each project picks a host in Project settings →
+        Deploy.
+      </Text>
+      {settings !== undefined && (
+        <ModeForm settings={settings} onSaved={() => void load()} />
+      )}
+      {settings !== undefined && (
+        <Workers workers={settings.workers} mode={settings.mode} />
+      )}
+      {settings?.source === "env" && (
+        <Text>
+          The wake URL and builder address are set by the builder's environment
+          (DEPLOYER_WAKE_URL, DEPLOYER_WAKE_TOKEN, DEPLOYER_BUILDER_URL). Change
+          them there.
+        </Text>
+      )}
+      {settings !== undefined && (
+        <SettingsForm
+          // A fresh form with the saved values after each save.
+          key={JSON.stringify(settings)}
+          settings={settings}
+          onSaved={() => void load()}
+        />
+      )}
+      {wakeCheck?.state === "checking" && (
+        <Text color="subtle">Calling the wake URL…</Text>
+      )}
+      {wakeCheck?.state === "done" && (
+        <Text color={wakeCheck.ok ? undefined : "destructive"}>
+          {wakeCheck.message}
+        </Text>
+      )}
+      {error && <Text color="destructive">{error}</Text>}
+      <Flex gap="2" justify="end">
+        {settings?.mode === "separate" && (
           <Button
             color="neutral"
-            disabled={settings?.wakeUrl === null || settings === undefined}
+            disabled={settings.wakeUrl === null}
             onClick={() => void testWake()}
           >
             Test wake URL
           </Button>
-          <Button color="ghost" onClick={() => void load()}>
-            Refresh
-          </Button>
-          <DialogClose>
-            <Button color="ghost">Close</Button>
-          </DialogClose>
-        </DialogActions>
-        <DialogTitle>Deployer</DialogTitle>
-      </DialogContent>
-    </Dialog>
+        )}
+        <Button color="ghost" onClick={() => void load()}>
+          Refresh
+        </Button>
+      </Flex>
+    </Grid>
   );
 };

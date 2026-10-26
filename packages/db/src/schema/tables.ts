@@ -205,6 +205,11 @@ export const deploySettings = pgTable(
     wakeToken: text(),
     /** The builder's address as the deploy service reaches it. Null: the builder's own origin. */
     builderUrl: text(),
+    /**
+     * "builtin": the builder runs the deploy service's worker itself; "separate": a deploy
+     * service (apps/deploy) runs on its own. Null: the builder's DEPLOYER_MODE.
+     */
+    mode: text(),
     updatedAt: timestamptz("updatedAt")
       .default(sql`now()`)
       .notNull(),

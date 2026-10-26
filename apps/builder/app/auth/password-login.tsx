@@ -39,7 +39,7 @@ export const PasswordLogin = ({
       <Flex direction="column" gap="4">
         <Flex direction="column" gap="2">
           <Label htmlFor="login-username" text="sentence">
-            Username
+            Username or email
           </Label>
           <InputField
             id="login-username"
@@ -50,7 +50,7 @@ export const PasswordLogin = ({
             spellCheck={false}
             required
             autoFocus
-            placeholder="Your username"
+            placeholder="Your username or email"
             css={fieldCss}
           />
         </Flex>

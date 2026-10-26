@@ -14,7 +14,7 @@ import {
   InsetList,
   InsetListItem,
 } from "@webstudio-is/design-system";
-import { BodyIcon } from "@webstudio-is/icons";
+import { BodyIcon, GearIcon } from "@webstudio-is/icons";
 import {
   NavLink,
   useLocation,
@@ -34,6 +34,7 @@ import { Welcome } from "./welcome/welcome";
 import { Header } from "./shared/layout";
 import { help } from "~/shared/help";
 import { SearchResults } from "./search/search-results";
+import { Settings } from "./settings/settings";
 import type { DashboardData } from "./shared/types";
 import { Search } from "./search/search-field";
 import { WorkspaceSelector } from "./workspace/workspace-dropdown";
@@ -166,10 +167,16 @@ export const DashboardSetup = ({ data }: { data: DashboardData }) => {
 const getView = (
   pathname: string,
   hasProjects: boolean,
-  isWorkspaceSuspended: boolean
+  isWorkspaceSuspended: boolean,
+  isAdmin = false
 ) => {
   if (pathname === dashboardPath("search")) {
     return "search";
+  }
+
+  // selfhost: app admins' settings (users, deployer, email).
+  if (pathname === dashboardPath("settings") && isAdmin) {
+    return "settings";
   }
 
   if (hasProjects === false && isWorkspaceSuspended === false) {
@@ -210,7 +217,12 @@ export const Dashboard = () => {
 
   const isWorkspaceSuspended = isDowngradedForMember(currentWorkspace);
   const hasProjects = projects.length > 0;
-  const view = getView(location.pathname, hasProjects, isWorkspaceSuspended);
+  const view = getView(
+    location.pathname,
+    hasProjects,
+    isWorkspaceSuspended,
+    isAdmin
+  );
 
   const showWorkspaceSelector =
     workspaces !== undefined &&
@@ -295,6 +307,22 @@ export const Dashboard = () => {
               }))}
             />
           </CollapsibleSection>
+          {isAdmin && (
+            <nav>
+              <CollapsibleSection label="Admin" fullWidth>
+                <NavigationItems
+                  items={[
+                    {
+                      to: dashboardPath("settings"),
+                      prefix: <GearIcon />,
+                      children: "Settings",
+                      target: "_self",
+                    },
+                  ]}
+                />
+              </CollapsibleSection>
+            </nav>
+          )}
         </Grid>
         {view === "projects" && (
           <Projects
@@ -310,6 +338,9 @@ export const Dashboard = () => {
           <Welcome currentWorkspaceId={currentWorkspaceId} />
         )}
         {view === "search" && <SearchResults {...data} />}
+        {view === "settings" && (
+          <Settings userEmail={user.email ?? undefined} />
+        )}
       </Flex>
       <CloneProject projectToClone={projectToClone} />
       <Toaster />

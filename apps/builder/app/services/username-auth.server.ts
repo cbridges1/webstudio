@@ -4,7 +4,7 @@ import env from "~/env/env.server";
 import { createBetterAuth, type BetterAuth } from "./better-auth.server";
 import { builderOrigin, passwordResetEmail, sendEmail } from "./email.server";
 
-export const INVALID_CREDENTIALS = "Invalid username or password";
+export const INVALID_CREDENTIALS = "Invalid username, email or password";
 export const TOO_MANY_ATTEMPTS = "Too many attempts, try again in a minute";
 
 let betterAuth: BetterAuth | undefined;

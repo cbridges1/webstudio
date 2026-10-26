@@ -48,12 +48,12 @@ type Credentials = z.infer<typeof serviceAccountSchema>;
 
 /** A failed Hosting API call: its status and Firebase's own message. */
 class FirebaseApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly detail: string
-  ) {
+  readonly status: number;
+  readonly detail: string;
+  constructor(message: string, status: number, detail: string) {
     super(message);
+    this.status = status;
+    this.detail = detail;
   }
 }
 

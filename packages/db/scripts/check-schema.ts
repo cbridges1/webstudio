@@ -67,9 +67,35 @@ const intendedChanges: Array<{ key: string; reason: string }> = [
   { key: "constraint AuthVerification.*", reason: "Better Auth tables" },
   { key: "constraint AuthRateLimit.*", reason: "Better Auth tables" },
   { key: "index Auth*", reason: "Better Auth tables" },
-  { key: "column Deployer.*", reason: "deployers added in the builder" },
-  { key: "constraint Deployer.*", reason: "deployers added in the builder" },
-  { key: "index Deployer_*", reason: "deployers added in the builder" },
+  {
+    key: "column Build.publishError",
+    reason: "why a publish failed, reported by the deploy service",
+  },
+  { key: "column DeployJob.*", reason: "the deploy job queue" },
+  { key: "constraint DeployJob.*", reason: "the deploy job queue" },
+  { key: "index DeployJob_*", reason: "the deploy job queue" },
+  { key: "enum DeployJob*", reason: "the deploy job queue" },
+  {
+    key: "column DeployWorker.*",
+    reason: "deploy services seen by the builder",
+  },
+  {
+    key: "constraint DeployWorker.*",
+    reason: "deploy services seen by the builder",
+  },
+  {
+    key: "index DeployWorker_*",
+    reason: "deploy services seen by the builder",
+  },
+  { key: "column DeploySettings.*", reason: "app admins' deployer settings" },
+  {
+    key: "constraint DeploySettings.*",
+    reason: "app admins' deployer settings",
+  },
+  { key: "index DeploySettings_*", reason: "app admins' deployer settings" },
+  { key: "column EmailSettings.*", reason: "app admins' SMTP settings" },
+  { key: "constraint EmailSettings.*", reason: "app admins' SMTP settings" },
+  { key: "index EmailSettings_*", reason: "app admins' SMTP settings" },
   {
     key: "column ProjectDeployTarget.*",
     reason: "each project's deploy target",
@@ -171,7 +197,9 @@ const main = async () => {
   const problems = compare(reference, actual);
   if (problems.length > 0) {
     console.error(
-      `Schema differs from upstream in ${problems.length} place(s):\n${problems.join("\n")}`
+      `Schema differs from upstream in ${
+        problems.length
+      } place(s):\n${problems.join("\n")}`
     );
     process.exit(1);
   }

@@ -121,7 +121,21 @@ export type UsernameSignInResult =
   | { status: "rate-limited" };
 
 /**
- * Checks a username and password. Goes through Better Auth's request handler (not
+ * The username of the account with this email, for signing in with either. Undefined when no
+ * account has it (the sign-in then fails like a wrong username).
+ */
+const usernameForEmail = async (auth: BetterAuth, email: string) => {
+  const context = await auth.$context;
+  const found = await context.internalAdapter.findUserByEmail(
+    email.trim().toLowerCase()
+  );
+  const username = (found?.user as { username?: unknown } | undefined)
+    ?.username;
+  return typeof username === "string" ? username : undefined;
+};
+
+/**
+ * Checks a username (or an account's email) and password. Goes through Better Auth's request handler (not
  * its server API) so its rate limiting applies, keyed by the client's IP address.
  * The Better Auth session it creates is deleted right away.
  */
@@ -133,6 +147,11 @@ export const signInWithUsername = async (
     request,
   }: { username: string; password: string; request: Request }
 ): Promise<UsernameSignInResult> => {
+  // Usernames can't contain "@". An unknown email still goes through the endpoint, so it
+  // counts against the rate limit like any other attempt.
+  const loginName = username.includes("@")
+    ? ((await usernameForEmail(auth, username)) ?? "-")
+    : username;
   const headers = new Headers({ "Content-Type": "application/json" });
   const forwardedFor = request.headers.get("x-forwarded-for");
   if (forwardedFor !== null) {
@@ -142,7 +161,10 @@ export const signInWithUsername = async (
     new Request(new URL(`${basePath}/sign-in/username`, auth.options.baseURL), {
       method: "POST",
       headers,
-      body: JSON.stringify({ username: normalizeUsername(username), password }),
+      body: JSON.stringify({
+        username: normalizeUsername(loginName),
+        password,
+      }),
     })
   );
   if (response.status === 429) {
