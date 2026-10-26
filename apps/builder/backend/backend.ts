@@ -1,7 +1,7 @@
 // selfhost: the Builder's disposable e2e database (Postgres in Docker), driven from Node so
 // it works the same on macOS, Linux and Windows. Used by the e2e runner (e2e/run.ts) and
 // `pnpm backend <mode> <compose args>` (backend/run.ts). Running the builder day to day is
-// knowbra-webstudio's job.
+// the self-hosting project's job.
 //
 // Modes pick a Compose override next to this file; both keep their data in tmpfs.
 import {

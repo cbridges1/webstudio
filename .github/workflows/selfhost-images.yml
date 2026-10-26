@@ -1,0 +1,89 @@
+# selfhost: builds the builder and deploy service images (Dockerfile targets) and pushes them to
+# GitHub's container registry:
+#   ghcr.io/<owner>/webstudio-builder
+#   ghcr.io/<owner>/webstudio-deploy
+# tagged with the branch name (selfhost) and sha-<commit>, for deployments to pull.
+name: Self-host images
+
+on:
+  push:
+    branches: [selfhost]
+  workflow_dispatch:
+
+concurrency:
+  group: selfhost-images-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    timeout-minutes: 90
+    runs-on: ubuntu-24.04
+    steps:
+      # The workspace stage (dependencies, built packages and the pnpm store) is several GB.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: names
+        run: |
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "builder=ghcr.io/$owner/webstudio-builder" >> "$GITHUB_OUTPUT"
+          echo "deploy=ghcr.io/$owner/webstudio-deploy" >> "$GITHUB_OUTPUT"
+
+      - id: builder-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.builder }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=long
+
+      - id: deploy-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.deploy }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=long
+
+      - name: Builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: builder
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.builder-meta.outputs.tags }}
+          labels: ${{ steps.builder-meta.outputs.labels }}
+          cache-from: type=gha,scope=selfhost-builder
+          cache-to: type=gha,mode=max,scope=selfhost-builder
+
+      # Shares the workspace stage with the builder image (from the build cache above).
+      - name: Deploy service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: deploy
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.deploy-meta.outputs.tags }}
+          labels: ${{ steps.deploy-meta.outputs.labels }}
+          cache-from: |
+            type=gha,scope=selfhost-builder
+            type=gha,scope=selfhost-deploy
+          cache-to: type=gha,mode=min,scope=selfhost-deploy

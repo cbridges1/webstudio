@@ -12,19 +12,16 @@ This fork stores everything with Drizzle in plain Postgres, signs in with a user
 (no Google or GitHub app needed), has no pricing model (every feature is available) and shows
 each project's real published address.
 
-It isn't run on its own: **knowbra-webstudio** (checked out next to this repository) runs it.
-`npm run setup`, `npm run cli` and `npm run dev` work here too; they run the same commands there. That repository holds the stack
-(Postgres and RustFS in Docker, the builder, Drizzle Studio and the deploy service) and the
-commands for it, all plain Node so they work on macOS, Linux and Windows:
+It isn't run on its own: a separate self-hosting project, checked out next to this repository,
+runs it (its package.json has `"webstudioSelfhost": true`; or set `WEBSTUDIO_SELFHOST_DIR`).
+`npm run setup`, `npm run dev`, `npm run cli` and `npm run mcp` work here too; they run the same
+commands there.
 
-```sh
-npm run setup   # in knowbra-webstudio: install and build this checkout, start the containers
-npm run cli     # add users, Drizzle Studio, stop/reset/destroy the containers
-npm run dev     # the builder, Drizzle Studio and the deploy service
-```
-
-This repository keeps the code, its tests and the e2e runner. The deploy service that makes
-Publish work is `apps/deploy`: a separate process from the builder, run by knowbra-webstudio.
+This repository keeps the code, its tests and the e2e runner, and CI publishes the builder and
+deploy service images (`.github/workflows/selfhost-images.yml`, to
+`ghcr.io/<owner>/webstudio-builder` and `ghcr.io/<owner>/webstudio-deploy`, tagged with the branch
+and `sha-<commit>`). The deploy service that makes Publish work is `apps/deploy`: a separate
+process from the builder.
 
 ```sh
 npm run test:selfhost      # tests for this fork's changes

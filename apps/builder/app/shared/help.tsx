@@ -17,7 +17,7 @@ export const help = [
   },
   {
     label: "Self-hosting",
-    url: "https://github.com/cbridges1/knowbra-webstudio#readme",
+    url: "https://github.com/cbridges1/webstudio/blob/selfhost/README.md#this-fork",
     icon: <CloudIcon />,
   },
 ] as const;

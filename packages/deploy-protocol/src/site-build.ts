@@ -150,7 +150,7 @@ export const buildStaticSite = async ({
   run?: RunCommand;
 }): Promise<string> => {
   // A fresh copy of the fixture with its dependencies (hardlinked from the pnpm store). The
-  // checkout is a pnpm workspace; knowbra-webstudio's scripts put its pinned pnpm on PATH.
+  // checkout is a pnpm workspace, so its pinned pnpm must be on PATH.
   await run(
     "pnpm",
     ["--dir", webstudioDir, "--filter", SSG_FIXTURE, "deploy", workDir],

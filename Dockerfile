@@ -4,9 +4,9 @@
 #   docker build --target deploy -t webstudio-deploy .
 #
 # Both start from one workspace stage (dependencies installed, workspace packages built), so
-# they share its layers. knowbra-webstudio's compose.yaml runs them (npm run docker:up there).
+# they share its layers. CI publishes both to ghcr.io (.github/workflows/selfhost-images.yml).
 # Settings come from the environment at run time; see apps/deploy/README.md and
-# knowbra-webstudio's .env.example.
+# apps/builder/app/env/env.server.ts.
 
 FROM node:22-bookworm-slim AS workspace
 ENV CI=1 \

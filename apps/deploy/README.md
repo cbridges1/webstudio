@@ -14,14 +14,14 @@ job (`DEPLOYER_WAKE_URL`, or the dashboard's profile menu → **Deployer**), e.g
 
 It's a separate process from the builder, since site builds run project code (HTML embeds). It
 lives in this workspace only to build sites with this checkout's CLI and SSG packages, so it
-always matches the builder. knowbra-webstudio runs it (`npm run dev` there starts it with the
-builder).
+always matches the builder.
 
 ## Jobs
 
 `@webstudio-is/deploy-protocol` (`packages/deploy-protocol`) has the shared shapes; the tables
-are in `@webstudio-is/db`. Writing another deploy service is described in knowbra-webstudio's
-`docs/deployers.md`.
+are in `@webstudio-is/db`. Another deploy service only has to follow the same
+contract: claim jobs from `DeployJob`, register in `DeployWorker` and report publishes to the
+builder.
 
 - **Claiming.** The oldest queued job of this service's queue (`DEPLOY_QUEUE`) is taken with
   `FOR UPDATE SKIP LOCKED`, so several instances never run the same job. Publishes and unpublishes
@@ -97,7 +97,8 @@ Deployer dialog).
 
 ### The database login
 
-Give it a login of its own (knowbra-webstudio creates `webstudio_deployer` on every start):
+Give it a login of its own. `packages/db/scripts/deployer-role.mjs` creates or updates it
+(run after the migrations, as the database owner); by hand:
 
 ```sql
 CREATE ROLE webstudio_deployer LOGIN PASSWORD '…';
@@ -123,10 +124,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON "DeployWorker" TO webstudio_deployer;
 
 ## Run
 
-knowbra-webstudio runs it with its own settings: `npm run dev` there starts it with the builder,
-and `npm run selfhost -- deployer --bg` runs it on its own; `npm run docker:up` there runs it and
-the builder as images from this checkout's `Dockerfile` (target `deploy`, data in `/data`).
-`pnpm start` here runs it directly with the environment above.
+`pnpm start` runs it directly with the environment above. As an image: this checkout's
+`Dockerfile`, target `deploy` (data in `/data`), which CI publishes as
+`ghcr.io/<owner>/webstudio-deploy`.
 
 Tests: `pnpm --filter @webstudio-is/deploy test` (typecheck: `… typecheck`).
 

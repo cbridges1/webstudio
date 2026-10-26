@@ -1,6 +1,5 @@
 // selfhost: manages username/password accounts from the command line, for scripts and
-// automation. knowbra-webstudio runs it (`npm run selfhost -- user ...`); its `npm run cli`
-// offers the same actions interactively.
+// automation, such as a self-hosting project's commands.
 // There is no public sign-up: an admin creates every account. Passwords are hashed and
 // checked by Better Auth, with the same configuration the builder uses
 // (app/services/better-auth.server.ts).
@@ -14,7 +13,9 @@
 //   remove-admin <username>           Make a regular user again
 //   list                              List username accounts, whether they can sign in and
 //                                     which are admins
-// The password is prompted for without echo, or read from stdin with --password-stdin.
+// The password is prompted for without echo, read from stdin with --password-stdin, or read
+// from an environment variable with --password-env <name> (for a job that gets it from a
+// secret store).
 // Users who will be invited to workspaces need a real email: invites match it exactly.
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
@@ -65,7 +66,9 @@ const readStdin = async () => {
 
 const readPassword = async (passwordStdin: boolean) => {
   let password: string;
-  if (passwordStdin) {
+  if (passwordEnv !== undefined) {
+    password = process.env[passwordEnv] ?? "";
+  } else if (passwordStdin) {
     password = await readStdin();
   } else {
     if (process.stdin.isTTY !== true) {
@@ -88,10 +91,15 @@ const args = process.argv.slice(2);
 const passwordStdin = args.includes("--password-stdin");
 const emailIndex = args.indexOf("--email");
 const email = emailIndex === -1 ? undefined : args[emailIndex + 1];
+const passwordEnvIndex = args.indexOf("--password-env");
+const passwordEnv =
+  passwordEnvIndex === -1 ? undefined : args[passwordEnvIndex + 1];
 const [command, rawUsername] = args.filter(
   (arg, index) =>
     arg !== "--password-stdin" &&
-    (emailIndex === -1 || (index !== emailIndex && index !== emailIndex + 1))
+    [emailIndex, passwordEnvIndex].every(
+      (option) => option === -1 || (index !== option && index !== option + 1)
+    )
 );
 
 const { accounts, close } = openAccounts();

@@ -1,6 +1,6 @@
 // selfhost: username/password account management. There is no public sign-up: an
-// admin creates every account, with the account script (scripts/users.ts), the
-// interactive CLI (knowbra-webstudio's `npm run cli`) or, in e2e runs, the test flows.
+// admin creates every account, with the account script (scripts/users.ts), a
+// self-hosting project's CLI or, in e2e runs, the test flows.
 import {
   and,
   asc,

@@ -1,4 +1,4 @@
-// selfhost: connects the account tools (scripts/users.ts, and knowbra-webstudio's
+// selfhost: connects the account tools (scripts/users.ts, and a self-hosting project's
 // `npm run cli`) to the database the builder uses, with the same Better Auth configuration.
 //
 // Reads DATABASE_URL and BETTER_AUTH_SECRET like the builder: the environment first,
