@@ -15,6 +15,24 @@ test.each([
     "090e6e14-ae50-4b2e-bd22-71733cec05bb",
   ],
   [
+    "project path",
+    "https://webstudio-builder-123.us-central1.run.app/p/090e6e14-ae50-4b2e-bd22-71733cec05bb/?pageId=home",
+    "https://webstudio-builder-123.us-central1.run.app",
+    "090e6e14-ae50-4b2e-bd22-71733cec05bb",
+  ],
+  [
+    "project path without a slash",
+    "http://localhost:5180/p/090e6e14-ae50-4b2e-bd22-71733cec05bb",
+    "http://localhost:5180",
+    "090e6e14-ae50-4b2e-bd22-71733cec05bb",
+  ],
+  [
+    "not a project path",
+    "http://localhost:5180/p/eee/",
+    "http://localhost:5180",
+    undefined,
+  ],
+  [
     "invalid localhost",
     "https://p-eee.localhost",
     "https://p-eee.localhost",

@@ -1,10 +1,13 @@
 import { expect, test } from "vitest";
 import {
   builderPath,
+  builderServerOrigin,
   builderUrl,
   restAssetsUploadPath,
   areBuilderDataUrlsEqual,
 } from "./path-utils";
+
+const projectId = "090e6e14-ae50-4b2e-bd22-71733cec05bb";
 
 test("includes an instance deep link in builder paths", () => {
   expect(
@@ -27,8 +30,36 @@ test("includes an instance deep link in builder urls", () => {
       origin: "https://wstd.dev",
     })
   ).toBe(
-    "https://p-project-id.wstd.dev/?pageId=page-id&instance=instance-id%2Cbody-id"
+    "https://wstd.dev/p/project-id/?pageId=page-id&instance=instance-id%2Cbody-id"
   );
+});
+
+test("opens projects under /p/<projectId>/", () => {
+  expect(
+    builderUrl({
+      projectId,
+      pageId: "page-id",
+      origin: "https://builder-123.us-central1.run.app",
+    })
+  ).toBe(
+    `https://builder-123.us-central1.run.app/p/${projectId}/?pageId=page-id`
+  );
+  // From a project page, too.
+  expect(
+    builderUrl({
+      projectId,
+      origin: `https://builder-123.us-central1.run.app/p/${projectId}/`,
+    })
+  ).toBe(`https://builder-123.us-central1.run.app/p/${projectId}/`);
+});
+
+test("a project's server origin is the one project-paths.mjs maps it onto", () => {
+  expect(
+    builderServerOrigin({
+      projectId,
+      origin: "https://builder-123.us-central1.run.app",
+    })
+  ).toBe(`https://p-${projectId}.builder-123.us-central1.run.app`);
 });
 
 test("builds the asset upload item route", () => {

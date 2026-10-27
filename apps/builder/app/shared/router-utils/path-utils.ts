@@ -1,5 +1,6 @@
 import type { AUTH_PROVIDERS } from "~/shared/session";
 import { getAssetUploadApiUrl } from "@webstudio-is/sdk/runtime";
+import { parseBuilderUrl } from "@webstudio-is/protocol";
 import { getAuthorizationServerOrigin } from "./origins";
 import type { BuilderMode } from "../nano-states/misc";
 
@@ -41,6 +42,10 @@ export const builderPath = ({
   })}`;
 };
 
+/**
+ * selfhost: a project opens at <builder address>/p/<projectId>/, so the builder needs one
+ * address and no wildcard domain (project-paths.mjs serves it).
+ */
 export const builderUrl = ({
   projectId,
   origin,
@@ -50,20 +55,23 @@ export const builderUrl = ({
   origin: string;
 }) => {
   const authServerOrigin = getAuthorizationServerOrigin(origin);
+  return new URL(`/p/${projectId}${builderPath(link)}`, authServerOrigin).href;
+};
 
-  const url = new URL(builderPath(link), authServerOrigin);
-
-  const fragments = url.host.split(".");
-  if (fragments.length <= 3) {
-    fragments.splice(0, 0, "p-" + projectId);
-  } else {
-    // staging | development branches
-    fragments[0] = "p-" + projectId + "-dot-" + fragments[0];
-  }
-
-  url.host = fragments.join(".");
-
-  return url.href;
+/**
+ * selfhost: the origin the server sees a project's requests on: project-paths.mjs maps
+ * /p/<projectId>/ onto p-<projectId>.<host>.
+ */
+export const builderServerOrigin = ({
+  projectId,
+  origin,
+}: {
+  projectId: string;
+  origin: string;
+}) => {
+  const url = new URL(getAuthorizationServerOrigin(origin));
+  url.host = `p-${projectId}.${url.host}`;
+  return url.origin;
 };
 
 export const dashboardPath = (
@@ -139,8 +147,23 @@ export const restAssetsUploadPath = ({
   return getAssetUploadApiUrl(name);
 };
 
+/**
+ * selfhost: the /p/<projectId> a project page was opened under, or "" elsewhere and on the
+ * server.
+ */
+export const getProjectPathPrefix = () => {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  const { projectId } = parseBuilderUrl(window.location.href);
+  const prefix = `/p/${projectId}`;
+  return projectId !== undefined && window.location.pathname.startsWith(prefix)
+    ? prefix
+    : "";
+};
+
 export const getCanvasUrl = () => {
-  return `/canvas`;
+  return `${getProjectPathPrefix()}/canvas`;
 };
 
 export const restResourcesLoader = ({ diagnostics = false } = {}) =>

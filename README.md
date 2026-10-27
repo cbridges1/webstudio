@@ -25,6 +25,13 @@ builder runs it itself; with `DEPLOYER_MODE=separate` (or the dashboard's Settin
 runs as its own process. App admins manage users, the deployer and email in the
 dashboard's Settings.
 
+Projects open at `<builder address>/p/<projectId>/`, so the builder needs one address and no
+wildcard domain. The builder's server (`apps/builder/server.mjs` in production, the Vite dev
+server locally) maps those paths onto the per-project origins the app tells projects apart by
+(`apps/builder/project-paths.mjs`). Upstream gives each project its own subdomain instead, which
+also keeps a project's canvas off the dashboard's origin; here they share one, so code in a
+project can act as whoever has it open.
+
 ```sh
 npm run test:selfhost      # tests for this fork's changes
 npm run e2e:builder        # Playwright e2e against a disposable database (Docker)

@@ -32,7 +32,7 @@ ENV NODE_ENV=production \
 RUN pnpm --filter @webstudio-is/builder build
 WORKDIR /app/apps/builder
 EXPOSE 3000
-CMD ["node", "node_modules/@remix-run/serve/dist/cli.js", "build/server/index.js"]
+CMD ["node", "server.mjs", "build/server/index.js"]
 
 # The deploy service: builds published projects with this checkout's CLI and site packages and
 # uploads them. Job folders and logs live in DEPLOYER_DATA_DIR (a volume); the queue is in the database.

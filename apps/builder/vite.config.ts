@@ -11,6 +11,7 @@ import {
 } from "./app/shared/router-utils/origins";
 import { existsSync } from "node:fs";
 import fg from "fast-glob";
+import { createProjectPathsMiddleware } from "./project-paths.mjs";
 
 const rootDir = ["..", "../..", "../../.."]
   .map((dir) => path.join(__dirname, dir))
@@ -91,6 +92,8 @@ export default defineConfig(({ mode }) => {
             });
             next();
           });
+          // selfhost: /p/<projectId>/ project paths, as server.mjs serves them in production.
+          server.middlewares.use(createProjectPathsMiddleware());
         },
       },
     ],

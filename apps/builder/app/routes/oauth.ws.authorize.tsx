@@ -11,7 +11,7 @@ import { authenticator } from "~/services/auth.server";
 import { createCodeToken } from "~/services/token.server";
 import { isUserAuthorizedForProject } from "~/services/builder-access.server";
 import {
-  builderUrl,
+  builderServerOrigin,
   compareUrls,
   isDashboard,
   loginPath,
@@ -183,7 +183,7 @@ export const loader: LoaderFunction = async ({ request }) => {
         false ===
         compareUrls(
           new URL(redirect_uri).origin,
-          builderUrl({
+          builderServerOrigin({
             projectId: oauthParamsData.scope.projectId,
             origin: getAuthorizationServerOrigin(request.url),
           })

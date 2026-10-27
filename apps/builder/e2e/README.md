@@ -61,8 +61,8 @@ pnpm e2e:builder:dev -- --grep "Builder can copy, duplicate, and delete a page"
 
 `pnpm e2e:builder:dev` defaults to
 `E2E_BUILDER_URL=http://localhost:3000`. Override it when the development
-server uses another port. Project builders run on `p-<projectId>.localhost`,
-which Chromium resolves to loopback, so host-file changes are unnecessary.
+server uses another port. Project builders run at `/p/<projectId>/` on the same
+address.
 
 The development backend uses `E2E_DB_BOOTSTRAP=if-empty` and keeps Docker
 containers running. The Playwright setup project still resets test data before

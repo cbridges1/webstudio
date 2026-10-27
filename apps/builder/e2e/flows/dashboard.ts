@@ -134,7 +134,7 @@ export const createBlankProject = async ({
   await page.getByPlaceholder("My Project").fill(title);
   console.info("e2e: submitting create project");
   await page.getByRole("button", { name: "Create Project" }).click();
-  await page.waitForURL(/\/\/p-[^.]+\.localhost:\d+\//);
+  await page.waitForURL(/\/\/localhost:\d+\/p\/[0-9a-f-]+\//);
   console.info(`e2e: created project at ${page.url()}`);
 
   const projectId = getProjectIdFromBuilderUrl(page.url());
