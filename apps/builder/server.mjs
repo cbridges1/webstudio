@@ -21,6 +21,10 @@ installGlobals({ nativeFetch: build.future.v3_singleFetch });
 
 const app = express();
 app.disable("x-powered-by");
+// Behind a TLS-terminating proxy (Cloud Run, a load balancer): take https and the host from
+// X-Forwarded-Proto/-Host, or request.url says http and the builder's server-side OAuth token
+// request goes to http://, whose redirect to https turns the POST into a GET.
+app.set("trust proxy", true);
 app.use(compression());
 // Before the static files, so /p/<id>/favicon.ico finds public/favicon.ico.
 app.use(createProjectPathsMiddleware());
