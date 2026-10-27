@@ -11,7 +11,7 @@ import { builderAuthenticator } from "./builder-auth.server";
 import { staticEnv } from "~/env/env.static.server";
 import type { SessionData } from "./auth.server.utils";
 import { createContext } from "~/shared/context.server";
-import { signInWithUsername } from "./better-auth.server";
+import { signInWithEmail } from "./better-auth.server";
 import {
   getBetterAuth,
   INVALID_CREDENTIALS,
@@ -91,17 +91,17 @@ if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
   authenticator.use(google, "google");
 }
 
-// selfhost: username/password sign-in, checked by Better Auth
+// selfhost: email/password sign-in, checked by Better Auth
 if (env.AUTH_USERNAME_LOGIN === "true") {
   authenticator.use(
     new FormStrategy(async ({ form, request }) => {
-      const username = form.get("username");
+      const email = form.get("email");
       const password = form.get("password");
-      if (typeof username !== "string" || typeof password !== "string") {
+      if (typeof email !== "string" || typeof password !== "string") {
         throw new Error(INVALID_CREDENTIALS);
       }
-      const result = await signInWithUsername(getBetterAuth(), {
-        username,
+      const result = await signInWithEmail(getBetterAuth(), {
+        email,
         password,
         request,
       });

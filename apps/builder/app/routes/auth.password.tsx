@@ -1,4 +1,4 @@
-// selfhost: username/password sign-in
+// selfhost: email/password sign-in
 import { type ActionFunctionArgs } from "@remix-run/server-runtime";
 import { authenticator } from "~/services/auth.server";
 import { dashboardPath, isDashboard, loginPath } from "~/shared/router-utils";
@@ -51,7 +51,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (error.message !== INVALID_CREDENTIALS) {
         console.error("Error authenticating with password", error);
       }
-      // Never show the raw error; the login page shows "Invalid username, email or password".
+      // Never show the raw error; the login page shows "Invalid email or password".
       return redirect(
         loginPath({ error: AUTH_PROVIDERS.LOGIN_PASSWORD, returnTo })
       );

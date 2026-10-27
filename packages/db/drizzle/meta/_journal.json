@@ -64,6 +64,13 @@
       "when": 1793047941086,
       "tag": "0008_deployer_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793051906336,
+      "tag": "0009_email_sign_in",
+      "breakpoints": true
     }
   ]
 }

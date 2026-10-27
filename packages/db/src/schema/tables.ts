@@ -48,11 +48,9 @@ export const user = pgTable(
     /** Display name. Better Auth's `name`. */
     username: text(),
     projectsTags: jsonb().$type<Json>().default([]).notNull(),
-    // selfhost: Better Auth (username/password sign-in). Columns it owns on the
-    // shared user row; the password itself lives in AuthAccount.
-    /** Sign-in username, lowercased. Better Auth's `username`. */
-    loginName: text(),
-    displayUsername: text(),
+    // selfhost: Better Auth (email/password sign-in; the email, lowercased, is the
+    // sign-in name). Columns it owns on the shared user row; the password itself
+    // lives in AuthAccount.
     emailVerified: boolean().default(false).notNull(),
     updatedAt: timestamptz("updatedAt")
       .default(sql`now()`)
@@ -62,10 +60,7 @@ export const user = pgTable(
     banReason: text(),
     banExpires: timestamp({ precision: 3, withTimezone: true }),
   },
-  (table) => [
-    uniqueIndex("User_email_key").on(table.email),
-    uniqueIndex("User_loginName_key").on(table.loginName),
-  ]
+  (table) => [uniqueIndex("User_email_key").on(table.email)]
 );
 
 export const workspace = pgTable(

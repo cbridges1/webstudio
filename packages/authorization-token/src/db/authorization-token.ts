@@ -218,11 +218,11 @@ export const findOrCreateAgentToken = async (
   }
   const owner = maybeOne(
     await context.db
-      .select({ username: user.username, loginName: user.loginName })
+      .select({ username: user.username, email: user.email })
       .from(user)
       .where(eq(user.id, context.authorization.userId))
   );
-  const name = `AI agent (${owner?.loginName ?? owner?.username ?? "you"})`;
+  const name = `AI agent (${owner?.email ?? owner?.username ?? "you"})`;
   const existing = maybeOne(
     await context.db
       .select()

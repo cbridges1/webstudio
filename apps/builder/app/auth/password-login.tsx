@@ -1,4 +1,4 @@
-// selfhost: username/password sign-in form
+// selfhost: email/password sign-in form
 import { useState } from "react";
 import {
   Button,
@@ -38,19 +38,19 @@ export const PasswordLogin = ({
     >
       <Flex direction="column" gap="4">
         <Flex direction="column" gap="2">
-          <Label htmlFor="login-username" text="sentence">
-            Username or email
+          <Label htmlFor="login-email" text="sentence">
+            Email
           </Label>
           <InputField
-            id="login-username"
-            name="username"
-            type="text"
+            id="login-email"
+            name="email"
+            type="email"
             autoComplete="username"
             autoCapitalize="none"
             spellCheck={false}
             required
             autoFocus
-            placeholder="Your username or email"
+            placeholder="you@example.com"
             css={fieldCss}
           />
         </Flex>

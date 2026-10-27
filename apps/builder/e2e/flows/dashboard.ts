@@ -1,6 +1,5 @@
 import { dashboardUrl, getProjectIdFromBuilderUrl } from "../test";
 import type { Page } from "@playwright/test";
-import { createHash } from "node:crypto";
 import { createDb, type Db } from "@webstudio-is/db";
 import env from "../../app/env/env.server";
 import { createBetterAuth } from "../../app/services/better-auth.server";
@@ -48,16 +47,6 @@ const getAccounts = () => {
  * A username unique to the worker's email: a readable prefix of its local part plus a
  * hash of the whole address (usernames have at most 32 characters).
  */
-export const getWorkerUsername = (email: string) => {
-  const prefix = email
-    .slice(0, email.lastIndexOf("@"))
-    .toLowerCase()
-    .replace(/[^a-z0-9_.-]+/g, "-")
-    .slice(0, 23);
-  const hash = createHash("sha256").update(email).digest("hex").slice(0, 8);
-  return `${prefix}-${hash}`;
-};
-
 /**
  * Signs in as the account for this worker's email, creating it on first use (there
  * is no sign-up).
@@ -71,11 +60,11 @@ export const loginWithPassword = async ({
 }) => {
   console.info("e2e: opening login");
   await page.goto(`${dashboardUrl}/login`);
-  const usernameField = page.getByLabel("Username");
+  const emailField = page.getByLabel("Email", { exact: true });
   let loginState: "login" | "dashboard";
   try {
     loginState = await Promise.any([
-      usernameField
+      emailField
         .waitFor({ state: "visible", timeout: loginReadyTimeout })
         .then(() => "login" as const),
       page
@@ -100,13 +89,16 @@ export const loginWithPassword = async ({
   }
 
   const workerEmail = getWorkerEmail(email);
-  const username = getWorkerUsername(workerEmail);
   const accounts = getAccounts();
-  if ((await accounts.exists(username)) === false) {
-    await accounts.add({ username, email: workerEmail, password: e2ePassword });
+  if ((await accounts.exists(workerEmail)) === false) {
+    await accounts.add({
+      name: workerEmail.split("@")[0],
+      email: workerEmail,
+      password: e2ePassword,
+    });
   }
 
-  await usernameField.fill(username);
+  await emailField.fill(workerEmail);
   await page.getByLabel("Password", { exact: true }).fill(e2ePassword);
   console.info("e2e: submitting sign-in");
   await page.getByRole("button", { name: "Sign in" }).click();

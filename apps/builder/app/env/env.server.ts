@@ -9,7 +9,7 @@ const optional = <Schema extends z.ZodTypeAny>(schema: Schema) =>
 
 const environment = z.object({
   // Authentication
-  // selfhost: username/password sign-in (Better Auth)
+  // selfhost: email/password sign-in (Better Auth). The name predates sign-in by email.
   AUTH_USERNAME_LOGIN: z.string().optional(),
   BETTER_AUTH_SECRET: z.string().optional(),
   BETTER_AUTH_URL: z.string().url().optional(),
@@ -51,9 +51,9 @@ const environment = z.object({
   // The job queue its deploy services take from (their DEPLOY_QUEUE; default "default"), for
   // builders sharing a database whose deploy services can each reach only their own builder.
   DEPLOYER_QUEUE: optional(z.string()),
-  // How publishes run: "separate" (default), a deploy service (apps/deploy) running on its own;
-  // "builtin", this builder runs the deploy service's worker itself, so nothing else needs to
-  // be deployed. An app admin can override it in Settings → Deployer.
+  // How publishes run: "builtin" (default), this builder runs the deploy service's worker
+  // itself, so nothing else needs to be deployed; "separate", a deploy service (apps/deploy)
+  // runs on its own. An app admin can override it in Settings → Deployer.
   DEPLOYER_MODE: optional(z.enum(["separate", "builtin"])),
   // builtin: where builds are made and their logs kept (default: a folder in the system's
   // temporary directory).
@@ -199,7 +199,7 @@ if (
   (env.BETTER_AUTH_SECRET === undefined || env.BETTER_AUTH_SECRET.length < 32)
 ) {
   throw new Error(
-    "BETTER_AUTH_SECRET (32+ characters) must be set to use username sign-in in production"
+    "BETTER_AUTH_SECRET (32+ characters) must be set to use email/password sign-in in production"
   );
 }
 

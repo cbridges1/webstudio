@@ -12,7 +12,7 @@ export const LOGIN_ERROR_MESSAGES = {
     "There has been an issue logging you in with Github",
   [AUTH_PROVIDERS.LOGIN_GOOGLE]:
     "There has been an issue logging you in with Google",
-  [AUTH_PROVIDERS.LOGIN_PASSWORD]: "Invalid username, email or password",
+  [AUTH_PROVIDERS.LOGIN_PASSWORD]: "Invalid email or password",
 };
 
 export const useLoginErrorMessage = (): string => {

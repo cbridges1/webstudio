@@ -7,10 +7,14 @@ import {
   type AppContext,
 } from "@webstudio-is/trpc-interface/index.server";
 import { isAppAdmin } from "./deployers.server";
-import { AccountError, createUserAccounts } from "./user-accounts.server";
+import {
+  AccountError,
+  createUserAccounts,
+  normalizeEmail,
+} from "./user-accounts.server";
 import { getBetterAuth } from "./username-auth.server";
 
-/** The signed-in admin's username; only app admins get past it. */
+/** The signed-in admin's email; only app admins get past it. */
 const assertAppAdmin = async (context: AppContext) => {
   if (
     context.authorization.type !== "user" ||
@@ -20,11 +24,11 @@ const assertAppAdmin = async (context: AppContext) => {
   }
   const row = maybeOne(
     await context.db
-      .select({ loginName: user.loginName })
+      .select({ email: user.email })
       .from(user)
       .where(eq(user.id, context.authorization.userId))
   );
-  return row?.loginName ?? null;
+  return row?.email ?? null;
 };
 
 const accounts = (context: AppContext) =>
@@ -35,16 +39,15 @@ export const listUsers = async (context: AppContext) => {
   const users = await accounts(context).list();
   return users.map((account) => ({
     ...account,
-    isSelf: account.username === self,
+    isSelf: account.email === self,
   }));
 };
 
 export type UserList = Awaited<ReturnType<typeof listUsers>>;
 
 export const addUserInput = z.object({
-  username: z.string(),
-  /** Empty: none (the user can't reset a forgotten password or be invited by email). */
-  email: z.string().optional(),
+  name: z.string(),
+  email: z.string(),
   password: z.string(),
   admin: z.boolean().optional(),
 });
@@ -55,12 +58,12 @@ export const addUser = async (
 ) => {
   await assertAppAdmin(context);
   const created = await accounts(context).add({
-    username: input.username,
+    name: input.name,
     email: input.email,
     password: input.password,
   });
   if (input.admin) {
-    await accounts(context).setAdmin(created.username, true);
+    await accounts(context).setAdmin(created.email, true);
   }
   return await listUsers(context);
 };
@@ -68,12 +71,18 @@ export const addUser = async (
 export const updateUserInput = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("password"),
-    username: z.string(),
+    email: z.string(),
     password: z.string(),
+  }),
+  z.object({ action: z.literal("name"), email: z.string(), name: z.string() }),
+  z.object({
+    action: z.literal("email"),
+    email: z.string(),
+    newEmail: z.string(),
   }),
   z.object({
     action: z.enum(["disable", "enable", "admin", "unadmin"]),
-    username: z.string(),
+    email: z.string(),
   }),
 ]);
 
@@ -85,7 +94,7 @@ export const updateUser = async (
   const users = accounts(context);
   // An admin locking themselves out would leave nobody to undo it.
   if (
-    input.username === self &&
+    normalizeEmail(input.email) === self &&
     (input.action === "disable" || input.action === "unadmin")
   ) {
     throw new AccountError(
@@ -96,19 +105,25 @@ export const updateUser = async (
   }
   switch (input.action) {
     case "password":
-      await users.setPassword(input.username, input.password);
+      await users.setPassword(input.email, input.password);
+      break;
+    case "name":
+      await users.setName(input.email, input.name);
+      break;
+    case "email":
+      await users.setEmail(input.email, input.newEmail);
       break;
     case "disable":
-      await users.disable(input.username);
+      await users.disable(input.email);
       break;
     case "enable":
-      await users.enable(input.username);
+      await users.enable(input.email);
       break;
     case "admin":
-      await users.setAdmin(input.username, true);
+      await users.setAdmin(input.email, true);
       break;
     case "unadmin":
-      await users.setAdmin(input.username, false);
+      await users.setAdmin(input.email, false);
       break;
   }
   return await listUsers(context);

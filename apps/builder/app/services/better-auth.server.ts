@@ -1,4 +1,4 @@
-// selfhost: username/password sign-in with Better Auth.
+// selfhost: email/password sign-in with Better Auth.
 //
 // Better Auth only checks credentials (and rate-limits attempts). The builder's own
 // cookie session (remix-auth) stays the only session the app uses, so the builder
@@ -7,7 +7,7 @@
 // account script uses its server API.
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { admin, username } from "better-auth/plugins";
+import { admin } from "better-auth/plugins";
 import {
   authAccount,
   authRateLimit,
@@ -19,8 +19,6 @@ import {
 
 export const minPasswordLength = 12;
 export const maxPasswordLength = 128;
-/** Usernames have 3–32 lowercase letters, digits, '.', '_' or '-'. */
-export const usernamePattern = /^[a-z0-9_.-]{3,32}$/;
 
 const basePath = "/api/auth";
 
@@ -59,13 +57,13 @@ export const createBetterAuth = ({
         AuthRateLimit: authRateLimit,
       },
     }),
-    // One user table: Better Auth's users are Webstudio's users.
+    // One user table: Better Auth's users are Webstudio's users; its `name` is the display
+    // name (User.username, upstream's column).
     user: { modelName: "User", fields: { name: "username" } },
     session: { modelName: "AuthSession" },
     account: { modelName: "AuthAccount" },
     verification: { modelName: "AuthVerification" },
     emailAndPassword: {
-      // Required by the username plugin; email sign-in itself is disabled below.
       enabled: true,
       // Accounts come from the account script only.
       disableSignUp: true,
@@ -79,17 +77,8 @@ export const createBetterAuth = ({
       resetPasswordTokenExpiresIn: 60 * 60,
       revokeSessionsOnPasswordReset: true,
     },
-    plugins: [
-      username({
-        minUsernameLength: 3,
-        maxUsernameLength: 32,
-        // The same rule the account tools check (Better Auth's default has no '-').
-        usernameValidator: (value) => usernamePattern.test(value),
-        schema: { user: { fields: { username: "loginName" } } },
-      }),
-      admin(),
-    ],
-    disabledPaths: ["/sign-in/email", "/sign-up/email"],
+    plugins: [admin()],
+    disabledPaths: ["/sign-up/email"],
     rateLimit: {
       enabled: rateLimit,
       // Survives restarts and is shared by every builder instance.
@@ -98,7 +87,7 @@ export const createBetterAuth = ({
       window: 60,
       max: 100,
       customRules: {
-        "/sign-in/username": { window: 60, max: 5 },
+        "/sign-in/email": { window: 60, max: 5 },
         "/request-password-reset": { window: 60, max: 3 },
         "/reset-password": { window: 60, max: 5 },
       },
@@ -113,58 +102,37 @@ export const createBetterAuth = ({
 
 export type BetterAuth = ReturnType<typeof createBetterAuth>;
 
-export const normalizeUsername = (value: string) => value.trim().toLowerCase();
+/** Emails are the sign-in name: compared and stored trimmed and lowercased. */
+export const normalizeEmail = (value: string) => value.trim().toLowerCase();
 
-export type UsernameSignInResult =
+export type SignInResult =
   | { status: "ok"; userId: string }
   | { status: "invalid" }
   | { status: "rate-limited" };
 
 /**
- * The username of the account with this email, for signing in with either. Undefined when no
- * account has it (the sign-in then fails like a wrong username).
+ * Checks an email and password. Goes through Better Auth's request handler (not its server
+ * API) so its rate limiting applies, keyed by the client's IP address. The Better Auth
+ * session it creates is deleted right away.
  */
-const usernameForEmail = async (auth: BetterAuth, email: string) => {
-  const context = await auth.$context;
-  const found = await context.internalAdapter.findUserByEmail(
-    email.trim().toLowerCase()
-  );
-  const username = (found?.user as { username?: unknown } | undefined)
-    ?.username;
-  return typeof username === "string" ? username : undefined;
-};
-
-/**
- * Checks a username (or an account's email) and password. Goes through Better Auth's request handler (not
- * its server API) so its rate limiting applies, keyed by the client's IP address.
- * The Better Auth session it creates is deleted right away.
- */
-export const signInWithUsername = async (
+export const signInWithEmail = async (
   auth: BetterAuth,
   {
-    username,
+    email,
     password,
     request,
-  }: { username: string; password: string; request: Request }
-): Promise<UsernameSignInResult> => {
-  // Usernames can't contain "@". An unknown email still goes through the endpoint, so it
-  // counts against the rate limit like any other attempt.
-  const loginName = username.includes("@")
-    ? ((await usernameForEmail(auth, username)) ?? "-")
-    : username;
+  }: { email: string; password: string; request: Request }
+): Promise<SignInResult> => {
   const headers = new Headers({ "Content-Type": "application/json" });
   const forwardedFor = request.headers.get("x-forwarded-for");
   if (forwardedFor !== null) {
     headers.set("x-forwarded-for", forwardedFor);
   }
   const response = await auth.handler(
-    new Request(new URL(`${basePath}/sign-in/username`, auth.options.baseURL), {
+    new Request(new URL(`${basePath}/sign-in/email`, auth.options.baseURL), {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        username: normalizeUsername(loginName),
-        password,
-      }),
+      body: JSON.stringify({ email: normalizeEmail(email), password }),
     })
   );
   if (response.status === 429) {

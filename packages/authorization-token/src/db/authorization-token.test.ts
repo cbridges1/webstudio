@@ -349,7 +349,7 @@ describe("findOrCreateAgentToken", () => {
     await seedProject();
     await db
       .update(user)
-      .set({ loginName: "alex" })
+      .set({ email: "alex@example.com" })
       .where(eq(user.id, "user-1"));
 
     const first = await findOrCreateAgentToken(
@@ -364,7 +364,7 @@ describe("findOrCreateAgentToken", () => {
     expect(second.token).toBe(first.token);
     expect(await readToken(first.token)).toEqual([
       expect.objectContaining({
-        name: "AI agent (alex)",
+        name: "AI agent (alex@example.com)",
         relation: "builders",
         canUseApi: true,
       }),

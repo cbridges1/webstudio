@@ -8,7 +8,7 @@
 
 ## This fork
 
-This fork stores everything with Drizzle in plain Postgres, signs in with a username and password
+This fork stores everything with Drizzle in plain Postgres, signs in with an email and password
 (no Google or GitHub app needed), has no pricing model (every feature is available) and shows
 each project's real published address.
 
@@ -20,9 +20,9 @@ commands there.
 This repository keeps the code, its tests and the e2e runner, and CI publishes the builder and
 deploy service images (`.github/workflows/selfhost-images.yml`, to
 `ghcr.io/<owner>/webstudio-builder` and `ghcr.io/<owner>/webstudio-deploy`, tagged `latest`, the
-branch and `sha-<commit>`). The deploy service that makes Publish work is `apps/deploy`: a separate
-process from the builder, or, with `DEPLOYER_MODE=builtin` (or the dashboard's Settings →
-Deployer), run by the builder itself. App admins manage users, the deployer and email in the
+branch and `sha-<commit>`). The deploy service that makes Publish work is `apps/deploy`. By default the
+builder runs it itself; with `DEPLOYER_MODE=separate` (or the dashboard's Settings → Deployer) it
+runs as its own process. App admins manage users, the deployer and email in the
 dashboard's Settings.
 
 ```sh
@@ -30,6 +30,21 @@ npm run test:selfhost      # tests for this fork's changes
 npm run e2e:builder        # Playwright e2e against a disposable database (Docker)
 npm run migrations         # apply migrations to DATABASE_URL
 ```
+
+### Signing in locally
+
+Everyone signs in with an email and password; there is no public sign-up. For local development,
+`pnpm --filter @webstudio-is/builder users local-admin` (the self-hosting project's setup runs
+it) creates a test admin on the builder's database:
+
+| Email                  | Password                |
+| ---------------------- | ----------------------- |
+| `admin@localhost.test` | `webstudio-local-admin` |
+
+It's created only when missing (a changed password stays changed), and the command refuses in
+production. Admins add other accounts in the dashboard's **Settings → Users**, or with
+`pnpm --filter @webstudio-is/builder users add <email> --name <name>`
+(`apps/builder/scripts/users.ts` lists every command).
 
 ## Learning Resources
 

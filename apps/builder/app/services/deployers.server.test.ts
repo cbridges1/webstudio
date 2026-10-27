@@ -77,6 +77,8 @@ const waits = { ...jobWaits };
 
 beforeEach(() => {
   Object.assign(jobWaits, { validateMs: 2000, unpublishMs: 2000, pollMs: 5 });
+  // Most tests play a separate deploy service; "deployer mode" covers built in.
+  env.DEPLOYER_MODE = "separate";
 });
 
 afterEach(() => {
@@ -91,7 +93,7 @@ afterEach(() => {
 
 afterEach(async () => {
   // Stops a built-in worker a test started.
-  env.DEPLOYER_MODE = undefined;
+  env.DEPLOYER_MODE = "separate";
   await applyDeployerMode(db);
   builtin.calls = [];
 });
@@ -184,8 +186,8 @@ describe("deploy service settings", () => {
     await setup();
     expect(await loadDeployerSettings(contextFor("admin"))).toEqual({
       mode: "separate",
-      modeSource: "default",
-      envMode: null,
+      modeSource: "env",
+      envMode: "separate",
       source: "app",
       wakeUrl: null,
       wakeTokenEnding: null,
@@ -289,30 +291,41 @@ describe("deploy service settings", () => {
 });
 
 describe("deployer mode", () => {
-  test("defaults to separate, follows DEPLOYER_MODE, and an admin's choice overrides it", async () => {
+  test("defaults to built in, follows DEPLOYER_MODE, and an admin's choice overrides it", async () => {
     await setup();
-    expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
-      mode: "separate",
-      modeSource: "default",
-    });
-    env.DEPLOYER_MODE = "builtin";
+    env.DEPLOYER_MODE = undefined;
     expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
       mode: "builtin",
-      modeSource: "env",
-      envMode: "builtin",
+      modeSource: "default",
+      envMode: null,
     });
-    await setDeployerMode({ mode: "separate" }, contextFor("admin"));
+    env.DEPLOYER_MODE = "separate";
     expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
       mode: "separate",
+      modeSource: "env",
+      envMode: "separate",
+    });
+    await setDeployerMode({ mode: "builtin" }, contextFor("admin"));
+    expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
+      mode: "builtin",
       modeSource: "app",
-      envMode: "builtin",
+      envMode: "separate",
     });
     // Null follows the environment again.
     await setDeployerMode({ mode: null }, contextFor("admin"));
     expect(await loadDeployerSettings(contextFor("admin"))).toMatchObject({
-      mode: "builtin",
+      mode: "separate",
       modeSource: "env",
     });
+  });
+
+  test("names the built-in worker after the host and a non-default queue", async () => {
+    await setup();
+    env.DEPLOYER_MODE = "builtin";
+    env.DEPLOYER_QUEUE = "containers";
+    await applyDeployerMode(db);
+    expect(builtin.options?.workerId).toMatch(/^builder-.+-containers$/);
+    expect(builtin.options?.queue).toBe("containers");
   });
 
   test("only admins change it", async () => {

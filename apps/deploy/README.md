@@ -12,17 +12,17 @@ saves it) in `DeployJob` and sends `NOTIFY deploy_jobs`; this service `LISTEN`s,
 job (`DEPLOYER_WAKE_URL`, or the dashboard's **Settings → Deployer**), e.g. this service's
 `POST /wake` on a platform that stops it when idle.
 
-It runs as a separate process from the builder by default, since site builds run project code
-(HTML embeds): the service has its own database login and none of the builder's secrets. It
-lives in this workspace to build sites with this checkout's CLI and SSG packages, so it always
+By default the builder runs it itself (below). Set `DEPLOYER_MODE=separate` on the builder to run
+it as its own process instead, since site builds run project code (HTML embeds): as a separate
+service it has its own database login and none of the builder's secrets. It lives in this workspace to build sites with this checkout's CLI and SSG packages, so it always
 matches the builder.
 
 ## Built into the builder
 
-With `DEPLOYER_MODE=builtin` on the builder (or **Settings → Deployer → Built into the builder**,
-which overrides it), the builder runs this service's worker itself (`src/service.ts`, exported
+Unless the builder has `DEPLOYER_MODE=separate` (an app admin's choice in **Settings → Deployer**
+overrides either), the builder runs this service's worker itself (`src/service.ts`, exported
 as `@webstudio-is/deploy/service`) and nothing else needs to be deployed. It registers in
-`DeployWorker` as `builder-<host name>` and works the same way, with the builder's database
+`DeployWorker` as `builder-<host name>` (plus `-<queue>` with `DEPLOYER_QUEUE`) and works the same way, with the builder's database
 login and `DEPLOY_CREDENTIALS_KEY`. Builder settings for it: `DEPLOYER_DATA_DIR` (builds and
 logs; default a folder in the temporary directory) and `DEPLOY_SITES_DIR` (the directory host).
 

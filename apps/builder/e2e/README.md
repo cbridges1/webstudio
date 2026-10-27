@@ -125,7 +125,7 @@ E2E_SKIP_CLEANUP=false pnpm e2e:builder
 
 ## Sign-in and browser (selfhost)
 
-Tests sign in through the username/password form. Each worker's account is created on first use
+Tests sign in through the email/password form. Each worker's account is created on first use
 (`e2e/flows/dashboard.ts`), and `e2e/run.sh` sets `AUTH_RATE_LIMIT=false` so repeated sign-ins
 aren't rate-limited. Tests run in Google Chrome (`E2E_BROWSER_CHANNEL`, default `chrome`): the
 builder serves plain HTTP with `Secure` cookies, which Chrome keeps on `localhost` but Playwright's

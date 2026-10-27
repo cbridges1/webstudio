@@ -1,32 +1,38 @@
-// selfhost: manages username/password accounts from the command line, for scripts and
-// automation, such as a self-hosting project's commands.
+// selfhost: manages email/password accounts from the command line, for scripts and
+// automation, such as a self-hosting project's commands. App admins can do the same in the
+// dashboard (Settings → Users).
 // There is no public sign-up: an admin creates every account. Passwords are hashed and
 // checked by Better Auth, with the same configuration the builder uses
 // (app/services/better-auth.server.ts).
 //
 // Usage (from apps/builder): pnpm users <command>
-//   add <username> [--email <email>] [--admin]
-//                                     Create a user, its default workspace and a password
-//                                     (--admin: an app admin too)
-//   set-password <username>           Replace the password and sign the user out of Better Auth
-//   disable <username>                Block sign-in
-//   enable <username>                 Allow sign-in again
-//   make-admin <username>             Make an app admin (dashboard Settings: users, deployer,
+//   add <email> [--name <name>] [--admin]
+//                                     Create a user (name: the email's part before "@"), its
+//                                     default workspace and a password (--admin: an app admin)
+//   set-password <email>              Replace the password and sign the user out of Better Auth
+//   set-name <email> --name <name>    Change the name the builder shows
+//   set-email <email> --new-email <new>
+//                                     Change the sign-in email
+//   disable <email>                   Block sign-in
+//   enable <email>                    Allow sign-in again
+//   make-admin <email>                Make an app admin (dashboard Settings: users, deployer,
 //                                     email)
-//   remove-admin <username>           Make a regular user again
-//   list                              List username accounts, whether they can sign in and
-//                                     which are admins
+//   remove-admin <email>              Make a regular user again
+//   local-admin                       Create the local test admin (localAdmin below) when it's
+//                                     missing; never changes an existing account. Refused in
+//                                     production
+//   list                              List accounts: name, email, whether they can sign in and
+//                                     which are admins (tab-separated)
 // The password is prompted for without echo, read from stdin with --password-stdin, or read
 // from an environment variable with --password-env <name> (for a job that gets it from a
 // secret store).
-// Users who will be invited to workspaces need a real email: invites match it exactly.
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import {
   AccountError,
-  normalizeUsername,
+  normalizeEmail,
+  validateEmail,
   validatePassword,
-  validateUsername,
 } from "../app/services/user-accounts.server";
 import { openAccounts } from "./accounts-context";
 
@@ -91,84 +97,129 @@ const readPassword = async (passwordStdin: boolean) => {
 };
 
 const args = process.argv.slice(2);
+const valueOptions = ["--name", "--new-email", "--password-env"];
+const flags = ["--password-stdin", "--admin"];
+const option = (name: string) => {
+  const index = args.indexOf(name);
+  return index === -1 ? undefined : args[index + 1];
+};
 const passwordStdin = args.includes("--password-stdin");
 const makeAdmin = args.includes("--admin");
-const emailIndex = args.indexOf("--email");
-const email = emailIndex === -1 ? undefined : args[emailIndex + 1];
-const passwordEnvIndex = args.indexOf("--password-env");
-const passwordEnv =
-  passwordEnvIndex === -1 ? undefined : args[passwordEnvIndex + 1];
-const [command, rawUsername] = args.filter(
+const name = option("--name");
+const newEmail = option("--new-email");
+const passwordEnv = option("--password-env");
+const [command, rawEmail] = args.filter(
   (arg, index) =>
-    arg !== "--password-stdin" &&
-    arg !== "--admin" &&
-    [emailIndex, passwordEnvIndex].every(
-      (option) => option === -1 || (index !== option && index !== option + 1)
-    )
+    flags.includes(arg) === false &&
+    valueOptions.includes(arg) === false &&
+    valueOptions.includes(args[index - 1]) === false
 );
 
 const { accounts, close } = openAccounts();
 
+/**
+ * The test admin for running locally, documented in the README ("This fork"). Only for local
+ * development databases: `local-admin` refuses in production.
+ */
+const localAdmin = {
+  name: "Local admin",
+  email: "admin@localhost.test",
+  password: "webstudio-local-admin",
+};
+
 const main = async () => {
+  if (command === "local-admin") {
+    if (
+      process.env.NODE_ENV === "production" ||
+      process.env.DEPLOYMENT_ENVIRONMENT === "production"
+    ) {
+      return die("local-admin is for local development only");
+    }
+    if (await accounts.exists(localAdmin.email)) {
+      console.info(`${localAdmin.email} already exists; left unchanged.`);
+      return;
+    }
+    await accounts.add(localAdmin);
+    await accounts.setAdmin(localAdmin.email, true);
+    console.info(
+      `Created ${localAdmin.email} (password: ${localAdmin.password}), an admin.`
+    );
+    return;
+  }
+
   if (command === "list") {
     for (const row of await accounts.list()) {
       console.info(
-        `${row.username}\t${row.email ?? "(no email)"}\t${row.disabled ? "disabled" : "active"}${row.admin ? "\tadmin" : ""}`
+        `${row.name}\t${row.email}\t${row.disabled ? "disabled" : "active"}${row.admin ? "\tadmin" : ""}`
       );
     }
     return;
   }
 
-  if (rawUsername === undefined) {
+  if (rawEmail === undefined) {
     die(
-      "usage: users <add|set-password|disable|enable|make-admin|remove-admin> <username> [--email <email>] [--admin] | users list"
+      "usage: users <add|set-password|set-name|set-email|disable|enable|make-admin|remove-admin> <email> [--name <name>] [--new-email <email>] [--admin] | users list"
     );
   }
-  const username = normalizeUsername(rawUsername);
-  const problem = validateUsername(username);
+  const email = normalizeEmail(rawEmail);
+  const problem = validateEmail(email);
   if (problem !== undefined) {
     die(problem);
   }
 
   switch (command) {
     case "add":
-      if (await accounts.exists(username)) {
+      if (await accounts.exists(email)) {
         die(
-          `${username} already exists (use set-password to change the password)`
+          `${email} already has an account (use set-password to change the password)`
         );
       }
       await accounts.add({
-        username,
+        name: name ?? email.split("@")[0],
         email,
         password: await readPassword(passwordStdin),
       });
       if (makeAdmin) {
-        await accounts.setAdmin(username, true);
+        await accounts.setAdmin(email, true);
       }
-      console.info(`Created ${username}${makeAdmin ? ", an admin" : ""}.`);
+      console.info(`Created ${email}${makeAdmin ? ", an admin" : ""}.`);
       return;
     case "set-password":
-      if ((await accounts.exists(username)) === false) {
-        die(`no user ${username}`);
+      if ((await accounts.exists(email)) === false) {
+        die(`no user ${email}`);
       }
-      await accounts.setPassword(username, await readPassword(passwordStdin));
-      console.info(`Password updated for ${username}.`);
+      await accounts.setPassword(email, await readPassword(passwordStdin));
+      console.info(`Password updated for ${email}.`);
+      return;
+    case "set-name":
+      if (name === undefined) {
+        return die("set-name needs --name <name>");
+      }
+      await accounts.setName(email, name);
+      console.info(`Renamed ${email}.`);
+      return;
+    case "set-email":
+      if (newEmail === undefined) {
+        return die("set-email needs --new-email <email>");
+      }
+      await accounts.setEmail(email, newEmail);
+      console.info(`${email} now signs in as ${normalizeEmail(newEmail)}.`);
       return;
     case "disable":
-      await accounts.disable(username);
-      console.info(`Disabled ${username}; they can no longer sign in.`);
+      await accounts.disable(email);
+      console.info(`Disabled ${email}; they can no longer sign in.`);
       return;
     case "enable":
-      await accounts.enable(username);
-      console.info(`Enabled ${username}.`);
+      await accounts.enable(email);
+      console.info(`Enabled ${email}.`);
       return;
     case "make-admin":
-      await accounts.setAdmin(username, true);
-      console.info(`${username} is now an admin.`);
+      await accounts.setAdmin(email, true);
+      console.info(`${email} is now an admin.`);
       return;
     case "remove-admin":
-      await accounts.setAdmin(username, false);
-      console.info(`${username} is no longer an admin.`);
+      await accounts.setAdmin(email, false);
+      console.info(`${email} is no longer an admin.`);
       return;
   }
   die(`unknown command: ${command}`);

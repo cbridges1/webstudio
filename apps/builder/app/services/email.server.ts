@@ -199,11 +199,9 @@ export const workspaceInviteEmail = ({
 
 export const passwordResetEmail = ({
   to,
-  username,
   token,
 }: {
   to: string;
-  username: string;
   token: string;
 }) => {
   const url = new URL("/login/reset-password", builderOrigin());
@@ -212,7 +210,7 @@ export const passwordResetEmail = ({
     to,
     subject: "Reset your Webstudio password",
     lines: [
-      `Someone asked to reset the password of the Webstudio account "${username}".`,
+      `Someone asked to reset the password of the Webstudio account ${to}.`,
       "The link works once, for one hour.",
     ],
     linkLabel: "Choose a new password",

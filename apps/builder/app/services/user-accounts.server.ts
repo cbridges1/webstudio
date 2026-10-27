@@ -1,12 +1,14 @@
-// selfhost: username/password account management. There is no public sign-up: an
-// admin creates every account, with the account script (scripts/users.ts), a
-// self-hosting project's CLI or, in e2e runs, the test flows.
+// selfhost: email/password account management. There is no public sign-up: an admin
+// creates every account, in the dashboard (Settings → Users), with the account script
+// (scripts/users.ts), a self-hosting project's CLI or, in e2e runs, the test flows. An
+// account is a name (shown in the builder) and an email (its sign-in name, lowercased).
 import {
   and,
   asc,
   eq,
-  isNotNull,
+  inArray,
   maybeOne,
+  authAccount,
   user,
   workspace,
   type Db,
@@ -14,20 +16,31 @@ import {
 import {
   maxPasswordLength,
   minPasswordLength,
-  normalizeUsername,
-  usernamePattern,
+  normalizeEmail,
   type BetterAuth,
 } from "./better-auth.server";
 
-export { normalizeUsername };
+export { normalizeEmail };
 
 /** A problem the operator can fix, with a message to show them. */
 export class AccountError extends Error {}
 
-/** Returns why the username can't be used, or undefined when it's fine. */
-export const validateUsername = (value: string) => {
-  if (usernamePattern.test(normalizeUsername(value)) === false) {
-    return "Usernames have 3–32 letters, digits, '.', '_' or '-'";
+/** Returns why the email can't be used, or undefined when it's fine. */
+export const validateEmail = (value: string) => {
+  const email = normalizeEmail(value);
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) === false) {
+    return "Enter a valid email address";
+  }
+};
+
+/** Returns why the name can't be used, or undefined when it's fine. */
+export const validateName = (value: string) => {
+  const name = value.trim();
+  if (name.length === 0) {
+    return "Enter a name";
+  }
+  if (name.length > 64) {
+    return "Names can have at most 64 characters";
   }
 };
 
@@ -41,18 +54,11 @@ export const validatePassword = (value: string) => {
   }
 };
 
-/** Returns why the email can't be used, or undefined when it's fine. */
-export const validateEmail = (value: string) => {
-  if (value.trim().includes("@") === false) {
-    return "Enter a valid email address";
-  }
-};
-
 export type AccountSummary = {
-  username: string;
-  email: string | null;
+  name: string;
+  email: string;
   disabled: boolean;
-  /** Better Auth's admin role: sets up the deployer. */
+  /** Better Auth's admin role: manages users, the deployer and email. */
   admin: boolean;
 };
 
@@ -66,18 +72,18 @@ export const createUserAccounts = ({
   db: Db;
   auth: BetterAuth;
 }) => {
-  const findUser = async (username: string) =>
+  const findUser = async (email: string) =>
     maybeOne(
       await db
         .select({ id: user.id, banned: user.banned })
         .from(user)
-        .where(eq(user.loginName, normalizeUsername(username)))
+        .where(eq(user.email, normalizeEmail(email)))
     );
 
-  const getUser = async (username: string) => {
-    const found = await findUser(username);
+  const getUser = async (email: string) => {
+    const found = await findUser(email);
     if (found === null) {
-      throw new AccountError(`No user ${normalizeUsername(username)}`);
+      throw new AccountError(`No user ${normalizeEmail(email)}`);
     }
     return found;
   };
@@ -107,74 +113,65 @@ export const createUserAccounts = ({
   };
 
   return {
-    exists: async (username: string) => (await findUser(username)) !== null,
+    exists: async (email: string) => (await findUser(email)) !== null,
 
+    /** Accounts that sign in with a password. */
     list: async (): Promise<AccountSummary[]> => {
+      const withPassword = db
+        .select({ userId: authAccount.userId })
+        .from(authAccount)
+        .where(eq(authAccount.providerId, "credential"));
       const rows = await db
         .select({
-          loginName: user.loginName,
+          name: user.username,
           email: user.email,
           banned: user.banned,
           role: user.role,
         })
         .from(user)
-        .where(isNotNull(user.loginName))
-        .orderBy(asc(user.loginName));
+        .where(inArray(user.id, withPassword))
+        .orderBy(asc(user.email));
       return rows.map((row) => ({
-        username: row.loginName ?? "",
-        email: row.email,
+        name: row.name ?? "",
+        email: row.email ?? "",
         disabled: row.banned === true,
         admin: hasAdminRole(row.role),
       }));
     },
 
-    /**
-     * Creates a user with its default workspace. Users who will be invited to
-     * workspaces need a real email: invites match it exactly.
-     */
+    /** Creates a user with its default workspace. */
     add: async ({
-      username: rawUsername,
+      name: rawName,
       email: rawEmail,
       password,
     }: {
-      username: string;
-      email?: string;
+      name: string;
+      email: string;
       password: string;
     }) => {
-      const username = normalizeUsername(rawUsername);
-      const email = rawEmail?.trim().toLowerCase() || undefined;
-      check(validateUsername(username));
-      check(email === undefined ? undefined : validateEmail(email));
+      const name = rawName.trim();
+      const email = normalizeEmail(rawEmail);
+      check(validateName(name));
+      check(validateEmail(email));
       check(validatePassword(password));
-      if ((await findUser(username)) !== null) {
-        throw new AccountError(`${username} already exists`);
+      if ((await findUser(email)) !== null) {
+        throw new AccountError(`${email} already has an account`);
       }
-      // Better Auth needs an email; accounts without one get a placeholder that
-      // can't receive mail or match an invite.
       const { user: created } = await auth.api.createUser({
-        body: {
-          email: email ?? `${username}@users.invalid`,
-          password,
-          name: username,
-          data: { username },
-        },
+        body: { email, password, name },
       });
       await db
         .update(user)
-        .set({
-          provider: "username",
-          // Invites match User.email, so keep placeholders out of it.
-          email: email ?? null,
-        })
+        .set({ provider: "password" })
         .where(eq(user.id, created.id));
       await ensureDefaultWorkspace(created.id);
-      return { id: created.id, username };
+      return { id: created.id, email };
     },
 
     /** Replaces the password and signs the user out of Better Auth. */
-    setPassword: async (username: string, password: string) => {
+    setPassword: async (email: string, password: string) => {
       check(validatePassword(password));
-      const { id } = await getUser(username);
+      const { id } = await getUser(email);
       const context = await auth.$context;
       const hash = await context.password.hash(password);
       const accounts = await context.internalAdapter.findAccounts(id);
@@ -191,9 +188,29 @@ export const createUserAccounts = ({
       await signOut(id);
     },
 
+    /** Renames the user (the name the builder shows). */
+    setName: async (email: string, rawName: string) => {
+      const name = rawName.trim();
+      check(validateName(name));
+      const { id } = await getUser(email);
+      await db.update(user).set({ username: name }).where(eq(user.id, id));
+    },
+
+    /** Changes the sign-in email (workspace invites match it too). */
+    setEmail: async (email: string, rawNewEmail: string) => {
+      const newEmail = normalizeEmail(rawNewEmail);
+      check(validateEmail(newEmail));
+      const { id } = await getUser(email);
+      const taken = await findUser(newEmail);
+      if (taken !== null && taken.id !== id) {
+        throw new AccountError(`${newEmail} already has an account`);
+      }
+      await db.update(user).set({ email: newEmail }).where(eq(user.id, id));
+    },
+
     /** Blocks sign-in. Projects and data stay. */
-    disable: async (username: string) => {
-      const { id } = await getUser(username);
+    disable: async (email: string) => {
+      const { id } = await getUser(email);
       await db
         .update(user)
         .set({ banned: true, banReason: "Disabled by an administrator" })
@@ -201,17 +218,17 @@ export const createUserAccounts = ({
       await signOut(id);
     },
 
-    enable: async (username: string) => {
-      const { id } = await getUser(username);
+    enable: async (email: string) => {
+      const { id } = await getUser(email);
       await db
         .update(user)
         .set({ banned: false, banReason: null, banExpires: null })
         .where(eq(user.id, id));
     },
 
-    /** Gives or takes Better Auth's admin role (app admins set up the deployer). */
-    setAdmin: async (username: string, admin: boolean) => {
-      const { id } = await getUser(username);
+    /** Gives or takes Better Auth's admin role. */
+    setAdmin: async (email: string, admin: boolean) => {
+      const { id } = await getUser(email);
       await db
         .update(user)
         .set({ role: admin ? "admin" : "user" })

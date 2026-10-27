@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
-import { createBetterAuth, signInWithUsername } from "./better-auth.server";
+import { createBetterAuth, signInWithEmail } from "./better-auth.server";
 import { createUserAccounts } from "./user-accounts.server";
 import { addUser, listUsers, updateUser } from "./users-admin.server";
 
@@ -32,20 +32,23 @@ const contextFor = (userId: string) =>
 
 const password = "correct horse battery staple";
 
-const signIn = (username: string, secret = password) =>
-  signInWithUsername(createAuth(), {
-    username,
+const signIn = (email: string, secret = password) =>
+  signInWithEmail(createAuth(), {
+    email,
     password: secret,
     request: new Request("http://localhost:5180/auth/password", {
       method: "POST",
     }),
   });
 
-/** The first admin, "root", made the way the account script makes it; returns its context. */
+const root = "root@example.com";
+const alice = "alice@example.com";
+
+/** The first admin, root@example.com, made the way the account script makes it; returns its context. */
 const setup = async () => {
   const accounts = createUserAccounts({ db, auth: createAuth() });
-  const { id } = await accounts.add({ username: "root", password });
-  await accounts.setAdmin("root", true);
+  const { id } = await accounts.add({ name: "Root", email: root, password });
+  await accounts.setAdmin(root, true);
   return contextFor(id);
 };
 
@@ -54,94 +57,92 @@ describe("users settings", () => {
     const admin = await setup();
 
     const users = await addUser(
-      { username: "Alice", email: "alice@example.com", password },
+      { name: "Alice", email: "Alice@Example.com", password },
       admin
     );
     expect(users).toEqual([
       {
-        username: "alice",
-        email: "alice@example.com",
+        name: "Alice",
+        email: alice,
         admin: false,
         disabled: false,
         isSelf: false,
       },
-      {
-        username: "root",
-        email: null,
-        admin: true,
-        disabled: false,
-        isSelf: true,
-      },
+      { name: "Root", email: root, admin: true, disabled: false, isSelf: true },
     ]);
-    expect(await signIn("alice")).toMatchObject({ status: "ok" });
-    expect(await signIn("alice@example.com")).toMatchObject({ status: "ok" });
+    expect(await signIn(alice)).toMatchObject({ status: "ok" });
   });
 
   test("adds admins", async () => {
     const admin = await setup();
     const users = await addUser(
-      { username: "bob", password, admin: true },
+      { name: "Bob", email: "bob@example.com", password, admin: true },
       admin
     );
-    expect(users.find((row) => row.username === "bob")).toMatchObject({
+    expect(users.find((row) => row.email === "bob@example.com")).toMatchObject({
       admin: true,
     });
   });
 
   test("reports what's wrong with a new user", async () => {
     const admin = await setup();
-    await expect(addUser({ username: "al", password }, admin)).rejects.toThrow(
-      "Usernames have 3–32"
-    );
     await expect(
-      addUser({ username: "alice", password: "short" }, admin)
+      addUser({ name: "Al", email: "not-an-email", password }, admin)
+    ).rejects.toThrow("valid email");
+    await expect(
+      addUser({ name: "Alice", email: alice, password: "short" }, admin)
     ).rejects.toThrow("at least 12");
     await expect(
-      addUser({ username: "root", password }, admin)
-    ).rejects.toThrow("root already exists");
+      addUser({ name: "Root 2", email: root, password }, admin)
+    ).rejects.toThrow("already has an account");
   });
 
-  test("changes passwords, disables, enables and sets the admin role", async () => {
+  test("renames, changes emails and passwords, disables, enables and sets the admin role", async () => {
     const admin = await setup();
-    await addUser({ username: "alice", password }, admin);
+    await addUser({ name: "Alice", email: alice, password }, admin);
 
     await updateUser(
-      {
-        action: "password",
-        username: "alice",
-        password: "a new long password",
-      },
+      { action: "password", email: alice, password: "a new long password" },
       admin
     );
-    expect(await signIn("alice")).toEqual({ status: "invalid" });
-    expect(await signIn("alice", "a new long password")).toMatchObject({
+    expect(await signIn(alice)).toEqual({ status: "invalid" });
+    expect(await signIn(alice, "a new long password")).toMatchObject({
       status: "ok",
     });
 
     let users = await updateUser(
-      { action: "disable", username: "alice" },
+      { action: "name", email: alice, name: "Alice Doe" },
       admin
     );
-    expect(users[0]).toMatchObject({ username: "alice", disabled: true });
-    expect(await signIn("alice", "a new long password")).toEqual({
+    expect(users[0]).toMatchObject({ name: "Alice Doe", email: alice });
+    users = await updateUser(
+      { action: "email", email: alice, newEmail: "alice.doe@example.com" },
+      admin
+    );
+    expect(users[0]).toMatchObject({ email: "alice.doe@example.com" });
+    const renamed = "alice.doe@example.com";
+
+    users = await updateUser({ action: "disable", email: renamed }, admin);
+    expect(users[0]).toMatchObject({ disabled: true });
+    expect(await signIn(renamed, "a new long password")).toEqual({
       status: "invalid",
     });
-    users = await updateUser({ action: "enable", username: "alice" }, admin);
+    users = await updateUser({ action: "enable", email: renamed }, admin);
     expect(users[0]).toMatchObject({ disabled: false });
 
-    users = await updateUser({ action: "admin", username: "alice" }, admin);
+    users = await updateUser({ action: "admin", email: renamed }, admin);
     expect(users[0]).toMatchObject({ admin: true });
-    users = await updateUser({ action: "unadmin", username: "alice" }, admin);
+    users = await updateUser({ action: "unadmin", email: renamed }, admin);
     expect(users[0]).toMatchObject({ admin: false });
   });
 
   test("admins can't lock themselves out", async () => {
     const admin = await setup();
     await expect(
-      updateUser({ action: "disable", username: "root" }, admin)
+      updateUser({ action: "disable", email: "ROOT@example.com" }, admin)
     ).rejects.toThrow("your own account");
     await expect(
-      updateUser({ action: "unadmin", username: "root" }, admin)
+      updateUser({ action: "unadmin", email: root }, admin)
     ).rejects.toThrow("your own admin role");
   });
 
@@ -151,10 +152,10 @@ describe("users settings", () => {
     const someone = contextFor("someone");
     await expect(listUsers(someone)).rejects.toThrow("Only admins");
     await expect(
-      addUser({ username: "mallory", password }, someone)
+      addUser({ name: "Mallory", email: "m@example.com", password }, someone)
     ).rejects.toThrow("Only admins");
     await expect(
-      updateUser({ action: "admin", username: "someone" }, someone)
+      updateUser({ action: "admin", email: root }, someone)
     ).rejects.toThrow("Only admins");
   });
 });

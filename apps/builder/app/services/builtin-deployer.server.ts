@@ -1,14 +1,16 @@
 // selfhost: the deployer mode, and the deploy service's worker when this builder runs it itself.
 //
-// "separate": a deploy service (apps/deploy) runs on its own and takes jobs from this builder's
-// database. "builtin": this builder runs the same worker (@webstudio-is/deploy/service) in its
-// own process, so nothing else needs to be deployed; publishes then use this process's CPU and
-// memory, so on a platform that throttles CPU between requests (Cloud Run's default) it must be
-// always allocated. Builds run project code (child processes get only createBuildEnv's
-// variables, but the same user and machine as the builder), so this mode trusts everyone who
-// can publish. The mode is what an app admin saved in Settings → Deployer, else
-// DEPLOYER_MODE, else "separate". Every builder process applies it when it queues or lists jobs,
-// and once a minute, so a change reaches every instance.
+// "builtin" (the default): this builder runs the deploy service's worker
+// (@webstudio-is/deploy/service) in its own process, so nothing else needs to be deployed.
+// Publishes then use this process's CPU and memory, so on a platform that throttles CPU between
+// requests (Cloud Run's default) it must be always allocated. Builds run project code (child
+// processes get only createBuildEnv's variables, but the same user and machine as the
+// builder), so this mode trusts everyone who can publish. "separate": a deploy service
+// (apps/deploy) runs on its own and takes jobs from this builder's database.
+//
+// The mode is what an app admin saved in Settings → Deployer, else DEPLOYER_MODE, else
+// "builtin". Every builder process applies it when it queues or lists jobs, and once a minute,
+// so a change reaches every instance.
 import { existsSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -46,7 +48,7 @@ export const resolveDeployerMode = async (
   if (envMode !== null) {
     return { mode: envMode, source: "env", envMode };
   }
-  return { mode: "separate", source: "default", envMode };
+  return { mode: "builtin", source: "default", envMode };
 };
 
 /** The checkout the builder runs from: its CLI and packages build the sites. */
@@ -87,7 +89,9 @@ const start = async (db: Db) => {
     databaseUrl: env.DATABASE_URL,
     db,
     credentialsKey: env.DEPLOY_CREDENTIALS_KEY,
-    workerId: `builder-${hostname()}`,
+    // Named per queue: builders sharing a machine and database (a dev server and a container)
+    // each register their own.
+    workerId: `builder-${hostname()}${env.DEPLOYER_QUEUE ? `-${env.DEPLOYER_QUEUE}` : ""}`,
     queue: env.DEPLOYER_QUEUE ?? "default",
     pollIntervalMs: 15_000,
     webstudioDir: findCheckout(),

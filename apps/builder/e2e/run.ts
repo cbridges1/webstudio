@@ -76,7 +76,7 @@ env.DATABASE_URL =
   env.E2E_DATABASE_URL ||
   `postgresql://${env.POSTGRES_USER}:${env.POSTGRES_PASSWORD}@localhost:${env.PGPORT}/${env.POSTGRES_DB}`;
 env.DIRECT_URL = env.E2E_DIRECT_URL || env.DATABASE_URL;
-// Every test signs in with a username and password; turn off the sign-in rate limit.
+// Every test signs in with an email and password; turn off the sign-in rate limit.
 setting("AUTH_RATE_LIMIT", "false");
 // Tests store assets as files: empty S3_* values override apps/builder/.env's RustFS.
 for (const name of [

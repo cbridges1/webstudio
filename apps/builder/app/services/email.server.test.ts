@@ -192,7 +192,6 @@ describe("messages", () => {
   test("a password reset links to the reset page with the token", () => {
     const mail = passwordResetEmail({
       to: "alice@example.com",
-      username: "alice",
       token: "reset-token-123",
     });
     expect(mail.text).toContain(
