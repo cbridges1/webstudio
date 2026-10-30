@@ -35,6 +35,8 @@ export const openAccounts = () => {
   });
   return {
     accounts: createUserAccounts({ db, auth }),
+    /** The builder's public address, as email.server.ts's builderOrigin finds it. */
+    origin: process.env.BETTER_AUTH_URL ?? process.env.DEPLOYMENT_URL,
     close: () => db.$client.end(),
   };
 };

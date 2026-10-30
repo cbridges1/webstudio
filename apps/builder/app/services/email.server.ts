@@ -1,4 +1,4 @@
-// selfhost: email over SMTP, for workspace invites and password resets.
+// selfhost: email over SMTP, for workspace invites, account invites and password resets.
 //
 // The SMTP server comes from the builder's environment (SMTP_HOST, SMTP_PORT, SMTP_SECURE,
 // SMTP_USER, SMTP_PASSWORD, SMTP_FROM) or, when SMTP_HOST isn't set, from what an app admin
@@ -19,6 +19,7 @@ import {
 } from "@webstudio-is/deploy-protocol/credentials";
 import env from "~/env/env.server";
 import { isAppAdmin } from "./deployers.server";
+import { setPasswordPath } from "./user-accounts.server";
 
 /** The builder's public address, for links in emails. */
 export const builderOrigin = () =>
@@ -219,6 +220,34 @@ export const passwordResetEmail = ({
       "If it wasn't you, ignore this email: your password stays the same.",
   });
 };
+
+/** The link an invited user opens to choose their password. */
+export const setPasswordUrl = (token: string) =>
+  new URL(setPasswordPath(token), builderOrigin()).href;
+
+export const accountInviteEmail = ({
+  to,
+  inviter,
+  url,
+  days,
+}: {
+  to: string;
+  inviter: string;
+  url: string;
+  days: number;
+}) =>
+  linkEmail({
+    to,
+    subject: `${inviter} added you to Webstudio`,
+    lines: [
+      `${inviter} made you a Webstudio account. You sign in with this email: ${to}.`,
+      `Choose your password to finish setting it up. The link works once, for ${days} days.`,
+    ],
+    linkLabel: "Choose your password",
+    url,
+    footer:
+      "If you didn't expect this, ignore this email: nobody can sign in until a password is chosen.",
+  });
 
 // App admins: the SMTP server.
 

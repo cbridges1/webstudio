@@ -9,6 +9,11 @@
 //   add <email> [--name <name>] [--admin]
 //                                     Create a user (name: the email's part before "@"), its
 //                                     default workspace and a password (--admin: an app admin)
+//   invite <email> [--name <name>] [--admin]
+//                                     Create a user without a password (or, for one who
+//                                     hasn't chosen theirs yet, make a new link) and print a
+//                                     link where they choose their own; it works once, for 7
+//                                     days. Nothing is emailed: share the link with them
 //   set-password <email>              Replace the password and sign the user out of Better Auth
 //   set-name <email> --name <name>    Change the name the builder shows
 //   set-email <email> --new-email <new>
@@ -21,8 +26,9 @@
 //   local-admin                       Create the local test admin (localAdmin below) when it's
 //                                     missing; never changes an existing account. Refused in
 //                                     production
-//   list                              List accounts: name, email, whether they can sign in and
-//                                     which are admins (tab-separated)
+//   list                              List accounts: name, email, whether they can sign in
+//                                     (active, invited or disabled) and which are admins
+//                                     (tab-separated)
 // The password is prompted for without echo, read from stdin with --password-stdin, or read
 // from an environment variable with --password-env <name> (for a job that gets it from a
 // secret store).
@@ -31,6 +37,7 @@ import { Writable } from "node:stream";
 import {
   AccountError,
   normalizeEmail,
+  setPasswordPath,
   validateEmail,
   validatePassword,
 } from "../app/services/user-accounts.server";
@@ -115,7 +122,7 @@ const [command, rawEmail] = args.filter(
     valueOptions.includes(args[index - 1]) === false
 );
 
-const { accounts, close } = openAccounts();
+const { accounts, origin, close } = openAccounts();
 
 /**
  * The test admin for running locally, documented in the README ("This fork"). Only for local
@@ -150,7 +157,7 @@ const main = async () => {
   if (command === "list") {
     for (const row of await accounts.list()) {
       console.info(
-        `${row.name}\t${row.email}\t${row.disabled ? "disabled" : "active"}${row.admin ? "\tadmin" : ""}`
+        `${row.name}\t${row.email}\t${row.disabled ? "disabled" : row.invited ? "invited" : "active"}${row.admin ? "\tadmin" : ""}`
       );
     }
     return;
@@ -158,7 +165,7 @@ const main = async () => {
 
   if (rawEmail === undefined) {
     die(
-      "usage: users <add|set-password|set-name|set-email|disable|enable|make-admin|remove-admin> <email> [--name <name>] [--new-email <email>] [--admin] | users list"
+      "usage: users <add|invite|set-password|set-name|set-email|disable|enable|make-admin|remove-admin> <email> [--name <name>] [--new-email <email>] [--admin] | users list"
     );
   }
   const email = normalizeEmail(rawEmail);
@@ -184,6 +191,29 @@ const main = async () => {
       }
       console.info(`Created ${email}${makeAdmin ? ", an admin" : ""}.`);
       return;
+    case "invite": {
+      if (await accounts.exists(email)) {
+        const row = (await accounts.list()).find((row) => row.email === email);
+        if (row?.invited !== true) {
+          die(`${email} already has an account with a password`);
+        }
+      } else {
+        await accounts.add({ name: name ?? email.split("@")[0], email });
+        if (makeAdmin) {
+          await accounts.setAdmin(email, true);
+        }
+        console.info(`Created ${email}${makeAdmin ? ", an admin" : ""}.`);
+      }
+      const path = setPasswordPath(
+        await accounts.createSetPasswordToken(email)
+      );
+      console.info(
+        origin === undefined
+          ? `Send them this link, on the builder's address (it works once, for 7 days):\n${path}`
+          : `Send them this link (it works once, for 7 days):\n${new URL(path, origin).href}`
+      );
+      return;
+    }
     case "set-password":
       if ((await accounts.exists(email)) === false) {
         die(`no user ${email}`);

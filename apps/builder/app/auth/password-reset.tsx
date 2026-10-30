@@ -104,6 +104,8 @@ export const ForgotPassword = ({
 
 export type ResetPasswordProps = {
   token?: string;
+  /** An invited user choosing their first password. */
+  isInvite?: boolean;
   done?: boolean;
   errorMessage?: string;
   minPasswordLength: number;
@@ -111,6 +113,7 @@ export type ResetPasswordProps = {
 
 export const ResetPassword = ({
   token,
+  isInvite = false,
   done,
   errorMessage,
   minPasswordLength,
@@ -119,13 +122,17 @@ export const ResetPassword = ({
   const [mismatch, setMismatch] = useState(false);
   return (
     <AuthCard
-      title="Choose a new password"
+      title={isInvite ? "Choose your password" : "Choose a new password"}
       subtitle={`At least ${minPasswordLength} characters`}
       errorMessage={mismatch ? "The passwords don't match" : errorMessage}
     >
       {done ? (
         <Flex direction="column" gap="4">
-          <Text align="center">Your password was changed.</Text>
+          <Text align="center">
+            {isInvite
+              ? "Your password is set. Sign in with your email and new password."
+              : "Your password was changed."}
+          </Text>
           <Text align="center">
             <Link href="/login">Sign in</Link>
           </Text>
@@ -136,9 +143,11 @@ export const ResetPassword = ({
             This link isn't complete. Open the link from the email again, or ask
             for a new one.
           </Text>
-          <Text align="center">
-            <Link href="/login/forgot-password">Get a new link</Link>
-          </Text>
+          {isInvite === false && (
+            <Text align="center">
+              <Link href="/login/forgot-password">Get a new link</Link>
+            </Text>
+          )}
         </Flex>
       ) : (
         <Form
@@ -155,10 +164,11 @@ export const ResetPassword = ({
           }}
         >
           <input type="hidden" name="token" value={token} />
+          {isInvite && <input type="hidden" name="invite" value="1" />}
           <Flex direction="column" gap="4">
             <Flex direction="column" gap="2">
               <Label htmlFor="reset-password" text="sentence">
-                New password
+                {isInvite ? "Password" : "New password"}
               </Label>
               <InputField
                 id="reset-password"
@@ -190,7 +200,7 @@ export const ResetPassword = ({
               state={isSubmitting ? "pending" : undefined}
               css={buttonCss}
             >
-              Change password
+              {isInvite ? "Set password" : "Change password"}
             </Button>
             <BackToSignIn />
           </Flex>

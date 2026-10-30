@@ -66,10 +66,15 @@ export const decryptCredentials = (
   }
   try {
     const encrypted = Buffer.from(data, "base64url");
+    if (encrypted.length < TAG_BYTES) {
+      return;
+    }
+    // authTagLength: without it GCM accepts a truncated tag.
     const decipher = createDecipheriv(
       "aes-256-gcm",
       key,
-      Buffer.from(iv, "base64url")
+      Buffer.from(iv, "base64url"),
+      { authTagLength: TAG_BYTES }
     );
     decipher.setAAD(Buffer.from(projectId));
     decipher.setAuthTag(encrypted.subarray(-TAG_BYTES));

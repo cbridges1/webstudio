@@ -1,0 +1,70 @@
+# selfhost: Dependabot version updates for the selfhost branch (the default branch, main, follows
+# upstream, so every entry targets selfhost). Dependabot alerts and security updates are turned
+# on separately in the repository settings (Settings → Code security).
+version: 2
+updates:
+  # One pnpm lockfile (pnpm-lock.yaml) covers the workspace: packages/*, apps/*, fixtures/*.
+  - package-ecosystem: npm
+    directory: /
+    target-branch: selfhost
+    schedule:
+      interval: weekly
+      day: monday
+    # Let new releases age a week before proposing them (supply-chain hygiene). Security updates
+    # are not delayed by this.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    # The fixtures pin the versions the generated sites are tested against.
+    exclude-paths:
+      - "fixtures/**"
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      remix:
+        patterns:
+          - "@remix-run/*"
+          - "react-router"
+          - "@react-router/*"
+      radix:
+        patterns:
+          - "@radix-ui/*"
+      aws-sdk:
+        patterns:
+          - "@aws-sdk/*"
+          - "@smithy/*"
+      drizzle:
+        patterns:
+          - "drizzle-orm"
+          - "drizzle-kit"
+      # Groups are matched in order, so this only catches dev dependencies not already claimed by
+      # a group above.
+      dev-dependencies:
+        dependency-type: development
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: selfhost
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # The builder and deploy service images (Dockerfile at the root).
+  - package-ecosystem: docker
+    directory: /
+    target-branch: selfhost
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7

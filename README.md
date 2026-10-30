@@ -51,7 +51,10 @@ it) creates a test admin on the builder's database:
 It's created only when missing (a changed password stays changed), and the command refuses in
 production. Admins add other accounts in the dashboard's **Settings → Users**, or with
 `pnpm --filter @webstudio-is/builder users add <email> --name <name>`
-(`apps/builder/scripts/users.ts` lists every command).
+(`apps/builder/scripts/users.ts` lists every command). To let someone choose their own
+password, invite them (**Add user** → **Let them choose their own password**, or `users invite
+<email>`): they get a set-password link, valid once for 7 days, by email when email is set up,
+and the admin gets it to share.
 
 ## Learning Resources
 

@@ -1,7 +1,11 @@
 import { describe, expect, test } from "vitest";
 import { eq, user, workspace } from "@webstudio-is/db";
 import { setupTestDb } from "@webstudio-is/db/testing";
-import { createBetterAuth, signInWithEmail } from "./better-auth.server";
+import {
+  createBetterAuth,
+  resetPassword,
+  signInWithEmail,
+} from "./better-auth.server";
 import { AccountError, createUserAccounts } from "./user-accounts.server";
 
 const db = setupTestDb();
@@ -47,6 +51,7 @@ describe("user accounts", () => {
         email: "alice@example.com",
         disabled: false,
         admin: false,
+        invited: false,
       },
     ]);
     const [row] = await db.select().from(user).where(eq(user.id, created.id));
@@ -66,6 +71,43 @@ describe("user accounts", () => {
     expect((await accounts.list()).map((row) => row.email)).toEqual([
       "alice@example.com",
     ]);
+  });
+
+  test("adds invited users without a password, who set one with a link", async () => {
+    const { auth, accounts } = setup();
+    await accounts.add({ name: "Alice", email: alice.email });
+    expect(await accounts.list()).toMatchObject([
+      { email: "alice@example.com", invited: true },
+    ]);
+    expect(await signIn(auth, "")).toEqual({ status: "invalid" });
+    expect(await signIn(auth, password)).toEqual({ status: "invalid" });
+
+    const token = await accounts.createSetPasswordToken("Alice@example.com");
+    expect(
+      await resetPassword(auth, {
+        token,
+        password,
+        request: new Request("http://localhost:5173/login/reset-password"),
+      })
+    ).toEqual({ status: "ok" });
+    expect(await signIn(auth, password)).toMatchObject({ status: "ok" });
+    expect(await accounts.list()).toMatchObject([{ invited: false }]);
+  });
+
+  test("set-password links expire", async () => {
+    const { auth, accounts } = setup();
+    await accounts.add({ name: "Alice", email: alice.email });
+    const token = await accounts.createSetPasswordToken(alice.email, -1);
+    expect(
+      await resetPassword(auth, {
+        token,
+        password,
+        request: new Request("http://localhost:5173/login/reset-password"),
+      })
+    ).toEqual({ status: "invalid-token" });
+    await expect(
+      accounts.createSetPasswordToken("nobody@example.com")
+    ).rejects.toThrow(AccountError);
   });
 
   test("makes and unmakes app admins", async () => {

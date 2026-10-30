@@ -1,6 +1,8 @@
 // selfhost: Settings → Users. App admins add accounts (there is no public sign-up: a name
 // and the email they sign in with), rename them, change their email or password, disable them
-// and give or take the admin role (users-admin.server.ts).
+// and give or take the admin role (users-admin.server.ts). A new user either gets a password
+// from the admin or an invite: a link to choose their own, emailed when email is set up and
+// shown to the admin to share.
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Avatar,
@@ -42,11 +44,27 @@ type Account = {
   email: string;
   disabled: boolean;
   admin: boolean;
+  invited: boolean;
   isSelf: boolean;
 };
 
 type Result =
   | { success: true; data: Account[] }
+  | { success: false; error: string };
+
+type InviteLink = {
+  email: string;
+  url: string;
+  emailed: boolean;
+  emailError?: string;
+};
+
+type AddResult =
+  | { success: true; data: { users: Account[]; invite?: InviteLink } }
+  | { success: false; error: string };
+
+type InviteResult =
+  | { success: true; data: InviteLink }
   | { success: false; error: string };
 
 const toError = (error: Error) => ({
@@ -124,9 +142,10 @@ const AddUserDialog = ({
   onAdded,
 }: {
   onClose: () => void;
-  onAdded: (users: Account[], email: string) => void;
+  onAdded: (users: Account[], email: string, invite?: InviteLink) => void;
 }) => {
   const [admin, setAdmin] = useState(false);
+  const [invite, setInvite] = useState(true);
   const [error, setError] = useState<string>();
   const [isSaving, setIsSaving] = useState(false);
   return (
@@ -139,18 +158,18 @@ const AddUserDialog = ({
       isSaving={isSaving}
       onSubmit={async (form) => {
         const field = (name: string) => String(form.get(name) ?? "");
-        if (field("password") !== field("confirm")) {
+        if (invite === false && field("password") !== field("confirm")) {
           setError("The passwords don't match");
           return;
         }
         setError(undefined);
         setIsSaving(true);
         const email = field("email").trim();
-        const result: Result = await nativeClient.users.add
+        const result: AddResult = await nativeClient.users.add
           .mutate({
             name: field("name").trim(),
             email,
-            password: field("password"),
+            password: invite ? undefined : field("password"),
             admin,
           })
           .catch(toError);
@@ -159,12 +178,13 @@ const AddUserDialog = ({
           setError(result.error);
           return;
         }
-        onAdded(result.data, email.toLowerCase());
+        onAdded(result.data.users, email.toLowerCase(), result.data.invite);
       }}
     >
       <Text color="subtle" css={{ lineHeight: 1.6 }}>
-        They sign in with this email and password. Share the password with them;
-        with email set up they can also reset it themselves.
+        {invite
+          ? "They get a link to choose their own password, by email when email is set up. You also get the link to share."
+          : "They sign in with this email and password. Share the password with them; with email set up they can also reset it themselves."}
       </Text>
       <FieldGrid>
         <Field
@@ -187,25 +207,39 @@ const AddUserDialog = ({
           required
           hint="Also where invites and reset links go"
         />
-        <Field
-          id="new-user-password"
-          name="password"
-          label="Password"
-          type="password"
-          autoComplete="new-password"
-          required
-          minLength={minPasswordLength}
-          hint={`At least ${minPasswordLength} characters`}
-        />
-        <Field
-          id="new-user-confirm"
-          name="confirm"
-          label="Repeat the password"
-          type="password"
-          autoComplete="new-password"
-          required
-        />
+        {invite === false && (
+          <>
+            <Field
+              id="new-user-password"
+              name="password"
+              label="Password"
+              type="password"
+              autoComplete="new-password"
+              required
+              minLength={minPasswordLength}
+              hint={`At least ${minPasswordLength} characters`}
+            />
+            <Field
+              id="new-user-confirm"
+              name="confirm"
+              label="Repeat the password"
+              type="password"
+              autoComplete="new-password"
+              required
+            />
+          </>
+        )}
       </FieldGrid>
+      <CheckboxAndLabel>
+        <Checkbox
+          id="new-user-invite"
+          checked={invite}
+          onCheckedChange={(checked) => setInvite(checked === true)}
+        />
+        <Label htmlFor="new-user-invite">
+          Let them choose their own password
+        </Label>
+      </CheckboxAndLabel>
       <CheckboxAndLabel>
         <Checkbox
           id="new-user-admin"
@@ -217,6 +251,69 @@ const AddUserDialog = ({
         </Label>
       </CheckboxAndLabel>
     </FormDialog>
+  );
+};
+
+/** Shows an invite's set-password link, for the admin to share. */
+const InviteLinkDialog = ({
+  invite,
+  onClose,
+}: {
+  invite: InviteLink;
+  onClose: () => void;
+}) => {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Dialog open onOpenChange={(open) => open === false && onClose()}>
+      <DialogContent css={{ width: theme.spacing[35] }}>
+        <Grid
+          gap="5"
+          css={{ padding: `${theme.spacing[9]} ${theme.spacing[10]}` }}
+        >
+          {invite.emailed ? (
+            <Notice tone="success">
+              Emailed {invite.email} a link to choose their password.
+            </Notice>
+          ) : invite.emailError === "Email isn't set up" ? (
+            <Notice>
+              Email isn't set up, so send {invite.email} this link yourself.
+            </Notice>
+          ) : (
+            <Notice tone="error">
+              The invite wasn't emailed ({invite.emailError}). Send them this
+              link yourself.
+            </Notice>
+          )}
+          <Field
+            id="invite-link"
+            label="Set-password link"
+            value={invite.url}
+            readOnly
+            onFocus={(event) => (event.target as HTMLInputElement).select()}
+            hint="It works once, for 7 days. Anyone with it can set this account's password, so share it only with them."
+          />
+        </Grid>
+        <DialogActions>
+          <Button
+            type="button"
+            color="primary"
+            onClick={() => {
+              void navigator.clipboard
+                .writeText(invite.url)
+                .then(() => setCopied(true));
+            }}
+          >
+            {copied ? "Copied" : "Copy link"}
+          </Button>
+          <DialogClose>
+            <Button type="button" color="ghost">
+              Done
+            </Button>
+          </DialogClose>
+        </DialogActions>
+        <DialogTitle>Invite {invite.email}</DialogTitle>
+      </DialogContent>
+    </Dialog>
   );
 };
 
@@ -350,12 +447,24 @@ const UserRow = ({
   onChange,
   onError,
   onEdit,
+  onInvite,
 }: {
   account: Account;
   onChange: (users: Account[]) => void;
   onError: (error: string) => void;
   onEdit: (kind: Edit["kind"]) => void;
+  onInvite: (invite: InviteLink) => void;
 }) => {
+  const resendInvite = async () => {
+    const result: InviteResult = await nativeClient.users.resendInvite
+      .mutate({ email: account.email })
+      .catch(toError);
+    if (result.success === false) {
+      onError(result.error);
+      return;
+    }
+    onInvite(result.data);
+  };
   const run = async (
     action: "disable" | "enable" | "admin" | "unadmin"
   ): Promise<void> => {
@@ -406,6 +515,7 @@ const UserRow = ({
         ) : (
           <Badge>Member</Badge>
         )}
+        {account.invited && <Badge>Invited</Badge>}
         {account.disabled && <Badge tone="negative">Disabled</Badge>}
       </Flex>
       <Flex justify="end" role="cell">
@@ -422,8 +532,13 @@ const UserRow = ({
             <DropdownMenuItem onSelect={() => onEdit("email")}>
               Change email…
             </DropdownMenuItem>
+            {account.invited && (
+              <DropdownMenuItem onSelect={() => void resendInvite()}>
+                Resend invite…
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem onSelect={() => onEdit("password")}>
-              Change password…
+              {account.invited ? "Set password…" : "Change password…"}
             </DropdownMenuItem>
             {account.isSelf === false && (
               <>
@@ -475,6 +590,7 @@ export const UsersSettings = () => {
   const [notice, setNotice] = useState<string>();
   const [edit, setEdit] = useState<Edit>();
   const [isAdding, setIsAdding] = useState(false);
+  const [invite, setInvite] = useState<InviteLink>();
 
   const load = useCallback(async () => {
     setError(undefined);
@@ -502,7 +618,7 @@ export const UsersSettings = () => {
     <Grid gap="5">
       <SectionHeader
         title="Users"
-        description="Everyone signs in with their email and password. There is no public sign-up: admins add every account here. Disabled users can't sign in; their projects stay."
+        description="Everyone signs in with their email and password. There is no public sign-up: admins add or invite every account here. Invited users choose their own password from their link. Disabled users can't sign in; their projects stay."
         actions={
           <Button
             color="primary"
@@ -550,6 +666,11 @@ export const UsersSettings = () => {
               onChange={(next) => update(next)}
               onError={setError}
               onEdit={(kind) => setEdit({ kind, account })}
+              onInvite={(next) => {
+                setError(undefined);
+                setNotice(undefined);
+                setInvite(next);
+              }}
             />
           ))}
         </Box>
@@ -557,10 +678,22 @@ export const UsersSettings = () => {
       {isAdding && (
         <AddUserDialog
           onClose={() => setIsAdding(false)}
-          onAdded={(next, email) => {
-            update(next, `Added ${email}. They can sign in now.`);
+          onAdded={(next, email, added) => {
+            update(
+              next,
+              added
+                ? `Invited ${email}. They can sign in once they choose a password.`
+                : `Added ${email}. They can sign in now.`
+            );
             setIsAdding(false);
+            setInvite(added);
           }}
+        />
+      )}
+      {invite !== undefined && (
+        <InviteLinkDialog
+          invite={invite}
+          onClose={() => setInvite(undefined)}
         />
       )}
       {edit !== undefined && (

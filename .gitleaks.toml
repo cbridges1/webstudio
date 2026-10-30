@@ -1,0 +1,23 @@
+# selfhost: gitleaks configuration (used by .github/workflows/selfhost-security.yml).
+# Extends the built-in ruleset; only narrowly scoped false positives are allowlisted here.
+# Anything that looks like a real credential must be rotated and removed, not added to this file.
+
+title = "webstudio selfhost gitleaks config"
+
+[extend]
+useDefault = true
+
+# The fixtures link published demo projects by share link, whose authToken query parameter
+# trips the generic-api-key rule (package.json "fixtures:link" scripts and their READMEs).
+[[allowlists]]
+description = "Fixture share links"
+targetRules = ["generic-api-key"]
+paths = ['''^fixtures/[^/]+/(package\.json|README\.md)$''']
+
+# The fake deploy-service keys in the builder's deployer tests (in its history). Both conditions must match.
+[[allowlists]]
+description = "Deployer test key"
+condition = "AND"
+paths = ['''^apps/builder/app/services/deployers\.server\.test\.ts$''']
+regexTarget = "match"
+regexes = ['''secret-api-key-1234''', '''env-api-key-9876''']

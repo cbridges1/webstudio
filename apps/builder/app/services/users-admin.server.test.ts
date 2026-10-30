@@ -1,9 +1,18 @@
 import { describe, expect, test, vi } from "vitest";
 import { seed, setupTestDb } from "@webstudio-is/db/testing";
 import type { AppContext } from "@webstudio-is/trpc-interface/index.server";
-import { createBetterAuth, signInWithEmail } from "./better-auth.server";
+import {
+  createBetterAuth,
+  resetPassword,
+  signInWithEmail,
+} from "./better-auth.server";
 import { createUserAccounts } from "./user-accounts.server";
-import { addUser, listUsers, updateUser } from "./users-admin.server";
+import {
+  addUser,
+  listUsers,
+  resendInvite,
+  updateUser,
+} from "./users-admin.server";
 
 const db = setupTestDb();
 
@@ -11,6 +20,29 @@ const auth = vi.hoisted(() => ({ current: undefined as unknown }));
 
 vi.mock("./username-auth.server", () => ({
   getBetterAuth: () => auth.current,
+}));
+
+const email = vi.hoisted(() => ({
+  enabled: false,
+  sent: [] as Array<{ to: string; subject: string; text: string }>,
+}));
+
+vi.mock("./email.server", () => ({
+  isEmailEnabled: async () => email.enabled,
+  sendEmail: async (
+    _db: unknown,
+    message: { to: string; subject: string; text: string }
+  ) => {
+    email.sent.push(message);
+    return { sent: true };
+  },
+  setPasswordUrl: (token: string) =>
+    `http://localhost:5180/login/reset-password?token=${token}&invite=1`,
+  accountInviteEmail: ({ to, inviter, url }: Record<string, string>) => ({
+    to,
+    subject: `${inviter} added you to Webstudio`,
+    text: url,
+  }),
 }));
 
 const createAuth = () => {
@@ -56,32 +88,107 @@ describe("users settings", () => {
   test("admins add users who can then sign in", async () => {
     const admin = await setup();
 
-    const users = await addUser(
+    const { users, invite } = await addUser(
       { name: "Alice", email: "Alice@Example.com", password },
       admin
     );
+    expect(invite).toBeUndefined();
     expect(users).toEqual([
       {
         name: "Alice",
         email: alice,
         admin: false,
         disabled: false,
+        invited: false,
         isSelf: false,
       },
-      { name: "Root", email: root, admin: true, disabled: false, isSelf: true },
+      {
+        name: "Root",
+        email: root,
+        admin: true,
+        disabled: false,
+        invited: false,
+        isSelf: true,
+      },
     ]);
     expect(await signIn(alice)).toMatchObject({ status: "ok" });
   });
 
   test("adds admins", async () => {
     const admin = await setup();
-    const users = await addUser(
+    const { users } = await addUser(
       { name: "Bob", email: "bob@example.com", password, admin: true },
       admin
     );
     expect(users.find((row) => row.email === "bob@example.com")).toMatchObject({
       admin: true,
     });
+  });
+
+  test("invites users, who choose their own password from the link", async () => {
+    const admin = await setup();
+    email.enabled = false;
+    const { users, invite } = await addUser(
+      { name: "Alice", email: "Alice@Example.com" },
+      admin
+    );
+    expect(users.find((row) => row.email === alice)).toMatchObject({
+      invited: true,
+    });
+    expect(invite).toMatchObject({
+      email: alice,
+      emailed: false,
+      emailError: "Email isn't set up",
+    });
+    // No password yet: nothing signs in.
+    expect(await signIn(alice, "")).toEqual({ status: "invalid" });
+
+    const token = new URL(invite?.url ?? "").searchParams.get("token") ?? "";
+    expect(
+      await resetPassword(createAuth(), {
+        token,
+        password,
+        request: new Request("http://localhost:5180/login/reset-password"),
+      })
+    ).toEqual({ status: "ok" });
+    expect(await signIn(alice)).toMatchObject({ status: "ok" });
+    expect(
+      (await listUsers(admin)).find((row) => row.email === alice)
+    ).toMatchObject({ invited: false });
+    // The link works once.
+    expect(
+      await resetPassword(createAuth(), {
+        token,
+        password: "another long password",
+        request: new Request("http://localhost:5180/login/reset-password"),
+      })
+    ).toEqual({ status: "invalid-token" });
+    await expect(resendInvite({ email: alice }, admin)).rejects.toThrow(
+      "already chosen a password"
+    );
+  });
+
+  test("emails invites when email is set up, and resends them", async () => {
+    const admin = await setup();
+    email.enabled = true;
+    email.sent = [];
+    const { invite } = await addUser(
+      { name: "Alice", email: alice, admin: true },
+      admin
+    );
+    expect(invite).toMatchObject({ email: alice, emailed: true });
+    expect(email.sent).toEqual([
+      expect.objectContaining({
+        to: alice,
+        subject: "Root added you to Webstudio",
+        text: invite?.url,
+      }),
+    ]);
+    const again = await resendInvite({ email: "ALICE@example.com" }, admin);
+    expect(again).toMatchObject({ email: alice, emailed: true });
+    expect(again.url).not.toBe(invite?.url);
+    expect(email.sent).toHaveLength(2);
+    email.enabled = false;
   });
 
   test("reports what's wrong with a new user", async () => {
@@ -157,5 +264,8 @@ describe("users settings", () => {
     await expect(
       updateUser({ action: "admin", email: root }, someone)
     ).rejects.toThrow("Only admins");
+    await expect(resendInvite({ email: root }, someone)).rejects.toThrow(
+      "Only admins"
+    );
   });
 });

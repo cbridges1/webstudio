@@ -1,4 +1,5 @@
-// selfhost: the page a password reset email links to (?token=…).
+// selfhost: the page a password reset email links to (?token=…), and where invited users
+// choose their first password (?token=…&invite=1, users-admin.server.ts).
 import {
   json,
   type ActionFunctionArgs,
@@ -37,11 +38,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   assertDashboard(request);
   preventCrossOriginCookie(request);
   allowedDestinations(request, ["document", "empty"]);
-  const token = new URL(request.url).searchParams.get("token") ?? undefined;
+  const params = new URL(request.url).searchParams;
+  const token = params.get("token") ?? undefined;
+  const isInvite = params.has("invite");
   // Keeps the token out of the Referer of anything this page loads.
   const headers = createPrivateNoStoreHeaders();
   headers.set("Referrer-Policy", "no-referrer");
-  return json({ token, minPasswordLength }, { headers });
+  return json({ token, isInvite, minPasswordLength }, { headers });
 };
 
 type Result = { done: boolean; errorMessage?: string };
@@ -73,8 +76,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     case "invalid-token":
       return json<Result>({
         done: false,
-        errorMessage:
-          "This link has expired or was already used. Ask for a new one.",
+        errorMessage: form.has("invite")
+          ? "This invite has expired or was already used. Ask an admin for a new one."
+          : "This link has expired or was already used. Ask for a new one.",
       });
   }
 };
@@ -85,12 +89,13 @@ const ResetPassword = lazy(async () => {
 });
 
 export default function ResetPasswordRoute() {
-  const { token, minPasswordLength } = useLoaderData<typeof loader>();
+  const { token, isInvite, minPasswordLength } = useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   return (
     <ClientOnly>
       <ResetPassword
         token={token}
+        isInvite={isInvite}
         minPasswordLength={minPasswordLength}
         done={result?.done}
         errorMessage={result?.errorMessage}

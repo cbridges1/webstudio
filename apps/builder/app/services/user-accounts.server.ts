@@ -2,11 +2,15 @@
 // creates every account, in the dashboard (Settings → Users), with the account script
 // (scripts/users.ts), a self-hosting project's CLI or, in e2e runs, the test flows. An
 // account is a name (shown in the builder) and an email (its sign-in name, lowercased).
+//
+// An account added without a password is invited: it has a password account with no
+// password yet, so it can't sign in until the user follows a set-password link (the
+// password reset page with a longer-lived token) and chooses their own.
+import { randomBytes } from "node:crypto";
 import {
   and,
   asc,
   eq,
-  inArray,
   maybeOne,
   authAccount,
   user,
@@ -60,7 +64,16 @@ export type AccountSummary = {
   disabled: boolean;
   /** Better Auth's admin role: manages users, the deployer and email. */
   admin: boolean;
+  /** Added without a password and hasn't chosen one yet. */
+  invited: boolean;
 };
+
+/** How long a set-password link for a new account works. */
+export const inviteLinkMaxAge = 7 * 24 * 60 * 60;
+
+/** The builder page where an invited user chooses their password (createSetPasswordToken). */
+export const setPasswordPath = (token: string) =>
+  `/login/reset-password?${new URLSearchParams({ token, invite: "1" })}`;
 
 const hasAdminRole = (role: string | null) =>
   (role ?? "").split(",").some((name) => name.trim() === "admin");
@@ -117,29 +130,36 @@ export const createUserAccounts = ({
 
     /** Accounts that sign in with a password. */
     list: async (): Promise<AccountSummary[]> => {
-      const withPassword = db
-        .select({ userId: authAccount.userId })
-        .from(authAccount)
-        .where(eq(authAccount.providerId, "credential"));
       const rows = await db
         .select({
           name: user.username,
           email: user.email,
           banned: user.banned,
           role: user.role,
+          password: authAccount.password,
         })
         .from(user)
-        .where(inArray(user.id, withPassword))
+        .innerJoin(
+          authAccount,
+          and(
+            eq(authAccount.userId, user.id),
+            eq(authAccount.providerId, "credential")
+          )
+        )
         .orderBy(asc(user.email));
       return rows.map((row) => ({
         name: row.name ?? "",
         email: row.email ?? "",
         disabled: row.banned === true,
         admin: hasAdminRole(row.role),
+        invited: row.password === null,
       }));
     },
 
-    /** Creates a user with its default workspace. */
+    /**
+     * Creates a user with its default workspace. Without a password the user is invited:
+     * they choose a password with a set-password link (createSetPasswordToken).
+     */
     add: async ({
       name: rawName,
       email: rawEmail,
@@ -147,19 +167,31 @@ export const createUserAccounts = ({
     }: {
       name: string;
       email: string;
-      password: string;
+      password?: string;
     }) => {
       const name = rawName.trim();
       const email = normalizeEmail(rawEmail);
       check(validateName(name));
       check(validateEmail(email));
-      check(validatePassword(password));
+      if (password !== undefined) {
+        check(validatePassword(password));
+      }
       if ((await findUser(email)) !== null) {
         throw new AccountError(`${email} already has an account`);
       }
       const { user: created } = await auth.api.createUser({
         body: { email, password, name },
       });
+      if (password === undefined) {
+        // A password account without a password: listed as invited, and sign-in fails
+        // until a set-password link fills it in.
+        const context = await auth.$context;
+        await context.internalAdapter.linkAccount({
+          userId: created.id,
+          providerId: "credential",
+          accountId: created.id,
+        });
+      }
       await db
         .update(user)
         .set({ provider: "password" })
@@ -186,6 +218,27 @@ export const createUserAccounts = ({
         });
       }
       await signOut(id);
+    },
+
+    /**
+     * A one-time token for the password reset page (/login/reset-password?token=…), which
+     * lets the user choose their own password. Used for invites, so it lasts longer than a
+     * reset link the user asks for themselves.
+     */
+    createSetPasswordToken: async (
+      email: string,
+      maxAge = inviteLinkMaxAge
+    ) => {
+      const { id } = await getUser(email);
+      const token = randomBytes(24).toString("base64url");
+      const context = await auth.$context;
+      // Better Auth's reset-password endpoint reads this row (its own resets store the same).
+      await context.internalAdapter.createVerificationValue({
+        identifier: `reset-password:${token}`,
+        value: id,
+        expiresAt: new Date(Date.now() + maxAge * 1000),
+      });
+      return token;
     },
 
     /** Renames the user (the name the builder shows). */

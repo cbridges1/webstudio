@@ -8,6 +8,8 @@ import {
   addUser,
   addUserInput,
   listUsers,
+  resendInvite,
+  resendInviteInput,
   updateUser,
   updateUserInput,
 } from "./users-admin.server";
@@ -26,6 +28,10 @@ export const usersRouter = router({
   add: procedure
     .input(addUserInput)
     .mutation(({ input, ctx }) => respond(() => addUser(input, ctx))),
+
+  resendInvite: procedure
+    .input(resendInviteInput)
+    .mutation(({ input, ctx }) => respond(() => resendInvite(input, ctx))),
 
   update: procedure
     .input(updateUserInput)
