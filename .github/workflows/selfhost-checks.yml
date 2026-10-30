@@ -2,8 +2,8 @@
 # needs the private animation submodule; this one covers selfhost without it. Jobs run in
 # parallel, each installing its own dependencies from the pnpm cache.
 #
-# Suggested required checks (branch protection on selfhost): format, lint, typecheck, test
-# (each suite), build.
+# Suggested required checks (branch protection on selfhost): format, lint, package-boundaries,
+# typecheck, test (each suite), build.
 name: Self-host checks
 
 on:
@@ -61,7 +61,22 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm lint
-      - run: pnpm check:package-boundaries
+
+  package-boundaries:
+    name: package-boundaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # Reads the workspace package.json files only; no install needed.
+      - run: node scripts/check-package-boundaries.mjs
 
   typecheck:
     name: typecheck

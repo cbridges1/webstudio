@@ -118,6 +118,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  # pnpm audit doesn't finish on this lockfile, so the advisories come from OSV (osv-scanner),
+  # narrowed to the packages the builder and deploy service ship (pnpm list --prod).
   deps:
     name: deps
     runs-on: ubuntu-24.04
@@ -132,54 +134,30 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - name: pnpm audit (production deps, high+)
-        shell: bash
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: osv-scanner (pnpm-lock.yaml)
         run: |
-          set -uo pipefail
-          # Human-readable report (a non-zero exit is expected when anything high/critical
-          # exists; the gate is below).
-          pnpm audit --prod --audit-level=high || true
-          set -e
-          pnpm audit --prod --json > pnpm-audit.json || true
-          # Gate: fail on high/critical advisories that have a fix ("<0.0.0" means none).
-          # Advisories with no fix are reported but don't block.
-          jq -r '.advisories // {} | to_entries[] | .value
-                 | select(.severity == "high" or .severity == "critical")
-                 | "\(.severity)\t\(.module_name)\t\(.github_advisory_id // .id)\tfix=\(if .patched_versions == "<0.0.0" then "none" else "available (\(.patched_versions))" end)"' \
-            pnpm-audit.json | sort -u | tee pnpm-audit-high.txt
-          fixable=$(grep -c 'fix=available' pnpm-audit-high.txt || true)
-          if [ "$fixable" -gt 0 ]; then
-            echo "::error::$fixable high/critical production advisories have a fix available (see pnpm audit output above)."
-            exit 1
-          fi
-      - name: Upload pnpm audit report
+          set -euo pipefail
+          docker run --rm -v "$PWD:/src:ro" \
+            ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0 \
+            scan source --lockfile /src/pnpm-lock.yaml --format json > osv.json || true
+          test -s osv.json
+      - name: Gate (new fixable high/critical advisories in production dependencies)
+        run: |
+          set -euo pipefail
+          pnpm --filter @webstudio-is/builder --filter @webstudio-is/deploy \
+            list --prod --depth Infinity --parseable > prod.txt
+          python3 .github/scripts/selfhost-deps-gate.py osv.json prod.txt \
+            .github/selfhost-deps-baseline.txt
+      - name: Upload OSV report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: pnpm-audit
-          path: pnpm-audit.json
+          name: osv
+          path: osv.json
           if-no-files-found: ignore
           retention-days: 30
-
-  osv-scanner:
-    name: osv-scanner
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    # Informational: osv-scanner scans the whole lockfile (dev dependencies and fixtures
-    # included) and has no "only fail when a fix exists" mode, so it would duplicate the deps
-    # gate with a stricter, noisier one. Not a required check.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: osv-scanner (pnpm-lock.yaml)
-        run: |
-          docker run --rm -v "$PWD:/src:ro" \
-            ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0 \
-            scan source --lockfile /src/pnpm-lock.yaml --format table
 
   trivy-config:
     name: trivy-config
